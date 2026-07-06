@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<!-- ==================================================================
+     LONG DOCUMENT · English · parchment design system
+     Auto Geofence Punch — Background Architecture & Design
+     ================================================================== -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Auto Geofence Punch — Background Architecture &amp; Design</title>
+<meta name="author" content="Moksha / Hamshad">
+<meta name="description" content="Technical design document for the auto geofence attendance IN/OUT feature in MAttendance Mobile. Covers background architecture, lifecycle, gate system, and test coverage.">
+<meta name="keywords" content="geofence, background worker, attendance, Flutter, Workmanager, GPS, auto punch, MAttendance">
+<meta name="generator" content="Kami">
+<style>
+  @font-face { font-family: "JetBrains Mono"; src: url("../fonts/JetBrainsMono.woff2") format("woff2"); font-weight: 400; font-style: normal; }
+  @font-face { font-family: "JetBrains Mono"; src: url("../fonts/JetBrainsMono.woff2") format("woff2"); font-weight: 500; font-style: normal; }
+
+  @page {
+    size: A4;
+    margin: 20mm 22mm 22mm 22mm;
+    background: #f5f4ed;
+
+    @top-right {
+      content: string(section-title);
+      font-family: Charter, Georgia, Palatino, serif;
+      font-size: 8pt;
+      color: #6b6a64;
+    }
+
+    @bottom-center {
+      content: counter(page) "  ·  Auto Geofence Punch — Architecture & Design";
+      font-family: Charter, Georgia, Palatino, serif;
+      font-size: 9pt;
+      color: #6b6a64;
+    }
+  }
+  @page:first {
+    @top-right { content: ""; }
+    @bottom-center { content: ""; }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --parchment: #f5f4ed;
+    --ivory:     #faf9f5;
+    --near-black:#141413;
+    --dark-warm: #3d3d3a;
+    --olive:     #504e49;
+    --stone:     #6b6a64;
+    --brand:     #1B365D;
+    --border:    #e8e6dc;
+    --border-soft:#e5e3d8;
+    --tag-bg:    #E4ECF5;
+
+    --serif: Charter, Georgia,
+             Palatino, "Times New Roman", serif;
+    --sans: var(--serif);
+    --mono:  "JetBrains Mono", "SF Mono", "Fira Code",
+             Consolas, Monaco, monospace;
+  }
+
+  html, body { background: var(--parchment); }
+
+  @media screen {
+    body { max-width: 210mm; margin: 0 auto; padding: 20mm 22mm 22mm 22mm; }
+  }
+
+  body {
+    color: var(--near-black);
+    font-family: var(--serif);
+    font-size: 10.5pt;
+    line-height: 1.55;
+    widows: 3;
+    orphans: 3;
+  }
+
+  .sans { font-family: var(--sans); }
+
+  .cover {
+    min-height: 240mm;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 40mm 0 0 0;
+    break-after: page;
+  }
+  .cover-eyebrow {
+    font-family: var(--sans);
+    font-size: 10pt;
+    color: var(--brand);
+    letter-spacing: 2pt;
+    text-transform: uppercase;
+    font-weight: 500;
+    margin-bottom: 18pt;
+  }
+  .cover-title {
+    font-size: 40pt;
+    font-weight: 500;
+    color: var(--near-black);
+    line-height: 1.12;
+    letter-spacing: -0.5pt;
+    margin-bottom: 16pt;
+  }
+  .cover-sub {
+    font-family: var(--sans);
+    font-size: 14pt;
+    color: var(--olive);
+    line-height: 1.45;
+    max-width: 85%;
+    margin-bottom: 30pt;
+  }
+  .cover-meta {
+    font-family: var(--sans);
+    font-size: 10pt;
+    color: var(--stone);
+    line-height: 1.55;
+    font-variant-numeric: tabular-nums;
+  }
+  .cover-meta strong { color: var(--dark-warm); font-weight: 500; }
+
+  .toc { break-after: page; }
+  .toc h2 {
+    font-size: 22pt;
+    font-weight: 500;
+    margin-bottom: 14pt;
+    border-left: 2.5pt solid var(--brand);
+    border-radius: 1.5pt;
+    padding-left: 8pt;
+  }
+  .toc-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 6pt 0;
+    border-bottom: 0.3pt dotted var(--border);
+    font-size: 11pt;
+  }
+  .toc-item:last-of-type { border-bottom: none; }
+  .toc-num {
+    color: var(--brand);
+    font-weight: 500;
+    min-width: 30pt;
+    font-variant-numeric: tabular-nums;
+  }
+  .toc-title {
+    flex: 1;
+    color: var(--near-black);
+    padding-left: 6pt;
+  }
+  .toc-page {
+    color: var(--stone);
+    font-variant-numeric: tabular-nums;
+  }
+
+  h1 {
+    font-size: 24pt;
+    font-weight: 500;
+    line-height: 1.15;
+    letter-spacing: -0.3pt;
+    margin: 0 0 10pt 0;
+    border-left: 2.5pt solid var(--brand);
+    border-radius: 1.5pt;
+    padding-left: 8pt;
+    color: var(--near-black);
+    break-after: avoid;
+  }
+  h2 {
+    font-size: 16pt;
+    font-weight: 500;
+    line-height: 1.25;
+    margin: 24pt 0 8pt 0;
+    color: var(--near-black);
+    break-after: avoid;
+    string-set: section-title content();
+  }
+  h3 {
+    font-size: 13pt;
+    font-weight: 500;
+    line-height: 1.3;
+    margin: 18pt 0 6pt 0;
+    color: var(--dark-warm);
+    break-after: avoid;
+  }
+
+  .chapter-num {
+    font-family: var(--sans);
+    font-size: 10pt;
+    color: var(--brand);
+    letter-spacing: 1pt;
+    text-transform: uppercase;
+    font-weight: 500;
+    margin-bottom: 6pt;
+  }
+
+  p { margin: 0 0 10pt 0; line-height: 1.55; color: var(--near-black); widows: 2; orphans: 2; }
+
+  .lead {
+    font-size: 12pt;
+    line-height: 1.55;
+    color: var(--dark-warm);
+    margin-bottom: 14pt;
+  }
+
+  .hl { color: var(--brand); font-weight: 500; }
+  strong { font-weight: 500; }
+
+  ul, ol {
+    margin: 6pt 0 10pt 0;
+    padding-left: 20pt;
+    line-height: 1.55;
+  }
+  ul li::marker { color: var(--brand); }
+  ol li::marker { color: var(--brand); font-weight: 500; }
+
+  blockquote, .quote {
+    border-left: 2pt solid var(--brand);
+    margin: 12pt 0;
+    padding: 4pt 0 4pt 16pt;
+    color: var(--olive);
+    line-height: 1.55;
+    break-inside: avoid;
+  }
+  blockquote .cite, .quote .cite {
+    display: block;
+    font-family: var(--sans);
+    font-size: 9pt;
+    color: var(--stone);
+    margin-top: 4pt;
+  }
+
+  code {
+    font-family: var(--mono);
+    font-size: 9pt;
+    background: var(--ivory);
+    padding: 1pt 4pt;
+    border-radius: 2pt;
+    color: var(--dark-warm);
+  }
+  pre {
+    font-family: var(--mono);
+    font-size: 9pt;
+    line-height: 1.5;
+    background: var(--ivory);
+    border-radius: 4pt;
+    padding: 10pt 14pt;
+    margin: 10pt 0;
+    white-space: pre-wrap;
+    color: var(--near-black);
+    break-inside: avoid;
+  }
+  pre code { background: transparent; padding: 0; font-size: inherit; }
+
+  table, .kami-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9.5pt;
+    margin: 12pt 0;
+    break-inside: avoid;
+  }
+  table th, .kami-table th {
+    text-align: left;
+    font-family: var(--sans);
+    font-weight: 500;
+    color: var(--dark-warm);
+    padding: 6pt 8pt;
+    border-bottom: 1pt solid var(--border);
+    background: var(--ivory);
+  }
+  table td, .kami-table td {
+    padding: 5pt 8pt;
+    border-bottom: 0.3pt solid var(--border-soft);
+    vertical-align: top;
+  }
+  table.compact th, .kami-table.compact th { padding: 3pt 6pt; font-size: 8pt; }
+  table.compact td, .kami-table.compact td { padding: 2pt 6pt; font-size: 8pt; line-height: 1.4; }
+
+  .callout {
+    background: var(--ivory);
+    border-left: 2pt solid var(--brand);
+    padding: 10pt 14pt;
+    border-radius: 3pt;
+    margin: 12pt 0;
+    line-height: 1.55;
+    break-inside: avoid;
+  }
+  .callout blockquote,
+  .callout .quote {
+    border-left: none;
+    padding-left: 0;
+    margin: 6pt 0;
+    color: var(--olive);
+  }
+  .callout blockquote:first-child,
+  .callout .quote:first-child { margin-top: 0; }
+  .callout blockquote:last-child,
+  .callout .quote:last-child  { margin-bottom: 0; }
+  .takeaway {
+    background: var(--ivory);
+    border-radius: 4pt;
+    padding: 10pt 14pt;
+    margin: 14pt 0;
+    break-inside: avoid;
+  }
+  .takeaway-label {
+    font-family: var(--sans);
+    font-size: 9pt;
+    color: var(--brand);
+    letter-spacing: 1pt;
+    text-transform: uppercase;
+    font-weight: 500;
+    margin-bottom: 4pt;
+  }
+
+  .tag {
+    display: inline-block;
+    background: var(--tag-bg);
+    color: var(--brand);
+    font-family: var(--sans);
+    font-size: 9pt;
+    font-weight: 500;
+    padding: 1pt 6pt;
+    border-radius: 3pt;
+    letter-spacing: 0.4pt;
+    text-transform: uppercase;
+    margin-right: 4pt;
+  }
+
+  figure { margin: 14pt 0; break-inside: avoid; }
+  figure img { max-width: 100%; border-radius: 4pt; }
+  figcaption {
+    font-family: var(--sans);
+    font-size: 9pt;
+    color: var(--stone);
+    margin-top: 6pt;
+    text-align: center;
+  }
+
+  .chapter { break-before: page; }
+
+  .glance-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14pt;
+    margin: 18pt 0;
+  }
+  .glance-cell {
+    padding: 12pt 0 10pt 14pt;
+    border-left: 2pt solid var(--brand);
+    border-radius: 1.5pt;
+  }
+  .glance-label {
+    font-family: var(--mono);
+    font-size: 8.5pt;
+    color: var(--brand);
+    letter-spacing: 1pt;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  .glance-value {
+    font-size: 18pt;
+    font-weight: 500;
+    color: var(--near-black);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.5pt;
+  }
+  .glance-note {
+    font-size: 9pt;
+    color: var(--olive);
+    line-height: 1.4;
+  }
+</style>
+</head>
+<body>
+
+<!-- COVER -->
+<section class="cover">
+  <div>
+    <div class="cover-eyebrow">Technical Design Document</div>
+    <div class="cover-title">Auto Geofence Punch<br>Background Architecture &amp; Design</div>
+    <div class="cover-sub">How hands-free attendance IN/OUT works when the app is killed &mdash; covering the background worker, scheduler, gate system, and 37-test verification suite.</div>
+  </div>
+  <div class="cover-meta">
+    <strong>Moksha / Hamshad</strong><br>
+    Version 1.0 &middot; 2026.06<br>
+    MAttendance Mobile
+  </div>
+</section>
+
+<!-- TOC -->
+<section class="toc">
+  <h2>Contents</h2>
+  <div class="toc-item"><span class="toc-num">01</span><span class="toc-title">Executive Summary</span><span class="toc-page">03</span></div>
+  <div class="toc-item"><span class="toc-num">02</span><span class="toc-title">System Architecture</span><span class="toc-page">04</span></div>
+  <div class="toc-item"><span class="toc-num">03</span><span class="toc-title">Geofence Monitoring Lifecycle</span><span class="toc-page">06</span></div>
+  <div class="toc-item"><span class="toc-num">04</span><span class="toc-title">Gate System &amp; Decision Logic</span><span class="toc-page">08</span></div>
+  <div class="toc-item"><span class="toc-num">05</span><span class="toc-title">Testing Strategy &amp; Coverage</span><span class="toc-page">10</span></div>
+  <div class="toc-item"><span class="toc-num">06</span><span class="toc-title">Appendix</span><span class="toc-page">12</span></div>
+</section>
+
+<!-- Chapter 01 -->
+<section class="chapter">
+  <div class="chapter-num">01 &middot; Executive Summary</div>
+  <h1>Executive Summary</h1>
+
+  <p class="lead">
+    The auto geofence punch feature automates attendance <span class="hl">IN</span> and <span class="hl">OUT</span> punches using GPS proximity to configured office geofences, operating as an Android foreground service launched by Workmanager even when the app has been killed. It monitors GPS position against a set of office zones, detects entry and exit events, and calls the punch API automatically &mdash; requiring zero user interaction for daily attendance.
+  </p>
+
+  <h2>Key Takeaways</h2>
+  <ul>
+    <li><span class="hl">Zero-touch attendance</span>: IN/OUT punches happen without any user interaction, triggered purely by GPS location relative to office geofences.</li>
+    <li><span class="hl">Survives app termination</span>: On Android, Workmanager re-launches the foreground service at shift start even when the app was killed. iOS uses BGTaskScheduler with best-effort guarantees.</li>
+    <li><span class="hl">Four-layer gate protection</span>: GPS accuracy filtering, cooldown debouncing, server-status reconciliation, and shift-hours validation prevent false or duplicate punches.</li>
+    <li><span class="hl">37 unit tests</span>: A dedicated test suite verifies the full lifecycle, all gate conditions, error handling, and edge cases including disabled feature, no network, and rapid IN/OUT transitions.</li>
+  </ul>
+
+  <div class="takeaway">
+    <div class="takeaway-label">Questions this document answers</div>
+    How does the background worker detect geo-proximity and decide to punch IN or OUT? What happens when the app is killed &mdash; how does the service restart? What gates prevent false or duplicate punches under real-world GPS conditions?
+  </div>
+</section>
+
+<!-- Chapter 02 -->
+<section class="chapter">
+  <div class="chapter-num">02 &middot; System Architecture</div>
+  <h1>System Architecture</h1>
+
+  <p class="lead">
+    The geofence auto-punch system is composed of three layers that each own a distinct concern: the <span class="hl">entrypoint</span> manages the Dart isolate lifecycle and GPS stream, the <span class="hl">worker</span> owns proximity decisions and gate checks, and the <span class="hl">scheduler</span> handles alarm registration and persistence.
+  </p>
+
+  <h2>Layer Overview</h2>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Layer</th>
+        <th>File</th>
+        <th>Responsibility</th>
+        <th>Key Classes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="hl">Entrypoint</span></td>
+        <td><code>geofence_bg_entrypoint.dart</code></td>
+        <td>Isolate lifecycle, GPS subscription, accuracy gate, location filtering, confidence scoring</td>
+        <td><code>geofenceBgEntrypoint</code>, <code>LocationFilter</code>, <code>ConfidenceScorer</code></td>
+      </tr>
+      <tr>
+        <td><span class="hl">Worker</span></td>
+        <td><code>geofence_background_worker.dart</code></td>
+        <td>Proximity detection, entry/exit decision logic, all gate checks, punch API calls</td>
+        <td><code>GeofenceBackgroundWorker</code>, <code>ExitTrendAnalyzer</code></td>
+      </tr>
+      <tr>
+        <td><span class="hl">Scheduler</span></td>
+        <td><code>geofence_scheduler.dart</code></td>
+        <td>Workmanager task registration, shift alarm scheduling, persistence of alarm state</td>
+        <td><code>GeofenceScheduler</code>, <code>Workmanager</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Entrypoint Layer</h2>
+  <p>
+    Marked with <code>@pragma('vm:entry-point')</code>, the entrypoint function <code>geofenceBgEntrypoint</code> runs in a separate Dart isolate owned by Android's foreground service. It initializes Flutter bindings, instantiates the worker, calls <code>loadData()</code> to fetch offices and shifts, then subscribes to <code>Geolocator.getPositionStream</code> with high accuracy. Each incoming GPS position passes through an accuracy gate (<span class="hl">30m minimum</span>), the <code>LocationFilter</code> for jump and speed filtering, and the <code>ConfidenceScorer</code> before reaching the worker.
+  </p>
+
+  <h2>Worker Layer</h2>
+  <p>
+    <code>GeofenceBackgroundWorker</code> receives filtered location fixes and runs the full decision tree. It caches offices and shifts in memory, manages a shift-window timer, and tracks pending exit state. The worker accepts an optional <code>Dio?</code> parameter for test injection, avoiding the need for global HTTP mocking.
+  </p>
+
+  <h2>Scheduler Layer</h2>
+  <p>
+    <code>GeofenceScheduler</code> registers a one-time Workmanager task (<code>geofence_shift_start</code>) with a delay calculated from the current time to the next shift start. When the task fires, it checks whether the background service is already running; if not, it configures <code>FlutterBackgroundService</code> with the geofence entrypoint and starts it. The scheduler persists the next alarm time and shift name in <code>SharedPreferences</code> for diagnostics.
+  </p>
+
+  <div class="callout">
+    <strong>Android vs iOS reliability</strong>. Workmanager on Android uses WorkManager API, which survives app kill and device reboot. On iOS it falls back to BGTaskScheduler with an approximately 15-minute execution window. The geofence feature is designed for Android as the primary target; iOS is best-effort.
+  </div>
+</section>
+
+<!-- Chapter 03 -->
+<section class="chapter">
+  <div class="chapter-num">03 &middot; Lifecycle</div>
+  <h1>Geofence Monitoring Lifecycle</h1>
+
+  <p class="lead">
+    The monitoring lifecycle spans from app termination through shift-end stop, covering <span class="hl">10 distinct stages</span>. Each stage is independently testable and verified by the 37-test suite.
+  </p>
+
+  <h2>Full Lifecycle Stages</h2>
+
+  <ol>
+    <li><strong>Workmanager fires</strong>. The OS-triggered alarm calls <code>GeofenceScheduler._callback</code> with task name <code>geofence_shift_start</code>. The initial delay was set during the previous punch-out (or at app init).</li>
+    <li><strong>Background service configured</strong>. If <code>FlutterBackgroundService</code> is not already running, the callback calls <code>svc.configure()</code> with the geofence entrypoint (<code>geofenceBgEntrypoint</code>), foreground mode, location notification channel, and <code>AndroidForegroundType.location</code>.</li>
+    <li><strong>Service starts</strong>. <code>svc.startService()</code> launches a new Dart isolate running the entrypoint function. A heartbeat timer (every 5 min) keeps the service alive on Android.</li>
+    <li><strong>Data loaded</strong>. The entrypoint calls <code>geoWorker.loadData()</code>, which builds a Dio client using the stored access token, then fetches office list and shift definitions from the API. Results are cached in memory for the duration of the service.</li>
+    <li><strong>GPS stream subscribed</strong>. The entrypoint opens a <code>Geolocator.getPositionStream()</code> subscription with high accuracy, zero distance filter. On iOS, <code>allowBackgroundLocationUpdates</code> and <code>pauseLocationUpdatesAutomatically: false</code> are set.</li>
+    <li><strong>Accuracy gate applied</strong>. Raw positions with <code>accuracy > 30m</code> (MIN_ACCURACY) are discarded immediately. The remainder pass through <code>LocationFilter.process()</code> for jump detection and speed smoothing.</li>
+    <li><strong>Confidence scored</strong>. <code>ConfidenceScorer.score()</code> computes a confidence value based on accuracy, tracking state, and jump score. Scores below <code>CONFIDENCE_THRESHOLD</code> suppress entry detection.</li>
+    <li><strong>Entry or exit detected</strong>. The worker's <code>onLocationFix()</code> runs entry check (distance to office center &le; geofence radius) and exit check (distance &gt; radius + GPS margin, with trend confirmation). Both pass through cooldown, server-status, and shift-hours gates before calling the punch API.</li>
+    <li><strong>Punch called &amp; next shift scheduled</strong>. On successful punch-IN, the worker updates local state and invokes <code>gf_punch</code> on the service instance. On punch-OUT, it additionally calls <code>GeofenceScheduler.scheduleNextShift()</code> to register the next day's alarm, then invokes <code>stop</code> to shut down the GPS stream and foreground service.</li>
+    <li><strong>Service stopped</strong>. The <code>stop</code> handler cancels the position subscription, cancels the heartbeat timer, sets <code>running = false</code>, and calls <code>service.stopSelf()</code>. The isolate terminates until the next Workmanager alarm.</li>
+  </ol>
+
+  <div class="callout">
+    <strong>Overtime handling</strong>. When the shift end time passes but the user is still punched IN, the worker keeps monitoring until an OUT is detected. Only after OUT does it schedule the next shift and stop the service.
+  </div>
+
+  <h2>Shift Timer Management</h2>
+  <p>
+    The worker computes three shift states via <code>_scheduleShiftWindow()</code>:
+  </p>
+  <table class="compact">
+    <thead>
+      <tr><th>State</th><th>Condition</th><th>Action</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Before shift</td><td><code>now &lt; todayStart</code></td><td>Schedule a <code>Timer</code> to activate at start; GPS ignored</td></tr>
+      <tr><td>In shift</td><td><code>todayStart &le; now &lt; todayEnd</code></td><td>Monitoring active; GPS processed</td></tr>
+      <tr><td>After shift</td><td><code>now &ge; todayEnd</code></td><td>If OUT: schedule tomorrow's timer; else keep monitoring (overtime)</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- Chapter 04 -->
+<section class="chapter">
+  <div class="chapter-num">04 &middot; Gate System</div>
+  <h1>Gate System &amp; Decision Logic</h1>
+
+  <p class="lead">
+    Before calling the punch API, every potential IN or OUT event passes through a series of <span class="hl">seven decision gates</span>. Each gate checks one axis of validity; all gates must pass for a punch to proceed.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Gate</th><th>Check</th><th>Purpose</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><span class="hl">1. GPS Accuracy</span></td><td><code>raw.accuracy &le; 30m</code></td><td>Reject GPS fixes with poor accuracy (e.g. indoor drift, weak signal)</td></tr>
+      <tr><td><span class="hl">2. Entry Confidence</span></td><td><code>confidence &ge; CONFIDENCE_THRESHOLD</code></td><td>Only punch IN when the location filter is confident the device is stable</td></tr>
+      <tr><td><span class="hl">3. Exit Trend</span></td><td>Successive outside fixes confirmed by <code>ExitTrendAnalyzer</code></td><td>Avoid spurious OUT from momentary GPS noise outside radius</td></tr>
+      <tr><td><span class="hl">4. Cooldown</span></td><td><code>same direction &amp; &lt; 5 min since last punch</code></td><td>Prevent rapid IN/OUT flips from borderline GPS positions</td></tr>
+      <tr><td><span class="hl">5. Server Status</span></td><td><code>/todayStatus</code> API: <code>isPunchedIn</code>, <code>isPunchedOut</code>, <code>hasNotPunchedIn</code></td><td>Reconcile with server state before any punch</td></tr>
+      <tr><td><span class="hl">6. Shift Hours</span></td><td>Local: <code>now &ge; todayStart</code>; Server: <code>currentShift</code> name match</td><td>Respect configured shift start/end times</td></tr>
+      <tr><td><span class="hl">7. Feature Toggle</span></td><td><code>geofence_auto_enabled</code> SharedPreference</td><td>Allow users to disable auto geofence without revoking location permission</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Gate 1 &mdash; GPS Accuracy</h2>
+  <p>
+    Applied at the entrypoint level before the position reaches the worker. The threshold is <span class="hl">30 meters</span> (<code>LocationFilter.MIN_ACCURACY</code>). Fixes with accuracy above this value are silently dropped. This is the first line of defense against noisy GPS data common near building entrances or in urban canyons.
+  </p>
+
+  <h2>Gate 2 &mdash; Entry Confidence</h2>
+  <p>
+    The <code>ConfidenceScorer</code> combines accuracy, speed, tracking state, and jump score into a single value. Entry detection only fires when this value meets <code>CONFIDENCE_THRESHOLD</code>. This prevents IN punches during brief moments of GPS wander near the boundary.
+  </p>
+
+  <h2>Gate 3 &mdash; Exit Trend</h2>
+  <p>
+    Exits are not triggered on a single outside fix. Instead, the worker calculates a <span class="hl">GPS margin</span> (max of 10m and the current accuracy), then starts tracking if the position is beyond the radius plus margin. Subsequent positions feed into <code>ExitTrendAnalyzer</code>, which confirms an exit trend over multiple samples. If the device re-enters the zone, the trend resets.
+  </p>
+
+  <h2>Gate 4 &mdash; Cooldown</h2>
+  <p>
+    After any punch, subsequent punches of the <span class="hl">same direction</span> are blocked for 5 minutes. IN after OUT has a separate 2-minute debounce (shorter because transitioning from OUT to IN is common during lunch). Opposite-direction punches (IN after OUT past 2 min, or OUT after IN past 5 min) are allowed.
+  </p>
+
+  <h2>Gate 5 &mdash; Server Status</h2>
+  <p>
+    Before punching, the worker calls <code>/todayStatus</code>. If the server reports the user is already punched IN, an IN punch is skipped. If it reports already punched OUT or no IN today, an OUT punch is skipped. Network failures at this gate cause the worker to skip IN (conservative) but allow OUT (best-effort).
+  </p>
+
+  <h2>Gate 6 &mdash; Shift Hours</h2>
+  <p>
+    Two sub-checks: a local check using the cached shift's <code>todayStart</code>, and a server-side check using the <code>currentShift</code> name from the status response. Both must agree that the current time is within the shift window. This prevents early IN punches and after-hours punches even if the server is unreachable for the server check.
+  </p>
+
+  <h2>Gate 7 &mdash; Feature Toggle</h2>
+  <p>
+    The <code>geofence_auto_enabled</code> boolean in SharedPreferences serves as a master switch. When disabled, the worker returns early from <code>onLocationFix</code> without any processing. This allows users to opt out without revoking location permissions.
+  </p>
+
+  <div class="callout">
+    <strong>Gate ordering matters</strong>. Cheap checks (feature toggle, accuracy) run first. Expensive checks (server API calls) run last. This minimizes network requests when a local gate would reject the punch anyway.
+  </div>
+</section>
+
+<!-- Chapter 05 -->
+<section class="chapter">
+  <div class="chapter-num">05 &middot; Testing</div>
+  <h1>Testing Strategy &amp; Coverage</h1>
+
+  <p class="lead">
+    The test suite at <code>test/features/punch/services/geofence_background_worker_test.dart</code> contains <span class="hl">37 tests</span> organized into 8 categories, covering the full worker lifecycle from data loading through punch API calls to service stop.
+  </p>
+
+  <h2>Test Infrastructure</h2>
+  <p>
+    Tests use a <code>_FakeServiceInstance</code> that records all <code>invoke</code> and <code>stopSelf</code> calls, and a <code>_MockInterceptor</code> that simulates API responses while tracking punch state across calls. The worker is constructed with a test <code>Dio</code> instance, avoiding global HTTP mocking.
+  </p>
+
+  <h2>Test Categories</h2>
+
+  <table>
+    <thead>
+      <tr><th>Category</th><th>Count</th><th>What It Verifies</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Data Loading</td><td>3</td><td>Offices and shifts fetched successfully; skip when no token available</td></tr>
+      <tr><td>Entry Detection</td><td>5</td><td>Punch IN when inside geofence radius; debounce IN after recent OUT; multiple office selection</td></tr>
+      <tr><td>Exit Detection</td><td>5</td><td>Exit trend tracking when outside radius + margin; trend confirmation triggers OUT; re-entry resets pending state</td></tr>
+      <tr><td>Cooldown</td><td>4</td><td>Same-direction cooldown within 5 min; expiry after 5+ min; opposite-direction not blocked</td></tr>
+      <tr><td>Server Status</td><td>4</td><td>Already punched IN skips IN; already punched OUT skips OUT; no IN today skips OUT; unreachable server skips IN</td></tr>
+      <tr><td>Shift Hours</td><td>4</td><td>IN before shift start skipped (local check); server shift name mismatch blocks IN; post-shift OUT allowed</td></tr>
+      <tr><td>Full Lifecycle</td><td>4</td><td>IN followed by OUT completes full cycle; OUT triggers stop; Workmanager alarm scheduled; daily repeat cycle</td></tr>
+      <tr><td>Edge Cases</td><td>8</td><td>Disabled feature toggle; no shifts configured; no offices configured; missing access token; low GPS accuracy; already punched in at server level; rapid IN/OUT flips; error during punch API call</td></tr>
+    </tbody>
+  </table>
+
+  <div class="glance-grid">
+    <div class="glance-cell">
+      <div class="glance-label">Total Tests</div>
+      <div class="glance-value">37</div>
+      <div class="glance-note">Across 8 categories</div>
+    </div>
+    <div class="glance-cell">
+      <div class="glance-label">Categories</div>
+      <div class="glance-value">8</div>
+      <div class="glance-note">Data loading through edge cases</div>
+    </div>
+    <div class="glance-cell">
+      <div class="glance-label">Lifecycle</div>
+      <div class="glance-value">4</div>
+      <div class="glance-note">IN &rarr; OUT &rarr; stop &rarr; repeat</div>
+    </div>
+    <div class="glance-cell">
+      <div class="glance-label">Pre-existing</div>
+      <div class="glance-value">20</div>
+      <div class="glance-note">Unchanged, all pass</div>
+    </div>
+  </div>
+
+  <h2>Key Scenarios</h2>
+
+  <h3>Rapid IN/OUT Flip</h3>
+  <p>
+    If a user walks near the geofence boundary and briefly crosses it, the cooldown gate prevents a second IN within 5 minutes of the first. The exit-trend gate prevents OUT on a single outside fix.
+  </p>
+
+  <h3>App Killed, Shift Start</h3>
+  <p>
+    Workmanager fires the alarm. The callback checks service state, configures the background service if not running, and starts it. The entrypoint loads data and begins GPS monitoring. This path is verified by the lifecycle test category.
+  </p>
+
+  <h3>Overtime Monitoring</h3>
+  <p>
+    If the shift end passes while the user is still IN, the worker keeps monitoring. Only after the OUT punch does it schedule the next shift and stop. This prevents an unintended early OUT at shift end.
+  </p>
+</section>
+
+<!-- Chapter 06 -->
+<section class="chapter">
+  <div class="chapter-num">06 &middot; Appendix</div>
+  <h1>Appendix</h1>
+
+  <h2>A. File Index</h2>
+  <table class="compact">
+    <thead>
+      <tr><th>File</th><th>Lines</th><th>Purpose</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>lib/features/punch/services/geofence_background_worker.dart</code></td><td>452</td><td>Core worker: proximity detection, gate logic, punch API calls</td></tr>
+      <tr><td><code>lib/features/punch/services/geofence_bg_entrypoint.dart</code></td><td>112</td><td>Background isolate entrypoint: lifecycle, GPS stream, accuracy gate</td></tr>
+      <tr><td><code>lib/features/punch/services/geofence_scheduler.dart</code></td><td>152</td><td>Workmanager alarm registration, shift scheduling, persistence</td></tr>
+      <tr><td><code>test/features/punch/services/geofence_background_worker_test.dart</code></td><td>770</td><td>37 tests covering full worker lifecycle</td></tr>
+      <tr><td><code>pubspec.yaml</code></td><td>&mdash;</td><td>Dependency declarations; <code>workmanager</code> bumped to <code>^0.9.0+3</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>B. Glossary</h2>
+  <p><strong>Geofence</strong> &mdash; A virtual perimeter around a physical office location, defined by a center (lat/lng) and radius in meters.</p>
+  <p><strong>Workmanager</strong> &mdash; Flutter plugin wrapping Android's WorkManager API and iOS BGTaskScheduler for persistent background task scheduling.</p>
+  <p><strong>Foreground service</strong> &mdash; An Android service that runs with a persistent notification, less likely to be killed by the OS than a background service.</p>
+  <p><strong>ExitTrendAnalyzer</strong> &mdash; Internal component that tracks successive GPS positions outside a geofence and confirms a genuine exit trend before allowing an OUT punch.</p>
+  <p><strong>GPS margin</strong> &mdash; An adaptive buffer added to the geofence radius (max of 10m and current GPS accuracy) to prevent spurious exit detection from GPS noise.</p>
+  <p><strong>Cooldown</strong> &mdash; A 5-minute window after any punch during which punches of the same direction are suppressed. IN after OUT has a shorter 2-minute debounce.</p>
+
+  <h2>C. References</h2>
+  <ul>
+    <li><code>pub.dev/packages/workmanager</code> &mdash; Background task scheduling API</li>
+    <li><code>pub.dev/packages/flutter_background_service</code> &mdash; Foreground service management</li>
+    <li><code>pub.dev/packages/geolocator</code> &mdash; GPS position streaming and distance calculation</li>
+    <li><code>geofence_background_worker.dart</code> &mdash; Core worker implementation (452 lines)</li>
+    <li><code>geofence_background_worker_test.dart</code> &mdash; 37-test verification suite (770 lines)</li>
+  </ul>
+</section>
+
+</body>
+</html>

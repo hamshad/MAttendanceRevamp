@@ -1,0 +1,1115 @@
+<!DOCTYPE html>
+<!-- ==================================================================
+     LONG DOCUMENT · English · parchment design system
+     Production-Grade Geofence Attendance Tracking - Project Plan
+     ================================================================== -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Production Geofence Attendance Tracking - Project Plan</title>
+<meta name="author" content="MAttendance Engineering Team">
+<meta name="description" content="Project plan for implementing production-grade geofence-based attendance tracking with GPS glitch handling, Kalman filtering, and confidence scoring inspired by Uber/Swiggy practices.">
+<meta name="keywords" content="geofence, attendance, GPS, Kalman filter, Flutter, location tracking, confidence scoring">
+<meta name="generator" content="Kami">
+<style>
+  /* Palatino is a system font, no @font-face needed */
+  @font-face { font-family: "JetBrains Mono"; src: url("../fonts/JetBrainsMono.woff2") format("woff2"); font-weight: 400; font-style: normal; }
+  @font-face { font-family: "JetBrains Mono"; src: url("../fonts/JetBrainsMono.woff2") format("woff2"); font-weight: 500; font-style: normal; }
+
+  @page {
+    size: A4;
+    margin: 20mm 22mm 22mm 22mm;
+    background: #f5f4ed;
+
+    @top-right {
+      content: string(section-title);
+      font-family: Charter, Georgia, Palatino, serif;
+      font-size: 8pt;
+      color: #6b6a64;
+    }
+
+    @bottom-center {
+      content: counter(page) "  ·  Geofence Tracking Project Plan";
+      font-family: Charter, Georgia, Palatino, serif;
+      font-size: 9pt;
+      color: #6b6a64;
+    }
+  }
+  @page:first {
+    @top-right { content: ""; }
+    @bottom-center { content: ""; }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --parchment: #f5f4ed;
+    --ivory:     #faf9f5;
+    --near-black:#141413;
+    --dark-warm: #3d3d3a;
+    --olive:     #504e49;
+    --stone:     #6b6a64;
+    --brand:     #1B365D;
+    --border:    #e8e6dc;
+    --border-soft:#e5e3d8;
+    --tag-bg:    #E4ECF5;
+
+    --serif: Charter, Georgia,
+             Palatino, "Times New Roman", serif;
+    --sans: var(--serif);
+    --mono:  "JetBrains Mono", "SF Mono", "Fira Code",
+             Consolas, Monaco, monospace;
+  }
+
+  html, body { background: var(--parchment); }
+
+  @media screen {
+    body { max-width: 210mm; margin: 0 auto; padding: 20mm 22mm 22mm 22mm; }
+  }
+
+  body {
+    color: var(--near-black);
+    font-family: var(--serif);
+    font-size: 10.5pt;
+    line-height: 1.55;
+    widows: 3;
+    orphans: 3;
+  }
+
+  .sans { font-family: var(--sans); }
+
+  /* COVER */
+  .cover {
+    min-height: 240mm;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 40mm 0 0 0;
+    break-after: page;
+  }
+  .cover-eyebrow {
+    font-family: var(--sans);
+    font-size: 10pt;
+    color: var(--brand);
+    letter-spacing: 2pt;
+    text-transform: uppercase;
+    font-weight: 500;
+    margin-bottom: 18pt;
+  }
+  .cover-title {
+    font-size: 40pt;
+    font-weight: 500;
+    color: var(--near-black);
+    line-height: 1.12;
+    letter-spacing: -0.5pt;
+    margin-bottom: 16pt;
+  }
+  .cover-sub {
+    font-family: var(--sans);
+    font-size: 14pt;
+    color: var(--olive);
+    line-height: 1.45;
+    max-width: 85%;
+    margin-bottom: 30pt;
+  }
+  .cover-meta {
+    font-family: var(--sans);
+    font-size: 10pt;
+    color: var(--stone);
+    line-height: 1.55;
+    font-variant-numeric: tabular-nums;
+  }
+  .cover-meta strong { color: var(--dark-warm); font-weight: 500; }
+
+  /* TOC */
+  .toc { break-after: page; }
+  .toc h2 {
+    font-size: 22pt;
+    font-weight: 500;
+    margin-bottom: 14pt;
+    border-left: 2.5pt solid var(--brand);
+    border-radius: 1.5pt;
+    padding-left: 8pt;
+  }
+  .toc-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 6pt 0;
+    border-bottom: 0.3pt dotted var(--border);
+    font-size: 11pt;
+  }
+  .toc-item:last-of-type { border-bottom: none; }
+  .toc-num {
+    color: var(--brand);
+    font-weight: 500;
+    min-width: 30pt;
+    font-variant-numeric: tabular-nums;
+  }
+  .toc-title {
+    flex: 1;
+    color: var(--near-black);
+    padding-left: 6pt;
+  }
+  .toc-page {
+    color: var(--stone);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* HEADINGS */
+  h1 {
+    font-size: 24pt;
+    font-weight: 500;
+    line-height: 1.15;
+    letter-spacing: -0.3pt;
+    margin: 0 0 10pt 0;
+    border-left: 2.5pt solid var(--brand);
+    border-radius: 1.5pt;
+    padding-left: 8pt;
+    color: var(--near-black);
+    break-after: avoid;
+  }
+  h2 {
+    font-size: 16pt;
+    font-weight: 500;
+    line-height: 1.25;
+    margin: 24pt 0 8pt 0;
+    color: var(--near-black);
+    break-after: avoid;
+    string-set: section-title content();
+  }
+  h3 {
+    font-size: 13pt;
+    font-weight: 500;
+    line-height: 1.3;
+    margin: 18pt 0 6pt 0;
+    color: var(--dark-warm);
+    break-after: avoid;
+  }
+
+  .chapter-num {
+    font-family: var(--sans);
+    font-size: 10pt;
+    color: var(--brand);
+    letter-spacing: 1pt;
+    text-transform: uppercase;
+    font-weight: 500;
+    margin-bottom: 6pt;
+  }
+
+  /* PARAGRAPHS */
+  p { margin: 0 0 10pt 0; line-height: 1.55; color: var(--near-black); widows: 2; orphans: 2; }
+
+  .lead {
+    font-size: 12pt;
+    line-height: 1.55;
+    color: var(--dark-warm);
+    margin-bottom: 14pt;
+  }
+
+  .hl { color: var(--brand); font-weight: 500; }
+  strong { font-weight: 500; }
+
+  /* LISTS */
+  ul, ol {
+    margin: 6pt 0 10pt 0;
+    padding-left: 20pt;
+    line-height: 1.55;
+  }
+  ul li::marker { color: var(--brand); }
+  ol li::marker { color: var(--brand); font-weight: 500; }
+
+  /* QUOTE */
+  blockquote, .quote {
+    border-left: 2pt solid var(--brand);
+    margin: 12pt 0;
+    padding: 4pt 0 4pt 16pt;
+    color: var(--olive);
+    line-height: 1.55;
+    break-inside: avoid;
+  }
+  blockquote .cite, .quote .cite {
+    display: block;
+    font-family: var(--sans);
+    font-size: 9pt;
+    color: var(--stone);
+    margin-top: 4pt;
+  }
+
+  /* CODE */
+  code {
+    font-family: var(--mono);
+    font-size: 9pt;
+    background: var(--ivory);
+    padding: 1pt 4pt;
+    border-radius: 2pt;
+    color: var(--dark-warm);
+  }
+  pre {
+    font-family: var(--mono);
+    font-size: 9pt;
+    line-height: 1.5;
+    background: var(--ivory);
+    border-radius: 4pt;
+    padding: 10pt 14pt;
+    margin: 10pt 0;
+    white-space: pre-wrap;
+    color: var(--near-black);
+    break-inside: avoid;
+  }
+  pre code { background: transparent; padding: 0; font-size: inherit; }
+
+  /* TABLE (kami-table) */
+  table, .kami-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9.5pt;
+    margin: 12pt 0;
+    break-inside: avoid;
+  }
+  table th, .kami-table th {
+    text-align: left;
+    font-family: var(--sans);
+    font-weight: 500;
+    color: var(--dark-warm);
+    padding: 6pt 8pt;
+    border-bottom: 1pt solid var(--border);
+    background: var(--ivory);
+  }
+  table td, .kami-table td {
+    padding: 5pt 8pt;
+    border-bottom: 0.3pt solid var(--border-soft);
+    vertical-align: top;
+  }
+  table.compact th, .kami-table.compact th { padding: 3pt 6pt; font-size: 8pt; }
+  table.compact td, .kami-table.compact td { padding: 2pt 6pt; font-size: 8pt; line-height: 1.4; }
+  table.striped tbody tr:nth-child(even) td, .kami-table.striped tbody tr:nth-child(even) td {
+    background: var(--ivory);
+  }
+
+  /* CALLOUT / TAKEAWAY */
+  .callout {
+    background: var(--ivory);
+    border-left: 2pt solid var(--brand);
+    padding: 10pt 14pt;
+    border-radius: 3pt;
+    margin: 12pt 0;
+    line-height: 1.55;
+    break-inside: avoid;
+  }
+  .takeaway {
+    background: var(--ivory);
+    border-radius: 4pt;
+    padding: 10pt 14pt;
+    margin: 14pt 0;
+    break-inside: avoid;
+  }
+  .takeaway-label {
+    font-family: var(--sans);
+    font-size: 9pt;
+    color: var(--brand);
+    letter-spacing: 1pt;
+    text-transform: uppercase;
+    font-weight: 500;
+    margin-bottom: 4pt;
+  }
+
+  /* TAG */
+  .tag {
+    display: inline-block;
+    background: var(--tag-bg);
+    color: var(--brand);
+    font-family: var(--sans);
+    font-size: 9pt;
+    font-weight: 500;
+    padding: 1pt 6pt;
+    border-radius: 3pt;
+    letter-spacing: 0.4pt;
+    text-transform: uppercase;
+    margin-right: 4pt;
+  }
+
+  /* FIGURE */
+  figure { margin: 14pt 0; break-inside: avoid; }
+  figure img { max-width: 100%; border-radius: 4pt; }
+  figcaption {
+    font-family: var(--sans);
+    font-size: 9pt;
+    color: var(--stone);
+    margin-top: 6pt;
+    text-align: center;
+  }
+
+  /* CHAPTER BREAK */
+  .chapter { break-before: page; }
+
+  /* Custom styles for code blocks */
+  .code-block {
+    font-family: var(--mono);
+    font-size: 8.5pt;
+    line-height: 1.4;
+    background: var(--ivory);
+    border-radius: 4pt;
+    padding: 10pt 14pt;
+    margin: 10pt 0;
+    white-space: pre-wrap;
+    color: var(--near-black);
+    break-inside: avoid;
+    border-left: 2pt solid var(--brand);
+  }
+
+  /* Phase box */
+  .phase-box {
+    background: var(--ivory);
+    border: 1pt solid var(--border);
+    border-radius: 4pt;
+    padding: 12pt 16pt;
+    margin: 10pt 0;
+    break-inside: avoid;
+  }
+  .phase-title {
+    font-family: var(--sans);
+    font-size: 11pt;
+    font-weight: 500;
+    color: var(--brand);
+    margin-bottom: 6pt;
+  }
+</style>
+</head>
+<body>
+
+<!-- COVER -->
+<section class="cover">
+  <div>
+    <div class="cover-eyebrow">Project Plan · MAttendance v2.0</div>
+    <div class="cover-title">Production-Grade<br>Geofence Attendance<br>Tracking System</div>
+    <div class="cover-sub">
+      A comprehensive implementation plan for accurate, battery-efficient geofence-based attendance tracking with GPS glitch handling, inspired by Uber/Swiggy production practices.
+    </div>
+  </div>
+  <div class="cover-meta">
+    <strong>MAttendance Engineering Team</strong><br>
+    Version 1.0 · 2026.05<br>
+    MAttendance Mobile Flutter Application
+  </div>
+</section>
+
+<!-- TOC -->
+<section class="toc">
+  <h2>Contents</h2>
+  <div class="toc-item"><span class="toc-num">01</span><span class="toc-title">Executive Summary</span><span class="toc-page">03</span></div>
+  <div class="toc-item"><span class="toc-num">02</span><span class="toc-title">Problem Statement & Current State</span><span class="toc-page">04</span></div>
+  <div class="toc-item"><span class="toc-num">03</span><span class="toc-title">Production Architecture Design</span><span class="toc-page">06</span></div>
+  <div class="toc-item"><span class="toc-num">04</span><span class="toc-title">Core Technical Components</span><span class="toc-page">09</span></div>
+  <div class="toc-item"><span class="toc-num">05</span><span class="toc-title">Implementation Roadmap</span><span class="toc-page">13</span></div>
+  <div class="toc-item"><span class="toc-num">06</span><span class="toc-title">Appendix: Code Patterns</span><span class="toc-page">16</span></div>
+</section>
+
+<!-- Chapter 01 -->
+<section class="chapter">
+  <div class="chapter-num">01 · Executive Summary</div>
+  <h1>Executive Summary</h1>
+
+  <p class="lead">
+    The current MAttendance geofence system triggers attendance based on raw GPS events without filtering <span class="hl">accuracy degradation, GPS glitches (~60m indoor drift), or stationary-state detection</span>. This plan outlines a production-grade architecture adopting Uber/Swiggy practices: activity-aware tracking, Kalman-filtered smoothing, confidence scoring, and adaptive sampling.
+  </p>
+
+  <h2>Key Takeaways</h2>
+  <ul>
+    <li>Current system accepts geofence events with <span class="hl">accuracy up to 500m+</span>, causing false attendance triggers when GPS drifts indoors</li>
+    <li>Production systems (Uber, Swiggy) use <span class="hl">state machines (IDLE → MOVING → ACTIVE_TRACKING → STATIONARY)</span> to balance accuracy and battery</li>
+    <li>Implementing a <span class="hl">2D Kalman filter with confidence scoring</span> can reduce false triggers by filtering GPS noise and detecting impossible jumps</li>
+    <li>Estimated <span class="hl">6-week implementation</span> across 4 phases, with backward compatibility for existing geofence logic</li>
+  </ul>
+
+  <div class="takeaway">
+    <div class="takeaway-label">Questions this document answers</div>
+    <p>How does the current geofence system work and where does it fail? What architecture do Uber/Swiggy use for production tracking? How do we implement Kalman filtering and confidence scoring in Flutter? What is the phased implementation roadmap with code patterns?</p>
+  </div>
+</section>
+
+<!-- Chapter 02 -->
+<section class="chapter">
+  <div class="chapter-num">02 · Problem Statement</div>
+  <h1>Problem Statement &amp; Current State</h1>
+
+  <p class="lead">
+    Analysis of the MAttendance codebase reveals a functional but fragile geofence system that lacks GPS glitch handling, stationary detection, and confidence modeling.
+  </p>
+
+  <h2>Current Implementation Analysis</h2>
+  <p>The codebase contains three location systems, with the <span class="hl">GeofenceAutoPunchService</span> being the primary attendance mechanism:</p>
+
+  <table class="compact">
+    <thead>
+      <tr>
+        <th>Service</th>
+        <th>Purpose</th>
+        <th>Accuracy Handling</th>
+        <th>Gap</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>GeofenceAutoPunchService</code></td>
+        <td>Auto punch on ENTER/EXIT geofence</td>
+        <td>None — accepts all accuracy levels</td>
+        <td>No GPS glitch filter, no stationary freeze</td>
+      </tr>
+      <tr>
+        <td><code>FieldTrackingService</code></td>
+        <td>Continuous background tracking</td>
+        <td>None — <code>onError: (_) {}</code> silently ignores failures</td>
+        <td>No accuracy gate, ignores stream errors</td>
+      </tr>
+      <tr>
+        <td><code>ManualGeoService</code></td>
+        <td>One-time manual check</td>
+        <td>Adds 100m buffer for "jitter"</td>
+        <td>Expands radius instead of rejecting bad GPS</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>The Core Problem: GPS Glitches in Production</h2>
+  <p>Real-world GPS suffers from systematic inaccuracies that the current code does not model:</p>
+
+  <div class="callout">
+    <p><strong>Indoor drift pattern:</strong> When users are inside office buildings, GPS weakens and falls back to Wi-Fi/cell triangulation, causing consistent ~60m offsets that snap to nearby roads. The accuracy field often reads 40–80m, but the geofence trigger still fires.</p>
+    <p style="margin-top: 6pt;">Current code (geofence_auto_punch_service.dart:134-146) logs location but <span class="hl">never checks <code>location.accuracy</code> before triggering attendance</span>.</p>
+  </div>
+
+  <h2>Current Safeguards vs. What's Missing</h2>
+  <table class="compact">
+    <thead>
+      <tr>
+        <th>Feature</th>
+        <th>Current State</th>
+        <th>Production Needs</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Mock GPS detection</td>
+        <td><span class="hl">✓ Implemented</span> (line 181-189)</td>
+        <td>Sufficient</td>
+      </tr>
+      <tr>
+        <td>Throttling (10 min)</td>
+        <td><span class="hl">✓ Implemented</span> (line 172-178)</td>
+        <td>Sufficient</td>
+      </tr>
+      <tr>
+        <td>Accuracy filtering</td>
+        <td><strong>✗ Not implemented</strong></td>
+        <td>Reject &gt;25m for stationary, &gt;50m for moving</td>
+      </tr>
+      <tr>
+        <td>Stationary detection</td>
+        <td><strong>✗ Not implemented</strong></td>
+        <td>Freeze position when speed &lt;0.5 m/s for 30s</td>
+      </tr>
+      <tr>
+        <td>GPS jump rejection</td>
+        <td><strong>✗ Not implemented</strong></td>
+        <td>Reject jumps &gt; accuracy × 1.5</td>
+      </tr>
+      <tr>
+        <td>Confidence scoring</td>
+        <td><strong>✗ Not implemented</strong></td>
+        <td>Only trigger attendance at confidence &gt; 0.8</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Metrics of Success</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Dimension</th>
+        <th>Current</th>
+        <th>Target</th>
+        <th>Gap</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>False triggers (per month)</td>
+        <td>~15-20 (estimated)</td>
+        <td>&lt; 2</td>
+        <td>90% reduction needed</td>
+      </tr>
+      <tr>
+        <td>GPS accuracy threshold</td>
+        <td>None (accepts any)</td>
+        <td>≤ 25m stationary, ≤ 50m moving</td>
+        <td>Implement accuracy gate</td>
+      </tr>
+      <tr>
+        <td>Battery impact (geofence only)</td>
+        <td>~8-12% per day (est.)</td>
+        <td>&lt; 5% per day</td>
+        <td>Activity-aware sampling</td>
+      </tr>
+      <tr>
+        <td>Indoor drift handling</td>
+        <td>None (60m drift causes triggers)</td>
+        <td>Kalman-filtered centroid lock</td>
+        <td>Implement filtering</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- Chapter 03 -->
+<section class="chapter">
+  <div class="chapter-num">03 · Architecture</div>
+  <h1>Production Architecture Design</h1>
+
+  <p class="lead">
+    Following Uber/Swiggy practices, the new architecture introduces a <span class="hl">state machine with adaptive sampling</span>, sensor fusion, and server-side sanity checks.
+  </p>
+
+  <h2>State Machine: The Core Innovation</h2>
+  <p>Instead of constant high-accuracy GPS, the system changes behavior based on detected motion state:</p>
+
+  <figure>
+    <svg viewBox="0 0 960 200" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <style>
+          text { font-family: Charter, Georgia, Palatino, serif; fill: #141413; }
+          .label { font-size: 12px; font-weight: 500; }
+          .sublabel { font-size: 9px; fill: #6b6a64; font-family: "JetBrains Mono", monospace; }
+          .state-box { fill: #faf9f5; stroke: #141413; stroke-width: 1; rx: 4; }
+          .focal-box { fill: #EEF2F7; stroke: #1B365D; stroke-width: 1.5; rx: 4; }
+          .arrow { stroke: #1B365D; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
+        </style>
+        <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <path d="M2 1 L8 3 L2 5" fill="none" stroke="#1B365D" stroke-width="1.5" stroke-linecap="round"/>
+        </marker>
+      </defs>
+      
+      <!-- IDLE -->
+      <rect class="state-box" x="40" y="80" width="160" height="48"/>
+      <text class="label" x="120" y="102" text-anchor="middle">IDLE</text>
+      <text class="sublabel" x="120" y="118" text-anchor="middle">Activity: STILL</text>
+      <text class="sublabel" x="120" y="130" text-anchor="middle">GPS: OFF</text>
+      
+      <!-- MOVING -->
+      <rect class="state-box" x="280" y="80" width="160" height="48"/>
+      <text class="label" x="360" y="102" text-anchor="middle">MOVING</text>
+      <text class="sublabel" x="360" y="118" text-anchor="middle">Activity: WALKING</text>
+      <text class="sublabel" x="360" y="130" text-anchor="middle">GPS: 15-30s</text>
+      
+      <!-- ACTIVE TRACKING -->
+      <rect class="focal-box" x="520" y="80" width="180" height="48"/>
+      <text class="label" x="610" y="102" text-anchor="middle">ACTIVE TRACKING</text>
+      <text class="sublabel" x="610" y="118" text-anchor="middle">Activity: IN_VEHICLE</text>
+      <text class="sublabel" x="610" y="130" text-anchor="middle">GPS: 1-5s, HIGH</text>
+      
+      <!-- STATIONARY -->
+      <rect class="state-box" x="780" y="80" width="140" height="48"/>
+      <text class="label" x="850" y="102" text-anchor="middle">STATIONARY</text>
+      <text class="sublabel" x="850" y="118" text-anchor="middle">Speed ≈ 0</text>
+      <text class="sublabel" x="850" y="130" text-anchor="middle">GPS: FREEZE</text>
+      
+      <!-- Arrows -->
+      <path class="arrow" d="M200 104 L280 104"/>
+      <path class="arrow" d="M440 104 L520 104"/>
+      <path class="arrow" d="M700 104 L780 104"/>
+      <path class="arrow" d="M780 64 L700 64 L700 40 L120 40 L120 64 L200 64"/>
+      <text class="sublabel" x="480" y="55" text-anchor="middle">Detect movement</text>
+      <text class="sublabel" x="300" y="95" text-anchor="middle">↑</text>
+      <text class="sublabel" x="540" y="95" text-anchor="middle">↑</text>
+      <text class="sublabel" x="800" y="95" text-anchor="middle">↑</text>
+      <text class="sublabel" x="480" y="35" text-anchor="middle">No movement → return to IDLE</text>
+    </svg>
+    <figcaption>Figure 1. State machine for adaptive location tracking (inspired by Uber/Swiggy architecture)</figcaption>
+  </figure>
+
+  <h2>Production Stack: Flutter Implementation</h2>
+  <p>The Flutter stack maps to native production practices as follows:</p>
+
+  <table class="striped">
+    <thead>
+      <tr>
+        <th>Native Component (Uber/Swiggy)</th>
+        <th>Flutter Implementation</th>
+        <th>Purpose</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>FusedLocationProviderClient</code></td>
+        <td><code>geolocator</code> package with <code>LocationAccuracy</code> settings</td>
+        <td>Sensor fusion (GPS + Wi-Fi + cell + accelerometer)</td>
+      </tr>
+      <tr>
+        <td><code>ActivityRecognitionClient</code></td>
+        <td><code>flutter_activity_recognition</code> or <code>sensors_plus</code></td>
+        <td>Detect STILL, WALKING, RUNNING, IN_VEHICLE states</td>
+      </tr>
+      <tr>
+        <td><code>ForegroundService</code></td>
+        <td><code>flutter_background_service</code> + <code>flutter_foreground_task</code></td>
+        <td>Keep tracking alive when app is minimized (used conditionally)</td>
+      </tr>
+      <tr>
+        <td>Kalman filter (custom)</td>
+        <td>Custom Dart <code>KalmanFilter2D</code> class</td>
+        <td>Smooth GPS noise, reject jumps, predict position</td>
+      </tr>
+      <tr>
+        <td>Server-side road snapping</td>
+        <td>Backend API with validation logic</td>
+        <td>Reject impossible jumps, snap to known office location</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Tracking Policy by State</h2>
+  <table class="compact">
+    <thead>
+      <tr>
+        <th>State</th>
+        <th>GPS Accuracy</th>
+        <th>Update Interval</th>
+        <th>Battery Impact</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>IDLE (screen off, STILL)</td>
+        <td>None (GPS OFF)</td>
+        <td>—</td>
+        <td>Minimal (~0.5%/hour)</td>
+      </tr>
+      <tr>
+        <td>MOVING (detected by accelerometer)</td>
+        <td>BALANCED (100-200m)</td>
+        <td>15-30 seconds</td>
+        <td>Low (~2%/hour)</td>
+      </tr>
+      <tr>
+        <td>ACTIVE TRACKING (user punched in, driving)</td>
+        <td>HIGH (≤50m)</td>
+        <td>1-5 seconds</td>
+        <td>Medium (~8%/hour with foreground service)</td>
+      </tr>
+      <tr>
+        <td>STATIONARY (speed &lt;0.5 m/s for 30s)</td>
+        <td>Freeze last trusted position</td>
+        <td>No updates</td>
+        <td>Minimal (only activity checks)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <p><strong>Key insight from Uber/Swiggy:</strong> The illusion of perfect tracking is mostly software engineering, not better hardware. Even Uber cannot fully prevent indoor drift or urban canyon issues — they hide it using smoothing, prediction, and confidence models.</p>
+  </div>
+</section>
+
+<!-- Chapter 04 -->
+<section class="chapter">
+  <div class="chapter-num">04 · Core Components</div>
+  <h1>Core Technical Components</h1>
+
+  <p class="lead">
+    Four filter layers process raw GPS before any attendance decision: accuracy gate → stationary freeze → jump rejection → Kalman smoothing → confidence scoring.
+  </p>
+
+  <h2>1. Accuracy Gate (First Line of Defense)</h2>
+  <p>Every location update passes through an accuracy threshold before further processing:</p>
+
+  <div class="code-block">// LocationFilter.dart - Accuracy Gate
+class LocationFilter {
+  static const double ACCURACY_THRESHOLD_STATIONARY = 25.0; // meters
+  static const double ACCURACY_THRESHOLD_MOVING = 50.0;
+  static const double ACCURACY_THRESHOLD_ACTIVE = 100.0;
+
+  /// Returns null if accuracy is too poor to trust
+  static LocationResult? filterByAccuracy(
+    LocationResult location,
+    TrackingState state,
+  ) {
+    final threshold = _getThreshold(state);
+    
+    if (location.accuracy > threshold) {
+      AppLogger.w(
+        'LOC_FILTER: Rejected - accuracy ${location.accuracy}m > ${threshold}m '
+        '(${state.name})'
+      );
+      return null; // Discard this location entirely
+    }
+    return location;
+  }
+
+  static double _getThreshold(TrackingState state) {
+    switch (state) {
+      case TrackingState.STATIONARY:
+        return ACCURACY_THRESHOLD_STATIONARY;
+      case TrackingState.MOVING:
+        return ACCURACY_THRESHOLD_MOVING;
+      case TrackingState.ACTIVE_TRACKING:
+        return ACCURACY_THRESHOLD_ACTIVE;
+      case TrackingState.IDLE:
+        return double.infinity; // GPS off in IDLE
+    }
+  }
+}</div>
+
+  <h2>2. Stationary Detection & Position Freeze</h2>
+  <p>When the user stops moving, the system locks to a stable centroid instead of following GPS jitter:</p>
+
+  <div class="code-block">// StationaryDetector.dart
+class StationaryDetector {
+  static const double SPEED_THRESHOLD = 0.5; // m/s
+  static const int DURATION_THRESHOLD = 30; // seconds
+  
+  final List&lt;LocationResult&gt; _recentPositions = [];
+  DateTime? _stationarySince;
+
+  /// Call on every filtered location update
+  TrackingState evaluate(LocationResult location, TrackingState currentState) {
+    // Add to recent buffer (keep last 10)
+    _recentPositions.add(location);
+    if (_recentPositions.length > 10) _recentPositions.removeAt(0);
+
+    // Check if speed is near zero
+    if (location.speed &lt; SPEED_THRESHOLD) {
+      if (_stationarySince == null) {
+        _stationarySince = DateTime.now();
+      } else {
+        final duration = DateTime.now().difference(_stationarySince!).inSeconds;
+        if (duration >= DURATION_THRESHOLD && currentState != TrackingState.STATIONARY) {
+          AppLogger.i('STATIONARY: Detected after ${duration}s');
+          return TrackingState.STATIONARY;
+        }
+      }
+    } else {
+      _stationarySince = null; // Reset if movement detected
+    }
+
+    return currentState; // No change
+  }
+
+  /// When STATIONARY: return frozen centroid, not raw GPS
+  static LocationResult getStableCentroid(List&lt;LocationResult&gt; positions) {
+    if (positions.isEmpty) throw StateError('No positions to centroid');
+    
+    // Median latitude/longitude (rejects outliers)
+    final lats = positions.map((p) => p.latitude).toList()..sort();
+    final lngs = positions.map((p) => p.longitude).toList()..sort();
+    
+    return LocationResult(
+      latitude: lats[lats.length ~/ 2],
+      longitude: lngs[lngs.length ~/ 2],
+      accuracy: positions.map((p) => p.accuracy).reduce(math.min),
+    );
+  }
+}</div>
+
+  <h2>3. Distance + Accuracy Gating (Jump Rejection)</h2>
+  <p>Compare new location against the last known position using accuracy-aware thresholds:</p>
+
+  <div class="code-block">// JumpRejection.dart
+class JumpRejection {
+  /// Returns true if the jump is suspicious and should be rejected
+  static bool isSuspiciousJump(
+    LocationResult lastLocation,
+    LocationResult newLocation,
+  ) {
+    final distance = Geolocator.distanceBetween(
+      lastLocation.latitude, lastLocation.longitude,
+      newLocation.latitude, newLocation.longitude,
+    );
+
+    // Key formula: if distance > newLocation.accuracy * 1.5, it's unreliable
+    final threshold = newLocation.accuracy * 1.5;
+    
+    if (distance > threshold) {
+      AppLogger.w(
+        'JUMP_REJECT: ${distance.toStringAsFixed(1)}m > '
+        '${threshold.toStringAsFixed(1)}m (accuracy=${newLocation.accuracy}m)'
+      );
+      return true; // Reject
+    }
+    return false; // Accept
+  }
+}</div>
+
+  <h2>4. Kalman Filter (2D) for Smoothing</h2>
+  <p>A lightweight Kalman filter smooths GPS noise and predicts position based on prior state:</p>
+
+  <div class="code-block">// KalmanFilter2D.dart
+class KalmanFilter2D {
+  // State: [lat, lng]
+  double _lat = 0, _lng = 0;
+  double _varianceLat = 1000.0; // Start with high uncertainty
+  double _varianceLng = 1000.0;
+  
+  // Kalman constants
+  final double _processNoise; // How much we expect position to change
+  final double _measurementNoise; // GPS accuracy
+
+  KalmanFilter2D({
+    double processNoise = 0.01,
+    double measurementNoise = 25.0,
+  }) : _processNoise = processNoise,
+       _measurementNoise = measurementNoise;
+
+  /// Update with new GPS reading, returns filtered position
+  LocationResult update(LocationResult raw) {
+    // Prediction step: assume position stays same, increase uncertainty
+    _varianceLat += _processNoise;
+    _varianceLng += _processNoise;
+
+    // Update step: blend prediction with measurement
+    final kalmanGainLat = _varianceLat / (_varianceLat + _measurementNoise);
+    final kalmanGainLng = _varianceLng / (_varianceLng + _measurementNoise);
+
+    _lat += kalmanGainLat * (raw.latitude - _lat);
+    _lng += kalmanGainLng * (raw.longitude - _lng);
+
+    _varianceLat *= (1 - kalmanGainLat);
+    _varianceLng *= (1 - kalmanGainLng);
+
+    return LocationResult(
+      latitude: _lat,
+      longitude: _lng,
+      accuracy: math.sqrt((_varianceLat + _varianceLng) / 2),
+    );
+  }
+}</div>
+
+  <h2>5. Confidence Score for Attendance Decisions</h2>
+  <p>Only trigger geofence attendance when confidence exceeds a threshold:</p>
+
+  <div class="code-block">// ConfidenceScorer.dart
+class ConfidenceScorer {
+  /// Calculate confidence (0.0 to 1.0) that this location is reliable
+  static double score(LocationResult location, TrackingState state) {
+    double confidence = 1.0;
+
+    // Factor 1: GPS accuracy (lower is better)
+    confidence *= _accuracyFactor(location.accuracy, state);
+
+    // Factor 2: Speed consistency (stable speed = higher confidence)
+    confidence *= _speedFactor(location.speed, state);
+
+    // Factor 3: Point variance (low variance in recent cluster = higher)
+    confidence *= _varianceFactor(location, state);
+
+    return confidence.clamp(0.0, 1.0);
+  }
+
+  static double _accuracyFactor(double accuracy, TrackingState state) {
+    final maxAllowed = state == TrackingState.STATIONARY ? 25.0 : 50.0;
+    if (accuracy > maxAllowed) return 0.0; // Should be filtered already
+    return 1.0 - (accuracy / maxAllowed) * 0.5; // Linear decay
+  }
+
+  static const double CONFIDENCE_THRESHOLD = 0.8; // Only trigger if > 80% confident
+}</div>
+
+  <h2>Integration: Processing Pipeline</h2>
+  <div class="callout">
+    <p><strong>Processing order for every GPS update:</strong></p>
+    <p>1. <span class="hl">Accuracy Gate</span> → discard if accuracy &gt; threshold for state<br>
+    2. <span class="hl">Jump Rejection</span> → discard if distance &gt; accuracy × 1.5<br>
+    3. <span class="hl">Kalman Filter</span> → smooth and predict position<br>
+    4. <span class="hl">Stationary Detection</span> → freeze if speed &lt;0.5 m/s for 30s<br>
+    5. <span class="hl">Confidence Score</span> → only proceed if score &gt; 0.8<br>
+    6. <span class="hl">Geofence Check</span> → trigger attendance if inside office radius</p>
+  </div>
+</section>
+
+<!-- Chapter 05 -->
+<section class="chapter">
+  <div class="chapter-num">05 · Roadmap</div>
+  <h1>Implementation Roadmap</h1>
+
+  <p class="lead">
+    Four-phase implementation over 6 weeks, maintaining backward compatibility with existing geofence logic. Each phase builds on the previous.
+  </p>
+
+  <div class="phase-box">
+    <div class="phase-title">Phase 1 (Week 1-2): Accuracy Gating & Stationary Detection</div>
+    <p><span class="tag">Foundation</span> <span class="tag">No Breaking Changes</span></p>
+    <ul>
+      <li>Add <code>LocationFilter</code> with accuracy thresholds (25m stationary, 50m moving)</li>
+      <li>Refactor <code>GeofenceAutoPunchService._onGeofenceStatusChanged</code> to validate <code>location.accuracy</code> before triggering</li>
+      <li>Implement <code>StationaryDetector</code> with speed + displacement check</li>
+      <li>Add "frozen position" logic: when STATIONARY, return last stable centroid</li>
+      <li>Update <code>FieldTrackingService</code> to filter inaccurate points before sending pings</li>
+    </ul>
+    <p style="margin-top: 8pt;"><strong>Deliverable:</strong> GPS glitches &gt;50m no longer trigger false attendance; indoor drift handled by stationary freeze.</p>
+  </div>
+
+  <div class="phase-box">
+    <div class="phase-title">Phase 2 (Week 3): Kalman Filter & Jump Rejection</div>
+    <p><span class="tag">Signal Processing</span> <span class="tag">Dart Native</span></p>
+    <ul>
+      <li>Implement <code>KalmanFilter2D</code> class (lightweight, no external dependencies)</li>
+      <li>Add <code>JumpRejection</code> using distance &gt; accuracy × 1.5 rule</li>
+      <li>Create processing pipeline: Accuracy Gate → Jump Rejection → Kalman → Geofence</li>
+      <li>Add median clustering (keep last 5-10 points, reject outliers)</li>
+      <li>Update <code>manual_geo_service.dart</code> to use filtered location for radius check</li>
+    </ul>
+    <p style="margin-top: 8pt;"><strong>Deliverable:</strong> Smooth GPS tracks; 60m indoor jumps rejected; stable centroid for office attendance.</p>
+  </div>
+
+  <div class="phase-box">
+    <div class="phase-title">Phase 3 (Week 4-5): Activity Recognition & State Machine</div>
+    <p><span class="tag">Native Plugins</span> <span class="tag">Battery Optimization</span></p>
+    <ul>
+      <li>Add <code>flutter_activity_recognition</code> package for STILL/WALKING/IN_VEHICLE detection</li>
+      <li>Implement state machine: IDLE → MOVING → ACTIVE_TRACKING → STATIONARY</li>
+      <li>Adaptive GPS sampling: IDLE (GPS OFF), MOVING (15-30s), ACTIVE (1-5s, HIGH)</li>
+      <li>Integrate with existing <code>flutter_background_service</code> for ACTIVE_TRACKING</li>
+      <li>Add battery optimization exemption request (already partially in <code>main_shell.dart</code>)</li>
+    </ul>
+    <p style="margin-top: 8pt;"><strong>Deliverable:</strong> Battery-efficient tracking; GPS only runs when needed; background service used conditionally.</p>
+  </div>
+
+  <div class="phase-box">
+    <div class="phase-title">Phase 4 (Week 6): Confidence Scoring & Backend Validation</div>
+    <p><span class="tag">Decision Logic</span> <span class="tag">API Updates</span></p>
+    <ul>
+      <li>Implement <code>ConfidenceScorer</code> (accuracy + speed consistency + variance)</li>
+      <li>Only trigger geofence attendance if confidence &gt; 0.8</li>
+      <li>Add backend API endpoint for server-side sanity checks (reject impossible jumps)</li>
+      <li>Update attendance API to accept <code>confidence</code> field and <code>filtered_accuracy</code></li>
+      <li>Add "snap to office" logic: if within 100m of known office, lock to office coordinates</li>
+      <li>Comprehensive testing: simulate GPS glitches, indoor drift, tunnel scenarios</li>
+    </ul>
+    <p style="margin-top: 8pt;"><strong>Deliverable:</strong> Production-grade attendance system; false triggers &lt;2/month; server validates all client submissions.</p>
+  </div>
+
+  <h2>Dependencies & Risks</h2>
+  <table class="compact">
+    <thead>
+      <tr>
+        <th>Dependency</th>
+        <th>Impact</th>
+        <th>Mitigation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>flutter_activity_recognition</code> package</td>
+        <td>Phase 3 blocked if package has iOS/Android issues</td>
+        <td>Use <code>sensors_plus</code> accelerometer as fallback for stationary detection</td>
+      </tr>
+      <tr>
+        <td>Backend API changes (Phase 4)</td>
+        <td>Client waits for server implementation</td>
+        <td>Client-side confidence scoring works without API changes (graceful degradation)</td>
+      </tr>
+      <tr>
+        <td>Android 14+ background restrictions</td>
+        <td>Foreground service may be killed</td>
+        <td>Use <code>flutter_foreground_task</code> (already in pubspec.yaml)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="takeaway">
+    <div class="takeaway-label">Call to Action</div>
+    <p>Start with <span class="hl">Phase 1 (Accuracy Gating)</span> — it requires no new packages, provides immediate value (blocks 60m indoor drift), and establishes the filtering pattern for later phases. Estimated effort: 3-4 days for one senior Flutter developer.</p>
+  </div>
+</section>
+
+<!-- Chapter 06 -->
+<section class="chapter">
+  <div class="chapter-num">06 · Appendix</div>
+  <h1>Appendix: Reference Patterns</h1>
+
+  <h2>A. Updated Geofence Handler (Pseudocode)</h2>
+  <div class="code-block">// Updated _onGeofenceStatusChanged with full pipeline
+Future&lt;void&gt; _onGeofenceStatusChanged(
+  Geofence geofence,
+  GeofenceRadius geofenceRadius,
+  GeofenceStatus geofenceStatus,
+  Location location,
+) async {
+  // 1. Convert to our LocationResult
+  final raw = LocationResult(
+    latitude: location.latitude,
+    longitude: location.longitude,
+    accuracy: location.accuracy ?? 999.0,
+    speed: location.speed ?? 0.0,
+  );
+
+  // 2. Accuracy Gate
+  final filtered = LocationFilter.filterByAccuracy(raw, _currentState);
+  if (filtered == null) return; // Discard poor accuracy
+
+  // 3. Jump Rejection
+  if (_lastLocation != null && 
+      JumpRejection.isSuspiciousJump(_lastLocation!, filtered)) {
+    return; // Discard suspicious jump
+  }
+
+  // 4. Kalman Filter
+  final smoothed = _kalmanFilter.update(filtered);
+
+  // 5. Stationary Detection
+  _currentState = _stationaryDetector.evaluate(smoothed, _currentState);
+  LocationResult finalLocation;
+  if (_currentState == TrackingState.STATIONARY) {
+    finalLocation = StationaryDetector.getStableCentroid(_recentValidPositions);
+  } else {
+    finalLocation = smoothed;
+  }
+
+  // 6. Confidence Check
+  final confidence = ConfidenceScorer.score(finalLocation, _currentState);
+  if (confidence &lt; ConfidenceScorer.CONFIDENCE_THRESHOLD) {
+    AppLogger.w('GEOFENCE: Low confidence ${confidence.toStringAsFixed(2)}, skipping');
+    return;
+  }
+
+  // 7. Now safe to trigger attendance
+  if (geofenceStatus == GeofenceStatus.ENTER || 
+      geofenceStatus == GeofenceStatus.DWELL) {
+    await _handleAutoPunch('In', finalLocation, geofence.id, confidence);
+  } else if (geofenceStatus == GeofenceStatus.EXIT) {
+    await _handleAutoPunch('Out', finalLocation, geofence.id, confidence);
+  }
+}</div>
+
+  <h2>B. Packages to Add (pubspec.yaml)</h2>
+  <div class="code-block">dependencies:
+  # Existing: geolocator, geofence_service, flutter_background_service
+  
+  # New for production tracking:
+  flutter_activity_recognition: ^2.0.0  # Activity detection (STILL, WALKING, etc.)
+  sensors_plus: ^2.0.0                        # Fallback accelerometer
+  math: ^2.1.0                                 # For Kalman variance calculations
+
+dev_dependencies:
+  # Testing
+  mockito: ^5.4.0
+  flutter_test:
+    sdk: flutter</div>
+
+  <h2>C. References</h2>
+  <ul>
+    <li><strong>Uber/Swiggy Tracking Practices</strong> - Layered architecture with motion state, adaptive accuracy, batching, sensor fusion, server intelligence</li>
+    <li><strong>GPS Tracking Best Practices</strong> - Treat location as probabilistic signal, detect static user state, apply distance + accuracy gating, use Kalman filtering</li>
+    <li><strong>Current Codebase Analysis</strong> - <code>geofence_auto_punch_service.dart</code>, <code>field_tracking_service.dart</code>, <code>manual_geo_service.dart</code></li>
+    <li><strong>Flutter Packages</strong> - <code>geolocator</code> (fused location), <code>geofence_service</code> (geofence monitoring), <code>flutter_background_service</code> (foreground service)</li>
+  </ul>
+
+  <h2>D. Glossary</h2>
+  <p><strong>Accuracy Gate</strong> - Filter that rejects GPS readings with accuracy worse than a threshold (e.g., &gt;25m for stationary users).</p>
+  <p><strong>Kalman Filter</strong> - Algorithm that smooths noisy measurements by combining prediction (prior state) with observation (new GPS), weighted by uncertainty.</p>
+  <p><strong>Confidence Score</strong> - A value from 0.0 to 1.0 representing how much to trust a location reading, based on accuracy, speed consistency, and point variance.</p>
+  <p><strong>Stationary Detection</strong> - Logic that identifies when a user has stopped moving (speed &lt;0.5 m/s for 30+ seconds) and freezes their GPS position to avoid drift.</p>
+  <p><strong>State Machine</strong> - A behavior model with states (IDLE, MOVING, ACTIVE_TRACKING, STATIONARY) and transitions triggered by activity recognition and speed thresholds.</p>
+</section>
+
+</body>
+</html>

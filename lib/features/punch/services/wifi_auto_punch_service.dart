@@ -1,0 +1,504 @@
+import 'dart:async';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:dio/dio.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../../core/api/api_endpoints.dart';
+import '../../../core/services/office_data_service.dart';
+import '../../../core/utils/constants.dart';
+import '../../../core/utils/app_logger.dart';
+import '../../../models/office.dart';
+import './wifi_service.dart';
+
+class WifiAutoPunchService {
+  static const _enabledKey = 'wifiAutoPunchEnabled';
+  static const _registeredSsidKey = 'wifiAutoRegisteredSsid';
+  static const _lastMacKey = 'wifiAutoLastMac';
+  static const _currentOfficeNameKey = 'wifiAutoCurrentOfficeName';
+
+  // ✅ NEW: Track last punch state
+  static const _lastPunchStatusKey = 'wifiLastPunchStatus';
+
+  // Pending OUT keys (mirrors wifi_background_worker.dart)
+  static const _pendingOutKey = 'wifi_pending_out';
+  static const _pendingOutTsKey = 'wifi_pending_out_ts';
+  static const _pendingOutBssidKey = 'wifi_pending_out_bssid';
+
+  static const String defaultCompanySsid = 'Moksha_Office';
+
+  final Dio _dio;
+  final FlutterLocalNotificationsPlugin _notifications;
+  final WifiService _wifiService = WifiService();
+
+  StreamSubscription<List<ConnectivityResult>>? _subscription;
+  bool _running = false;
+  bool get isRunning => _running;
+
+  final void Function()? onPunch;
+ 
+   WifiAutoPunchService({
+     required Dio dio,
+     required FlutterLocalNotificationsPlugin notifications,
+     this.onPunch,
+   })  : _dio = dio,
+         _notifications = notifications {
+     print('WIFI_AUTO: Service instance created');
+   }
+
+  // ── Preferences ─────────────────────────────────────────────
+
+  static bool get isEnabled {
+    final box = Hive.box(AppConstants.cacheBox);
+    return box.get(_enabledKey, defaultValue: true) as bool;
+  }
+
+  static Future<void> setEnabled(bool value) async {
+    await Hive.box(AppConstants.cacheBox).put(_enabledKey, value);
+    // Mirror to SharedPreferences so background worker can read it
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('wifi_auto_punch_enabled_bg', value);
+  }
+
+  static String get registeredSsid {
+    final box = Hive.box(AppConstants.cacheBox);
+    return box.get(_registeredSsidKey, defaultValue: defaultCompanySsid) as String;
+  }
+
+  static Future<void> setRegisteredSsid(String ssid) =>
+      Hive.box(AppConstants.cacheBox).put(_registeredSsidKey, ssid);
+
+  // ✅ NEW: Punch state
+  static String get lastPunchStatus {
+    final box = Hive.box(AppConstants.cacheBox);
+    return box.get(_lastPunchStatusKey, defaultValue: '') as String;
+  }
+
+  static String get lastMac {
+    final box = Hive.box(AppConstants.cacheBox);
+    return box.get(_lastMacKey, defaultValue: '') as String;
+  }
+
+  static String get currentOfficeName {
+    final box = Hive.box(AppConstants.cacheBox);
+    return box.get(_currentOfficeNameKey, defaultValue: '') as String;
+  }
+
+  static Future<void> setLastMac(String mac) =>
+      Hive.box(AppConstants.cacheBox).put(_lastMacKey, mac);
+
+  static Future<void> setCurrentOfficeName(String name) =>
+      Hive.box(AppConstants.cacheBox).put(_currentOfficeNameKey, name);
+
+  static Future<void> setLastPunchStatus(String status) =>
+      Hive.box(AppConstants.cacheBox).put(_lastPunchStatusKey, status);
+
+  Future<void> syncState({required String status, String? officeName}) async {
+    AppLogger.i('WIFI_AUTO: Syncing state from UI -> $status (Office: $officeName)');
+    await setLastPunchStatus(status);
+    if (officeName != null) {
+      await setCurrentOfficeName(officeName);
+    }
+    
+    // If user is IN, try to capture and "learn" the current WiFi as the office WiFi
+    if (status == 'In') {
+      try {
+        final info = await _wifiService.getCurrentWifi();
+        if (info.ssid.isNotEmpty && info.bssid.isNotEmpty) {
+          AppLogger.i('WIFI_AUTO: Learning WiFi for $officeName -> SSID: ${info.ssid}, MAC: ${info.bssid}');
+          await setLastMac(info.bssid);
+          // We could also save SSID specifically if needed
+        }
+      } catch (_) {}
+    }
+  }
+ 
+  Future<void> updateLastPunchStatus(String status) => syncState(status: status);
+
+  // ── Pending OUT ────────────────────────────────────────────
+
+  static Future<bool> hasPendingOut() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_pendingOutKey) ?? false;
+  }
+
+  static Future<String> getPendingOutBssid() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_pendingOutBssidKey) ?? '';
+  }
+
+  Future<void> _savePendingOut() async {
+    AppLogger.i('WIFI_AUTO: Saving pending OUT (no internet)');
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_pendingOutKey, true);
+    await prefs.setString(_pendingOutTsKey, DateTime.now().toIso8601String());
+    await prefs.setString(_pendingOutBssidKey, lastMac);
+  }
+
+  Future<void> _flushPendingOut() async {
+    if (!await hasPendingOut()) return;
+
+    AppLogger.i('WIFI_AUTO: Flushing pending OUT');
+    final prefs = await SharedPreferences.getInstance();
+    final bssid = prefs.getString(_pendingOutBssidKey) ?? lastMac;
+
+    try {
+      String ip = '0.0.0.0';
+      try {
+        ip = await _wifiService.getWifiIP() ?? '0.0.0.0';
+      } catch (_) {}
+
+      final response = await _dio.post(ApiEndpoints.punch, data: {
+        'Method': 'WiFi',
+        'Direction': 'Out',
+        'WifiMAC': bssid,
+        'IPAddress': ip,
+        'remarks': 'Auto Punch-Out (pending delivery)',
+      });
+
+      if (response.statusCode == 200) {
+        AppLogger.i('WIFI_AUTO: Pending OUT flushed successfully');
+        await _clearPendingOut();
+        await setLastPunchStatus('Out');
+        await setCurrentOfficeName('');
+        onPunch?.call();
+      }
+    } catch (e) {
+      if (e.toString().contains('Duplicate punch detected')) {
+        AppLogger.w('WIFI_AUTO: Pending OUT duplicate — clearing');
+        await _clearPendingOut();
+        await setLastPunchStatus('Out');
+        await setCurrentOfficeName('');
+        onPunch?.call();
+      } else {
+        AppLogger.e('WIFI_AUTO: Pending OUT flush failed — will retry', e);
+      }
+    }
+  }
+
+  Future<void> _clearPendingOut() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_pendingOutKey);
+    await prefs.remove(_pendingOutTsKey);
+    await prefs.remove(_pendingOutBssidKey);
+  }
+
+  // ── Lifecycle ──────────────────────────────────────────────
+
+  Future<void> start() async {
+    AppLogger.v('WIFI_AUTO: start() called. Already running: $_running');
+    if (_running) return;
+ 
+    // Sync enabled state to SharedPreferences for background worker
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('wifi_auto_punch_enabled_bg', true);
+
+    AppLogger.i('WIFI_AUTO: Starting monitor');
+
+    _subscription =
+        Connectivity().onConnectivityChanged.listen(_onConnectivityChanged);
+
+    _running = true;
+
+    // Immediate check
+    await checkAndPunchIfEnabled();
+  }
+
+  void stop() async {
+    _subscription?.cancel();
+    _subscription = null;
+    _running = false;
+
+    // Sync disabled state to SharedPreferences for background worker
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('wifi_auto_punch_enabled_bg', false);
+
+    AppLogger.i('WIFI_AUTO: Monitoring stopped');
+  }
+
+  // ── Connectivity Listener ──────────────────────────────────
+
+  Future<void> _onConnectivityChanged(
+      List<ConnectivityResult> results) async {
+    if (results.contains(ConnectivityResult.wifi)) {
+      AppLogger.d('WIFI_AUTO: WiFi connected');
+      await checkAndPunchIfEnabled();
+    } else if (results.contains(ConnectivityResult.mobile)) {
+      AppLogger.d('WIFI_AUTO: Mobile data available');
+      await _flushPendingOut();
+      await checkAndPunchIfEnabled();
+    } else {
+      AppLogger.d('WIFI_AUTO: WiFi disconnected');
+      await _handleWifiDisconnected();
+    }
+  }
+
+  // ── Main Entry ─────────────────────────────────────────────
+
+  Future<void> checkAndPunchIfEnabled() async {
+    AppLogger.v('WIFI_AUTO: checkAndPunchIfEnabled() - isEnabled: $isEnabled');
+    if (!isEnabled) return;
+    await _checkCurrentConnection();
+  }
+
+  // ── Check Current WiFi ─────────────────────────────────────
+
+  Future<void> _checkCurrentConnection() async {
+    AppLogger.v('WIFI_AUTO: _checkCurrentConnection() starting check...');
+    try {
+      final info = await _wifiService.getCurrentWifi();
+      AppLogger.d('WIFI_AUTO: Current WiFi SSID: ${info.ssid}, BSSID: ${info.bssid}');
+
+      final cached = OfficeDataService.getCachedOffices();
+      final offices = cached ?? [];
+      AppLogger.d('WIFI_AUTO: Found ${offices.length} cached offices to check against');
+
+      Office? matchedOffice;
+
+      final normalizedInfoMac = info.bssid.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase();
+      final normalizedInfoSsid = info.ssid.trim().toLowerCase();
+
+      for (final office in offices) {
+        // 1. Check wifiRouters list (primary — matches by macId)
+        if (office.wifiRouters != null) {
+          for (final router in office.wifiRouters!) {
+            final normalizedRouterMac = router.macId.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase();
+            if (normalizedRouterMac.isNotEmpty && normalizedRouterMac == normalizedInfoMac) {
+              AppLogger.i('WIFI_AUTO: Match via wifiRouters: ${router.macId} → ${office.name}');
+              matchedOffice = office;
+              break;
+            }
+          }
+          if (matchedOffice != null) break;
+        }
+
+        // 2. Fallback: legacy wifiMAC field
+        final normalizedLegacyMac = (office.wifiMAC ?? '').replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase();
+        if (normalizedLegacyMac.isNotEmpty && normalizedLegacyMac == normalizedInfoMac) {
+          AppLogger.i('WIFI_AUTO: Match via legacy wifiMAC: ${office.wifiMAC} → ${office.name}');
+          matchedOffice = office;
+          break;
+        }
+
+        // 3. Fallback: legacy wifiSSID (only if wifiMAC is empty)
+        final normalizedLegacySsid = (office.wifiSSID ?? '').trim().toLowerCase();
+        if (normalizedLegacySsid.isNotEmpty && normalizedLegacySsid == normalizedInfoSsid && (office.wifiMAC == null || office.wifiMAC!.isEmpty)) {
+          AppLogger.i('WIFI_AUTO: Match via legacy wifiSSID: ${office.wifiSSID} → ${office.name}');
+          matchedOffice = office;
+          break;
+        }
+
+        // 4. Learned MAC fallback
+        if (office.name == currentOfficeName && lastMac.isNotEmpty) {
+          final normalizedLastMac = lastMac.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase();
+          if (normalizedLastMac == normalizedInfoMac) {
+            AppLogger.i('WIFI_AUTO: Match via learned MAC for office "${office.name}"');
+            matchedOffice = office;
+            break;
+          }
+        }
+
+        AppLogger.v('WIFI_AUTO: No match for office "${office.name}"');
+      }
+
+      // Pending OUT: if user returned to matched BSSID, cancel pending; else flush
+      if (await hasPendingOut()) {
+        if (matchedOffice != null) {
+          AppLogger.i('WIFI_AUTO: Pending OUT cancelled — user returned to ${matchedOffice.name}');
+          await _clearPendingOut();
+        } else {
+          await _flushPendingOut();
+        }
+      }
+
+      if (matchedOffice != null) {
+        AppLogger.i('WIFI_AUTO: Match found! Office: ${matchedOffice.name}');
+        await _triggerPunch(info, matchedOffice);
+      } else {
+        AppLogger.d('WIFI_AUTO: No office match for this SSID/MAC');
+        await _triggerPunch(info, null);
+      }
+    } catch (e) {
+      AppLogger.v('WIFI_AUTO: No WiFi connection, verifying punch status');
+      // Flush any pending OUT via mobile data if available
+      await _flushPendingOut();
+      await _handleWifiDisconnected();
+    }
+  }
+
+  // ── Trigger Punch ──────────────────────────────────────────
+
+  Future<void> _triggerPunch(WifiInfo info, Office? matchedOffice) async {
+    final lastStatus = lastPunchStatus;
+    final isMatch = matchedOffice != null;
+
+    if (isMatch) {
+      if (lastStatus == 'In') {
+        AppLogger.d('WIFI_AUTO: Already IN → skipping');
+        return;
+      }
+
+      try {
+        // Get IP Address
+        String ip = '0.0.0.0';
+        try {
+          ip = await _wifiService.getWifiIP() ?? '0.0.0.0';
+        } catch (_) {}
+
+        final response = await _dio.post(ApiEndpoints.punch, data: {
+          'Method': 'WiFi',
+          'Direction': 'In',
+          'WifiSSID': info.ssid,
+          'WifiMAC': info.bssid,
+          'IPAddress': ip,
+        });
+
+        if (response.statusCode == 200) {
+          AppLogger.i('WIFI_AUTO: Successfully punched IN');
+          await setLastPunchStatus('In');
+          await setLastMac(_getRegisteredOfficeMac(matchedOffice.name));
+          await setCurrentOfficeName(matchedOffice.name);
+          await _showNotification(info.ssid, 'In');
+          onPunch?.call();
+        }
+      } catch (e) {
+        if (e.toString().contains('Duplicate punch detected')) {
+          AppLogger.w('WIFI_AUTO: Duplicate punch detected. Syncing local state.');
+          await setLastPunchStatus('In');
+          await setCurrentOfficeName(matchedOffice.name);
+          onPunch?.call();
+          return;
+        }
+        AppLogger.e('WIFI_AUTO: Punch IN failed', e);
+      }
+    } else {
+      if (lastStatus == 'In') {
+        AppLogger.i('WIFI_AUTO: Left office WiFi → Punch OUT');
+        final mac = _getRegisteredOfficeMac(currentOfficeName);
+        try {
+          String ip = '0.0.0.0';
+          try {
+            ip = await _wifiService.getWifiIP() ?? '0.0.0.0';
+          } catch (_) {}
+
+          final response = await _dio.post(ApiEndpoints.punch, data: {
+            'Method': 'WiFi',
+            'Direction': 'Out',
+            'WifiSSID': info.ssid,
+            'WifiMAC': mac,
+            'IPAddress': ip,
+            'remarks': 'Auto Punch-Out (WiFi SSID mismatch)',
+          });
+
+          if (response.statusCode == 200) {
+            AppLogger.i('WIFI_AUTO: Successfully punched OUT (SSID mismatch)');
+            await setLastPunchStatus('Out');
+            await setCurrentOfficeName('');
+            await _showNotification(info.ssid, 'Out');
+            onPunch?.call();
+          }
+        } catch (e) {
+          if (e.toString().contains('Duplicate punch detected')) {
+            AppLogger.w('WIFI_AUTO: Duplicate punch detected (Out). Syncing local state.');
+            await setLastPunchStatus('Out');
+            await setCurrentOfficeName('');
+            onPunch?.call();
+            return;
+          }
+          AppLogger.e('WIFI_AUTO: Punch OUT failed — saving pending', e);
+          await _savePendingOut();
+        }
+      }
+    }
+  }
+
+  // ── Handle WiFi Disconnect ─────────────────────────────────
+
+  /// Look up the office's registered MAC (from wifiRouters or wifiMAC).
+  /// Server rejects OUT punches that send unregistered MACs ("Unregistered WiFi network.").
+  String _getRegisteredOfficeMac(String officeName) {
+    if (officeName.isEmpty) return lastMac;
+    final cached = OfficeDataService.getCachedOffices();
+    if (cached == null) return lastMac;
+    final office = cached.cast<Office?>().firstWhere(
+      (o) => o?.name == officeName,
+      orElse: () => null,
+    );
+    if (office == null) return lastMac;
+    if (office.wifiRouters != null && office.wifiRouters!.isNotEmpty) {
+      return office.wifiRouters!.first.macId;
+    }
+    return office.wifiMAC ?? lastMac;
+  }
+
+  Future<void> _handleWifiDisconnected() async {
+    if (!isEnabled) return;
+
+    final lastStatus = lastPunchStatus;
+
+    if (lastStatus == 'In') {
+      AppLogger.i('WIFI_AUTO: WiFi lost → Punch OUT');
+
+      final mac = _getRegisteredOfficeMac(currentOfficeName);
+  
+      try {
+        String ip = '0.0.0.0';
+        try {
+          ip = await _wifiService.getWifiIP() ?? '0.0.0.0';
+        } catch (_) {}
+
+        final response = await _dio.post(ApiEndpoints.punch, data: {
+          'Method': 'WiFi',
+          'Direction': 'Out',
+          'WifiMAC': mac,
+          'IPAddress': ip,
+          'remarks': 'Auto Punch-Out (WiFi disconnected)',
+        });
+
+        if (response.statusCode == 200) {
+          AppLogger.i('WIFI_AUTO: Successfully punched OUT (Disconnected)');
+          await setLastPunchStatus('Out');
+          await setCurrentOfficeName('');
+          onPunch?.call();
+          await _showNotification('', 'Out');
+        }
+      } catch (e) {
+        if (e.toString().contains('Duplicate punch detected')) {
+          AppLogger.w('WIFI_AUTO: Duplicate punch detected (Disconnected). Syncing local state.');
+          await setLastPunchStatus('Out');
+          await setCurrentOfficeName('');
+          onPunch?.call();
+          return;
+        }
+        AppLogger.e('WIFI_AUTO: Punch OUT failed — saving pending', e);
+        await _savePendingOut();
+      }
+    }
+  }
+
+  // ── Notification ──────────────────────────────────────────
+
+  Future<void> _showNotification(String ssid, String direction) async {
+    final isPresent = direction == 'In';
+    final title = isPresent ? 'Auto-Punch In' : 'Auto-Punch Out';
+    final now = DateTime.now();
+    final time =
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    final body = isPresent ? '${ssid.isNotEmpty ? "$ssid · " : ""}$time' : time;
+
+    const android = AndroidNotificationDetails(
+      'wifi_auto_punch',
+      'WiFi Auto-Punch',
+      importance: Importance.high,
+      priority: Priority.high,
+    );
+
+    await _notifications.show(
+      isPresent ? 888 : 889,
+      title,
+      body,
+      const NotificationDetails(android: android),
+    );
+  }
+}

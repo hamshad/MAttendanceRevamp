@@ -1,0 +1,124 @@
+name: mattendance_mobile
+description: MAttendance — Employee Attendance Mobile App
+publish_to: 'none'
+
+version: 1.0.0+4
+
+environment:
+  sdk: ^3.10.8
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State management
+  flutter_riverpod: ^2.6.1
+  riverpod_annotation: ^2.6.1
+
+  # Networking
+  dio: ^5.7.0
+
+  # Storage
+  hive_flutter: ^1.1.0
+  flutter_secure_storage: ^9.2.2
+
+  # Location
+  geolocator: ^13.0.2
+  geocoding: ^3.0.0
+  flutter_background_service: ^5.0.0
+  flutter_foreground_task: ^6.1.1
+  fl_location: ^3.1.0
+
+  # Camera & Media
+  camera: ^0.11.0+2
+  image_picker: ^1.1.2
+  image_cropper: ^11.0.0
+  flutter_image_compress: ^2.3.0
+
+  # QR Scanner
+  mobile_scanner: ^6.0.2
+
+  # Biometrics
+  local_auth: ^2.3.0
+
+  # Push Notifications
+  firebase_core: ^3.8.1
+  firebase_messaging: ^15.1.5
+  flutter_local_notifications: ^18.0.1
+
+  # Connectivity
+  connectivity_plus: ^6.1.1
+
+  # UI
+  cached_network_image: ^3.4.1
+  shimmer: ^3.0.0
+  fl_chart: ^0.70.0
+  intl: ^0.20.1
+
+  # Google Sign-In
+  google_sign_in: ^6.2.2
+
+  # Map
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
+
+  # WiFi
+  network_info_plus: ^6.0.1
+
+  # BLE
+  flutter_blue_plus: ^1.35.5
+
+  # NFC
+  nfc_manager: ^3.5.0
+
+  # Face Recognition (ML Kit detection + TFLite MobileFaceNet embedding)
+  google_mlkit_face_detection: 0.12.0
+  image: ^4.5.4
+  tflite_flutter: ^0.12.0
+
+  # Geofence Auto-Punch
+  geofence_service: 6.0.0+1
+  workmanager: ^0.9.0+3
+
+  # Permissions (battery optimization exemption for background tracking)
+  permission_handler: ^11.3.1
+  # Plain key-value store readable from background isolates (used to mirror the
+  # access token so the field-tracking service can reach it when device is locked)
+  shared_preferences: ^2.3.2
+
+  # Utils
+  cupertino_icons: ^1.0.8
+  device_info_plus: ^11.1.4
+  package_info_plus: ^8.1.2
+  path_provider: ^2.1.5
+  logger: ^2.7.0
+  pretty_dio_logger: ^1.4.0
+  sensors_plus: ^7.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  build_runner: ^2.4.13
+  riverpod_generator: ^2.4.0
+  hive_generator: ^2.0.1
+  mockito: ^5.4.4
+  flutter_launcher_icons: ^0.14.3
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/logo.png"
+  min_sdk_android: 21
+  web:
+    generate: false
+  windows:
+    generate: false
+  macos:
+    generate: false
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+    - assets/models/
