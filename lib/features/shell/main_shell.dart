@@ -500,6 +500,7 @@ class _MainShellState extends ConsumerState<MainShell>
     } else if (prevPunched && !nextPunched) {
       if (ref.read(manualPunchOutProvider)) {
         debugPrint('SHELL_Punch: manual punch OUT -> stopping geofence for the day');
+        WifiAutoPunchService.setManualOutOnWifi();
         _stopFieldTracking();
         _geofenceService?.stop();
         ref.read(manualPunchOutProvider.notifier).state = false;

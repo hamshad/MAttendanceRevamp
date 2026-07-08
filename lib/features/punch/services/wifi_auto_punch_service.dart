@@ -18,8 +18,12 @@ class WifiAutoPunchService {
   static const _lastMacKey = 'wifiAutoLastMac';
   static const _currentOfficeNameKey = 'wifiAutoCurrentOfficeName';
 
-  // ✅ NEW: Track last punch state
+  // Track last punch state
   static const _lastPunchStatusKey = 'wifiLastPunchStatus';
+
+  // Manual-out-on-wifi flag: when user manually punches OUT while connected
+  // to office WiFi, suppress auto re-IN until WiFi disconnects (trigger edge).
+  static const _manualOutOnWifiKey = 'wifiManualOutOnWifi';
 
   // Pending OUT keys (mirrors wifi_background_worker.dart)
   static const _pendingOutKey = 'wifi_pending_out';
@@ -94,11 +98,31 @@ class WifiAutoPunchService {
   static Future<void> setLastPunchStatus(String status) =>
       Hive.box(AppConstants.cacheBox).put(_lastPunchStatusKey, status);
 
+  static bool get manualOutOnWifi {
+    final box = Hive.box(AppConstants.cacheBox);
+    return box.get(_manualOutOnWifiKey, defaultValue: false) as bool;
+  }
+
+  static Future<void> setManualOutOnWifi() async {
+    await Hive.box(AppConstants.cacheBox).put(_manualOutOnWifiKey, true);
+    AppLogger.i('WIFI_AUTO: Manual-out-on-wifi flag SET');
+  }
+
+  static Future<void> clearManualOutOnWifi() async {
+    await Hive.box(AppConstants.cacheBox).put(_manualOutOnWifiKey, false);
+    AppLogger.d('WIFI_AUTO: Manual-out-on-wifi flag CLEARED');
+  }
+
   Future<void> syncState({required String status, String? officeName}) async {
     AppLogger.i('WIFI_AUTO: Syncing state from UI -> $status (Office: $officeName)');
     await setLastPunchStatus(status);
     if (officeName != null) {
       await setCurrentOfficeName(officeName);
+    }
+
+    // Manual IN resets the manual-out-on-wifi guard — user wants to be tracked.
+    if (status == 'In') {
+      await clearManualOutOnWifi();
     }
     
     // If user is IN, try to capture and "learn" the current WiFi as the office WiFi
@@ -339,6 +363,14 @@ class WifiAutoPunchService {
         return;
       }
 
+      // Manual-out-on-wifi guard: if user manually punched OUT while still
+      // connected to office WiFi, suppress auto re-IN until WiFi disconnects
+      // (trigger edge — handled in _handleWifiDisconnected).
+      if (manualOutOnWifi) {
+        AppLogger.i('WIFI_AUTO: Manual-out-on-wifi active — skip auto IN (wait for WiFi disconnect)');
+        return;
+      }
+
       try {
         // Get IP Address
         String ip = '0.0.0.0';
@@ -434,6 +466,12 @@ class WifiAutoPunchService {
 
   Future<void> _handleWifiDisconnected() async {
     if (!isEnabled) return;
+
+    // WiFi disconnect clears the manual-out-on-wifi guard — the trigger edge
+    // has now cycled, so auto IN is allowed again on next reconnect.
+    if (manualOutOnWifi) {
+      await clearManualOutOnWifi();
+    }
 
     final lastStatus = lastPunchStatus;
 
