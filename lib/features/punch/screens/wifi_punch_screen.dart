@@ -159,7 +159,7 @@ class _ConnectedViewState extends ConsumerState<_ConnectedView> {
           const SizedBox(height: 24),
 
           Text(
-            'Connected to',
+            widget.wifi.ssid == 'Unknown Network' ? 'Connected to WiFi' : 'Connected to',
             style: theme.textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary),
           ),
           const SizedBox(height: 8),

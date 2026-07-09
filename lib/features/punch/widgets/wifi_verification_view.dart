@@ -55,7 +55,7 @@ class _ConnectedView extends StatelessWidget {
           ),
           const SizedBox(height: 24),
           Text(
-            'Connected to',
+            wifi.ssid == 'Unknown Network' ? 'Connected to WiFi' : 'Connected to',
             style: theme.textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary),
           ),
           const SizedBox(height: 8),

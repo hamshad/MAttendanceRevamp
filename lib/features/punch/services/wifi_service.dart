@@ -1,5 +1,6 @@
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 
 class WifiInfo {
   final String ssid;
@@ -20,7 +21,14 @@ class WifiPermissionException implements Exception {
 
 class WifiService {
   final _networkInfo = NetworkInfo();
+  final _connectivity = Connectivity();
 
+  /// Returns current WiFi info.
+  ///
+  /// Some Android 12+ phones return null SSID even when WiFi is connected
+  /// (location toggle off at system level). In that case we fall back to
+  /// checking [Connectivity] to confirm WiFi is active and return BSSID
+  /// with a placeholder SSID so users can still punch.
   Future<WifiInfo> getCurrentWifi() async {
     // Android 8+ requires location permission to read SSID/BSSID
     final permission = await Geolocator.checkPermission();
@@ -35,25 +43,46 @@ class WifiService {
       }
     }
 
-    final ssid = await _networkInfo.getWifiName();
-    final bssid = await _networkInfo.getWifiBSSID();
+    final rawSsid = await _networkInfo.getWifiName();
+    final rawBssid = await _networkInfo.getWifiBSSID();
 
-    if (ssid == null || ssid.isEmpty || ssid == '<unknown ssid>') {
+    // Some phones return null/unknown SSID even when WiFi is connected.
+    // Fall back: verify WiFi via Connectivity, and allow BSSID-only flow.
+    final ssidUnavailable = rawSsid == null || rawSsid.isEmpty || rawSsid == '<unknown ssid>';
+    final bssidUnavailable = rawBssid == null || rawBssid.isEmpty;
+
+    if (ssidUnavailable && bssidUnavailable) {
       throw const WifiNotConnectedException(
         'Not connected to any WiFi network. Please connect to the office WiFi and try again.',
       );
     }
 
-    if (bssid == null || bssid.isEmpty) {
+    if (bssidUnavailable) {
+      // SSID is available but no BSSID
       throw const WifiNotConnectedException(
         'Could not read WiFi details. Please ensure WiFi is connected and try again.',
       );
     }
 
-    // Android wraps SSID in quotes — strip them
-    final cleanSsid = ssid.replaceAll('"', '');
+    final bssid = rawBssid.toUpperCase();
 
-    return WifiInfo(ssid: cleanSsid, bssid: bssid.toUpperCase());
+    // If SSID is null/unknown, confirm WiFi is actually active via connectivity_plus
+    if (ssidUnavailable) {
+      final result = await _connectivity.checkConnectivity();
+      final onWifi = result.contains(ConnectivityResult.wifi);
+      if (!onWifi) {
+        throw const WifiNotConnectedException(
+          'Not connected to any WiFi network. Please connect to the office WiFi and try again.',
+        );
+      }
+      // Return BSSID with placeholder SSID — backend can match by MAC alone
+      return WifiInfo(ssid: 'Unknown Network', bssid: bssid);
+    }
+
+    // Android wraps SSID in quotes — strip them
+    final cleanSsid = rawSsid.replaceAll('"', '');
+
+    return WifiInfo(ssid: cleanSsid, bssid: bssid);
   }
 
   Future<String?> getWifiIP() async {
