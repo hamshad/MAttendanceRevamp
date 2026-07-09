@@ -401,15 +401,13 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
             return;
           }
 
-          // Refresh itself failed (fatal) — don't wipe tokens, just stop pinging.
+          // Refresh itself failed (fatal).
           debugPrint('[FieldTracking] Token refresh FAILED (fatal): $refreshErr');
-          // In background isolate, we only wipe SharedPreferences tokens to stop 401 spam
-          // but we DO NOT call clearTokens() which would wipe SecureStorage.
-          await Future.wait([
-            prefs.remove(_kBgAccessToken),
-            prefs.remove(_kBgRefreshToken),
-          ]);
-          
+          // Do NOT wipe SharedPreferences tokens — doing so would cause the
+          // main isolate's TokenStorage._syncFromBackgroundMirror (or the
+          // SecureStorage read fallback) to see null tokens and trigger an
+          // accidental forceLogout. Let the main isolate's DioClient interceptor
+          // handle session expiry when the app is opened.
           await emitDebug(
             event: 'ping_error',
             loc: position,

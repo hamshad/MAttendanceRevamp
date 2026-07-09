@@ -86,6 +86,21 @@ class DioClient {
     final token = await _tokenStorage.getAccessToken();
     if (token != null) {
       options.headers['Authorization'] = 'Bearer $token';
+    } else if (!options.path.contains('/auth/')) {
+      // No token available and this isn't an auth endpoint — skip request
+      // instead of sending an unauthenticated call that will 401 and
+      // possibly trigger a cascading forceLogout.
+      handler.reject(DioException(
+        requestOptions: options,
+        error: const ApiException('Not authenticated. Please log in.', statusCode: 401),
+        type: DioExceptionType.badResponse,
+        response: Response(
+          requestOptions: options,
+          statusCode: 401,
+          data: {'message': 'Not authenticated. Please log in.'},
+        ),
+      ));
+      return;
     }
 
     options.headers['X-Client-Type'] = 'mobile';
