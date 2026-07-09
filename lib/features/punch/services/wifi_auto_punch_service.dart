@@ -25,6 +25,10 @@ class WifiAutoPunchService {
   // to office WiFi, suppress auto re-IN until WiFi disconnects (trigger edge).
   static const _manualOutOnWifiKey = 'wifiManualOutOnWifi';
 
+  // Manual IN flag: when user manually punches IN (GPS, NFC, etc.), suppress
+  // auto WiFi OUT — don't let WiFi undo a manual punch.
+  static const _manualInKey = 'wifiManualIn';
+
   // Pending OUT keys (mirrors wifi_background_worker.dart)
   static const _pendingOutKey = 'wifi_pending_out';
   static const _pendingOutTsKey = 'wifi_pending_out_ts';
@@ -105,12 +109,61 @@ class WifiAutoPunchService {
 
   static Future<void> setManualOutOnWifi() async {
     await Hive.box(AppConstants.cacheBox).put(_manualOutOnWifiKey, true);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('wifi_manual_out_on_wifi', true);
     AppLogger.i('WIFI_AUTO: Manual-out-on-wifi flag SET');
   }
 
   static Future<void> clearManualOutOnWifi() async {
     await Hive.box(AppConstants.cacheBox).put(_manualOutOnWifiKey, false);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('wifi_manual_out_on_wifi', false);
     AppLogger.d('WIFI_AUTO: Manual-out-on-wifi flag CLEARED');
+  }
+
+  static bool get manualIn {
+    final box = Hive.box(AppConstants.cacheBox);
+    return box.get(_manualInKey, defaultValue: false) as bool;
+  }
+
+  static Future<void> setManualIn() async {
+    await Hive.box(AppConstants.cacheBox).put(_manualInKey, true);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('wifi_manual_in', true);
+    AppLogger.i('WIFI_AUTO: Manual IN flag SET');
+  }
+
+  static Future<void> clearManualIn() async {
+    await Hive.box(AppConstants.cacheBox).put(_manualInKey, false);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('wifi_manual_in', false);
+    AppLogger.d('WIFI_AUTO: Manual IN flag CLEARED');
+  }
+
+  // Last-IN method (persisted via SP for bg worker compatibility)
+  static const _lastInMethodKey = 'wifi_last_in_method';
+
+  static String get lastInMethod {
+    final box = Hive.box(AppConstants.cacheBox);
+    return box.get(_lastInMethodKey, defaultValue: '') as String;
+  }
+
+  static Future<void> markLastInByWifi() async {
+    await Hive.box(AppConstants.cacheBox).put(_lastInMethodKey, 'wifi');
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_lastInMethodKey, 'wifi');
+  }
+
+  static Future<void> markLastInManual() async {
+    await Hive.box(AppConstants.cacheBox).put(_lastInMethodKey, 'manual');
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_lastInMethodKey, 'manual');
+  }
+
+  static Future<void> clearLastInMethod() async {
+    await Hive.box(AppConstants.cacheBox).put(_lastInMethodKey, '');
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_lastInMethodKey);
   }
 
   Future<void> syncState({required String status, String? officeName}) async {
@@ -123,6 +176,8 @@ class WifiAutoPunchService {
     // Manual IN resets the manual-out-on-wifi guard — user wants to be tracked.
     if (status == 'In') {
       await clearManualOutOnWifi();
+    } else if (status == 'Out') {
+      await clearLastInMethod();
     }
     
     // If user is IN, try to capture and "learn" the current WiFi as the office WiFi
@@ -391,6 +446,8 @@ class WifiAutoPunchService {
           await setLastPunchStatus('In');
           await setLastMac(_getRegisteredOfficeMac(matchedOffice.name));
           await setCurrentOfficeName(matchedOffice.name);
+          await clearManualIn();
+          await markLastInByWifi();
           await _showNotification(info.ssid, 'In');
           onPunch?.call();
         }
@@ -399,6 +456,8 @@ class WifiAutoPunchService {
           AppLogger.w('WIFI_AUTO: Duplicate punch detected. Syncing local state.');
           await setLastPunchStatus('In');
           await setCurrentOfficeName(matchedOffice.name);
+          await clearManualIn();
+          await markLastInByWifi();
           onPunch?.call();
           return;
         }
@@ -406,6 +465,19 @@ class WifiAutoPunchService {
       }
     } else {
       if (lastStatus == 'In') {
+        // Manual OUT guard: if user manually punched OUT while on office WiFi,
+        // suppress auto OUT on BSSID mismatch. WiFi-disconnect OUT still fires.
+        if (manualOutOnWifi) {
+          AppLogger.i('WIFI_AUTO: Manual-out-on-wifi active — skip auto OUT (BSSID mismatch)');
+          return;
+        }
+        // Last-IN-method guard: only punch OUT on BSSID mismatch if last IN
+        // was via WiFi auto-punch. Manual IN (GPS/NFC) should not be undone.
+        if (lastInMethod != 'wifi') {
+          AppLogger.i('WIFI_AUTO: Last IN not via WiFi — skip auto OUT (BSSID mismatch)');
+          return;
+        }
+
         AppLogger.i('WIFI_AUTO: Left office WiFi → Punch OUT');
         final mac = _getRegisteredOfficeMac(currentOfficeName);
         try {
@@ -498,6 +570,8 @@ class WifiAutoPunchService {
           AppLogger.i('WIFI_AUTO: Successfully punched OUT (Disconnected)');
           await setLastPunchStatus('Out');
           await setCurrentOfficeName('');
+          await clearManualIn();
+          await clearLastInMethod();
           onPunch?.call();
           await _showNotification('', 'Out');
         }
@@ -506,6 +580,8 @@ class WifiAutoPunchService {
           AppLogger.w('WIFI_AUTO: Duplicate punch detected (Disconnected). Syncing local state.');
           await setLastPunchStatus('Out');
           await setCurrentOfficeName('');
+          await clearManualIn();
+          await clearLastInMethod();
           onPunch?.call();
           return;
         }

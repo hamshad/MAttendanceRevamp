@@ -13,6 +13,8 @@ import '../../../models/offline_punch.dart';
 /// from auto punch-out (→ keep geofence running for re-entry).
 final manualPunchOutProvider = StateProvider<bool>((ref) => false);
 
+final manualPunchInProvider = StateProvider<bool>((ref) => false);
+
 // ── Attendance Status ─────────────────────────────────────────────────────────
 
 final attendanceStatusProvider = AsyncNotifierProvider<AttendanceStatusNotifier, EmployeeStatus?>(
@@ -112,6 +114,8 @@ class PunchNotifier extends AsyncNotifier<void> {
 
       if (body['Direction'] == 'Out') {
         ref.read(manualPunchOutProvider.notifier).state = true;
+      } else if (body['Direction'] == 'In') {
+        ref.read(manualPunchInProvider.notifier).state = true;
       }
 
       state = const AsyncData(null);

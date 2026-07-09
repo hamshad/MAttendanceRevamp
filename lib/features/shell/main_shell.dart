@@ -497,10 +497,18 @@ class _MainShellState extends ConsumerState<MainShell>
       debugPrint('SHELL_Punch: punched IN -> starting field tracking');
       SharedPreferences.getInstance().then((sp) => sp.remove('gf_shift_ended'));
       _startFieldTracking();
+
+      if (ref.read(manualPunchInProvider)) {
+        debugPrint('SHELL_Punch: manual punch IN -> setting manualIn guard');
+        WifiAutoPunchService.setManualIn();
+        WifiAutoPunchService.markLastInManual();
+        ref.read(manualPunchInProvider.notifier).state = false;
+      }
     } else if (prevPunched && !nextPunched) {
       if (ref.read(manualPunchOutProvider)) {
         debugPrint('SHELL_Punch: manual punch OUT -> stopping geofence for the day');
         WifiAutoPunchService.setManualOutOnWifi();
+        WifiAutoPunchService.clearLastInMethod();
         _stopFieldTracking();
         _geofenceService?.stop();
         ref.read(manualPunchOutProvider.notifier).state = false;

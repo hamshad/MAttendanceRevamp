@@ -144,9 +144,27 @@ class WifiBackgroundWorker {
       await _persistWifiStatus(bssid: bssid, matchedName: matched?.name);
 
       if (matched != null && lastPunchType != 'In') {
+        // Manual-out-on-wifi guard: suppress auto re-IN until WiFi disconnects
+        if (await _isManualOutOnWifi()) {
+          debugPrint('[WIFI_BG] Manual-out-on-wifi active — skip auto IN');
+          return;
+        }
+
         debugPrint('[WIFI_BG] Match found: ${matched.name} — punching IN');
         await _punchIn(matched, bssid);
       } else if (matched == null && lastPunchType == 'In') {
+        // Manual-out-on-wifi guard also applies for BSSID-mismatch OUT
+        if (await _isManualOutOnWifi()) {
+          debugPrint('[WIFI_BG] Manual-out-on-wifi active — skip auto OUT (no match)');
+          return;
+        }
+        // Only punch OUT on BSSID mismatch if last IN was via WiFi.
+        // Manual IN (GPS/NFC) or restored state should not be undone by WiFi.
+        if (!await _isLastInByWifi()) {
+          debugPrint('[WIFI_BG] Last IN not via WiFi — skip auto OUT (no match)');
+          return;
+        }
+
         // User not at known WiFi and was IN — flush any pending first,
         // then try fresh OUT
         await _flushPendingOut();
@@ -170,6 +188,22 @@ class WifiBackgroundWorker {
 
   Future<void> _handleDisconnect() async {
     if (!await _isEnabled()) return;
+
+    // WiFi disconnect clears the manual-out-on-wifi guard
+    if (await _isManualOutOnWifi()) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(manualOutOnWifiKey, false);
+      debugPrint('[WIFI_BG] WiFi disconnected — manual-out-on-wifi guard CLEARED');
+    }
+
+    // WiFi disconnect also clears the last-in-method — user is leaving
+    await _clearLastInMethod();
+
+    // WiFi disconnect also clears manual IN — user is leaving, normal resume
+    if (await _isManualIn()) {
+      await _clearManualIn();
+      debugPrint('[WIFI_BG] WiFi disconnected — manual IN guard CLEARED');
+    }
 
     // Ensure offices loaded so _getOfficeMac can find registered MAC
     if (_offices.isEmpty) {
@@ -309,6 +343,8 @@ class WifiBackgroundWorker {
         await _setLastPunchType('In');
         await _setMatchedOffice(office.name);
         await _setLastPunchTime(DateTime.now());
+        await _clearManualIn();
+        await _setLastInByWifi();
         await _showNotification('Auto-Punch In', '${office.name} · ${_formatTime(DateTime.now())}');
 
         _service.invoke('wifi_punch', {
@@ -319,7 +355,7 @@ class WifiBackgroundWorker {
       }
     } on DioException catch (e) {
       debugPrint('[WIFI_BG] Punch IN DioException: ${e.message}');
-      _handleDuplicateError(e, 'In', office.name);
+      await _handleDuplicateError(e, 'In', office.name);
     } catch (e) {
       debugPrint('[WIFI_BG] Punch IN error: $e');
     }
@@ -358,6 +394,8 @@ class WifiBackgroundWorker {
         await _setLastPunchType('Out');
         await _setMatchedOffice('');
         await _setLastPunchTime(DateTime.now());
+        await _clearManualIn();
+        await _clearLastInMethod();
         await _showNotification('Auto-Punch Out', '${_formatTime(DateTime.now())}');
 
         _service.invoke('wifi_punch', {
@@ -370,7 +408,7 @@ class WifiBackgroundWorker {
       return false;
     } on DioException catch (e) {
       debugPrint('[WIFI_BG] Punch OUT DioException: ${e.message}');
-      if (_handleDuplicateError(e, 'Out', '')) return true;
+      if (await _handleDuplicateError(e, 'Out', '')) return true;
       return false;
     } catch (e) {
       debugPrint('[WIFI_BG] Punch OUT error: $e');
@@ -379,16 +417,19 @@ class WifiBackgroundWorker {
   }
 
   /// Returns `true` if the error was a duplicate (punch already accepted).
-  bool _handleDuplicateError(DioException e, String direction, String officeName) {
+  Future<bool> _handleDuplicateError(DioException e, String direction, String officeName) async {
     if (e.response != null) {
       final body = e.response?.data;
       if (body is Map && body['message'] is String) {
         final msg = body['message'] as String;
         if (msg.contains('already recorded') || msg.contains('Duplicate')) {
           debugPrint('[WIFI_BG] Duplicate detected — syncing state');
-          _setLastPunchType(direction);
-          if (direction == 'In') _setMatchedOffice(officeName);
-          final label = direction == 'In' ? 'IN' : 'OUT';
+          await _setLastPunchType(direction);
+          if (direction == 'In') {
+            await _setMatchedOffice(officeName);
+            await _clearManualIn();
+            await _setLastInByWifi();
+          }
           return true;
         }
       }
@@ -547,6 +588,47 @@ class WifiBackgroundWorker {
       debugPrint('[WIFI_BG] Token refresh failed — retaining tokens for main isolate');
       return null;
     }
+  }
+
+  // ── Last-in-method guard ─────────────────────────────────────────────────
+
+  static const lastInMethodKey = 'wifi_last_in_method';
+
+  /// Returns `true` if the last IN was done by WiFi auto-punch. Persisted
+  /// across restarts so we don't unduly punch OUT a manual IN.
+  Future<bool> _isLastInByWifi() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(lastInMethodKey) == 'wifi';
+  }
+
+  Future<void> _setLastInByWifi() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(lastInMethodKey, 'wifi');
+  }
+
+  Future<void> _clearLastInMethod() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(lastInMethodKey);
+  }
+
+  // ── Manual-out-on-wifi guard ────────────────────────────────────────────────
+
+  static const manualOutOnWifiKey = 'wifi_manual_out_on_wifi';
+  static const manualInKey = 'wifi_manual_in';
+
+  Future<bool> _isManualOutOnWifi() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(manualOutOnWifiKey) ?? false;
+  }
+
+  Future<bool> _isManualIn() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(manualInKey) ?? false;
+  }
+
+  Future<void> _clearManualIn() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(manualInKey, false);
   }
 
   // ── Debug emit ──────────────────────────────────────────────────────────────
