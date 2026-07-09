@@ -308,8 +308,8 @@ class WifiAutoPunchService {
       await _flushPendingOut();
       await checkAndPunchIfEnabled();
     } else {
-      AppLogger.d('WIFI_AUTO: WiFi disconnected');
-      await _handleWifiDisconnected();
+      AppLogger.d('WIFI_AUTO: Connectivity lost — re-checking before declaring disconnect');
+      await checkAndPunchIfEnabled();
     }
   }
 
@@ -414,7 +414,12 @@ class WifiAutoPunchService {
 
     if (isMatch) {
       if (lastStatus == 'In') {
-        AppLogger.d('WIFI_AUTO: Already IN → skipping');
+        // Phone on registered WiFi while already IN.  Mark last IN as WiFi
+        // so a future disconnect triggers OUT correctly.
+        if (lastInMethod != 'wifi') {
+          await markLastInByWifi();
+          AppLogger.i('WIFI_AUTO: Already IN on registered WiFi — marking lastIn=wifi');
+        }
         return;
       }
 
@@ -548,6 +553,13 @@ class WifiAutoPunchService {
     final lastStatus = lastPunchStatus;
 
     if (lastStatus == 'In') {
+      // Last-IN-method guard: manual IN (GPS/NFC) should not be undone
+      // by WiFi state changes.
+      if (lastInMethod != 'wifi') {
+        AppLogger.i('WIFI_AUTO: Last IN not via WiFi — skip auto OUT on disconnect');
+        return;
+      }
+
       AppLogger.i('WIFI_AUTO: WiFi lost → Punch OUT');
 
       final mac = _getRegisteredOfficeMac(currentOfficeName);

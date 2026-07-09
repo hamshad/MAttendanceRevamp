@@ -17,7 +17,7 @@ import '../../../models/office.dart';
 ///
 /// Runs inside the same flutter_background_service isolate as
 /// GeofenceBackgroundWorker. Monitors WiFi connect/disconnect via
-/// connectivity_plus stream + 60s fallback poll. Matches current BSSID
+/// connectivity_plus stream + 15s fallback poll. Matches current BSSID
 /// against persisted wifiRouters on each office. Punches IN on match,
 /// OUT on disconnect.
 class WifiBackgroundWorker {
@@ -57,8 +57,8 @@ class WifiBackgroundWorker {
     // Subscribe to connectivity changes
     _connSub = Connectivity().onConnectivityChanged.listen(_onConnectivity);
 
-    // 60s fallback poll (catches stream drops on some OEM ROMs)
-    _fallbackTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+    // 15s fallback poll (catches stream drops on some OEM ROMs)
+    _fallbackTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       _checkCurrentWifi();
     });
 
@@ -88,7 +88,10 @@ class WifiBackgroundWorker {
       debugPrint('[WIFI_BG] Mobile data available — flushing pending OUT if any');
       _checkCurrentWifi();
     } else {
-      _handleDisconnect();
+      // Stream says no connectivity — but the phone may have already
+      // transitioned to another WiFi.  Re-check before declaring
+      // disconnect so we don't OUT just to IN again on a registered AP.
+      _checkCurrentWifi();
     }
   }
 
@@ -177,7 +180,11 @@ class WifiBackgroundWorker {
           }
         }
       } else if (matched != null && lastPunchType == 'In') {
-        debugPrint('[WIFI_BG] Already IN — skipping duplicate');
+        // Phone connected to registered WiFi while already IN.  Mark last IN
+        // as WiFi so a future disconnect triggers OUT correctly, even though
+        // we don't need to punch duplicate IN.
+        await _setLastInByWifi();
+        debugPrint('[WIFI_BG] Registered WiFi connected — already IN, marking lastIn=wifi');
       } else {
         debugPrint('[WIFI_BG] No match and not IN — noop');
       }
@@ -196,10 +203,23 @@ class WifiBackgroundWorker {
       debugPrint('[WIFI_BG] WiFi disconnected — manual-out-on-wifi guard CLEARED');
     }
 
-    // WiFi disconnect also clears the last-in-method — user is leaving
-    await _clearLastInMethod();
+    // Last-IN-method guard: only punch OUT on disconnect if last IN was
+    // via WiFi. Manual IN (GPS/NFC) should not be undone by WiFi state.
+    final lastInByWifi = await _isLastInByWifi();
+    final lastPunchType = await _getLastPunchType();
 
-    // WiFi disconnect also clears manual IN — user is leaving, normal resume
+    if (!lastInByWifi) {
+      debugPrint('[WIFI_BG] Last IN not via WiFi — skip auto OUT on disconnect');
+      return;
+    }
+
+    // Clear last-in-method and manual IN — WiFi IN state is being left
+    if (lastPunchType != 'In') {
+      debugPrint('[WIFI_BG] WiFi disconnected — already OUT, clearing state');
+    } else {
+      debugPrint('[WIFI_BG] WiFi disconnected — punching OUT');
+    }
+    await _clearLastInMethod();
     if (await _isManualIn()) {
       await _clearManualIn();
       debugPrint('[WIFI_BG] WiFi disconnected — manual IN guard CLEARED');
@@ -213,9 +233,7 @@ class WifiBackgroundWorker {
     // Also try flushing pending before punching fresh
     await _flushPendingOut();
 
-    final lastPunchType = await _getLastPunchType();
     if (lastPunchType == 'In') {
-      debugPrint('[WIFI_BG] WiFi disconnected — punching OUT');
       final ok = await _punchOut('');
       if (!ok) {
         await _savePendingOut(bssid: '');
