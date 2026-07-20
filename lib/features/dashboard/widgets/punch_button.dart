@@ -7,11 +7,9 @@ import '../providers/dashboard_providers.dart';
 import '../../punch/screens/gps_punch_screen.dart';
 import '../../punch/screens/wifi_punch_screen.dart';
 import '../../punch/screens/selfie_punch_screen.dart';
-import '../../punch/screens/qr_scan_screen.dart';
 import '../../punch/screens/fingerprint_punch_screen.dart';
 import '../../punch/screens/ble_scan_screen.dart';
 import '../../punch/screens/nfc_tap_screen.dart';
-import '../../punch/screens/face_recog_screen.dart';
 import '../../punch/screens/client_site_screen.dart';
 import '../../punch/screens/break_screen.dart';
 
@@ -144,14 +142,6 @@ class _PunchButtonState extends ConsumerState<PunchButton>
           ),
         );
         break;
-      case 'QRCode':
-        await Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => QRScanScreen(direction: direction),
-          ),
-        );
-        break;
       case 'Fingerprint':
         await Navigator.push(
           context,
@@ -173,14 +163,6 @@ class _PunchButtonState extends ConsumerState<PunchButton>
           context,
           MaterialPageRoute(
             builder: (_) => NfcTapScreen(direction: direction),
-          ),
-        );
-        break;
-      case 'FaceRecog':
-        await Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => FaceRecogScreen(direction: direction),
           ),
         );
         break;
@@ -299,12 +281,10 @@ class MethodSelector extends ConsumerWidget {
   static const _methodMeta = {
     'GPS': (label: 'GPS', icon: Icons.gps_fixed),
     'WiFi': (label: 'WiFi', icon: Icons.wifi),
-    'QRCode': (label: 'QR', icon: Icons.qr_code_scanner),
     'Selfie': (label: 'Selfie', icon: Icons.photo_camera),
     'Fingerprint': (label: 'Print', icon: Icons.fingerprint),
     'Bluetooth': (label: 'BLE', icon: Icons.bluetooth),
     'NFC': (label: 'NFC', icon: Icons.nfc),
-    'FaceRecog': (label: 'Face', icon: Icons.face),
     'GeofenceAuto': (label: 'Geo', icon: Icons.radar),
     'Voice': (label: 'Voice', icon: Icons.mic),
     'ClientSite': (label: 'Site', icon: Icons.business),

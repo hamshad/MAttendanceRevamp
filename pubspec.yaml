@@ -35,9 +35,6 @@ dependencies:
   image_cropper: ^11.0.0
   flutter_image_compress: ^2.3.0
 
-  # QR Scanner
-  mobile_scanner: ^6.0.2
-
   # Biometrics
   local_auth: ^2.3.0
 
@@ -70,11 +67,6 @@ dependencies:
 
   # NFC
   nfc_manager: ^3.5.0
-
-  # Face Recognition (ML Kit detection + TFLite MobileFaceNet embedding)
-  google_mlkit_face_detection: 0.12.0
-  image: ^4.5.4
-  tflite_flutter: ^0.12.0
 
   # Geofence Auto-Punch
   geofence_service: 6.0.0+1
@@ -121,4 +113,3 @@ flutter:
   uses-material-design: true
   assets:
     - assets/images/
-    - assets/models/

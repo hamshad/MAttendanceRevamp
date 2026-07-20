@@ -34,7 +34,7 @@ import '../punch/services/shift_service.dart';
 import '../punch/services/wifi_auto_punch_service.dart';
 import '../settings/screens/geofence_settings_screen.dart';
 import '../settings/screens/wifi_settings_screen.dart';
-import '../settings/screens/face_enrollment_screen.dart';
+
 import '../../models/attendance.dart';
 import '../../models/shift.dart';
 import '../tracking/screens/my_field_tracking_screen.dart';
@@ -1154,27 +1154,6 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
             value: isDark,
             onChanged: (_) =>
                 ref.read(themeModeProvider.notifier).toggle(),
-          ),
-
-          const Divider(height: 1),
-
-          // ── Face Recognition ─────────────────────────────────────────────
-          ListTile(
-            leading: Icon(
-              Icons.face_retouching_natural,
-              color: AppColors.gray,
-            ),
-            title: const Text('Face Recognition'),
-            subtitle: const Text(
-              'Enroll your face for Face Recognition punch',
-              style: TextStyle(fontSize: 12),
-            ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                  builder: (_) => const FaceEnrollmentScreen()),
-            ),
           ),
 
           const Divider(height: 1),
