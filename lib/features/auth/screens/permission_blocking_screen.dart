@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/permission_service.dart';
 import '../../dashboard/providers/dashboard_providers.dart';
@@ -18,6 +21,7 @@ class _PermissionBlockingScreenState extends ConsumerState<PermissionBlockingScr
   bool _isRequesting = false;
   bool? _needsBackground;
   bool _checkTriggered = false;
+  bool _permanentlyDenied = false;
 
   Future<void> _checkPermission() async {
     final needsBg = _needsBackground!;
@@ -44,15 +48,34 @@ class _PermissionBlockingScreenState extends ConsumerState<PermissionBlockingScr
         : await PermissionService.instance.requestForegroundLocation();
 
     if (mounted) {
+      // On iOS/Android, if the OS will no longer prompt the user (denied
+      // permanently), surface a Settings button instead of looping.
+      final permDenied = needsBg
+          ? await Permission.locationAlways.isPermanentlyDenied
+          : await Permission.location.isPermanentlyDenied;
       setState(() {
         _hasPermission = success;
+        _permanentlyDenied = !success && permDenied;
         _isRequesting = false;
       });
     }
   }
 
+  Future<void> _openSettings() async {
+    await openAppSettings();
+    // Re-check after the user returns from Settings.
+    await _checkPermission();
+    if (mounted) setState(() => _permanentlyDenied = false);
+  }
+
   @override
   Widget build(BuildContext context) {
+    // iOS handles location permissions at the OS-level prompt when
+    // Geolocator is actually called (getCurrentPosition / getPositionStream).
+    // The Android-style startup gate blocks the app and doesn't map to iOS
+    // permission semantics — skip it entirely.
+    if (Platform.isIOS) return widget.child;
+
     final permsAsync = ref.watch(accessPermissionsProvider);
 
     final needsBackground = permsAsync.when(
@@ -162,6 +185,20 @@ class _PermissionBlockingScreenState extends ConsumerState<PermissionBlockingScr
                     : Text(isBg ? 'Allow All The Time' : 'Allow Location Access'),
               ),
               const SizedBox(height: 16),
+
+              if (_permanentlyDenied)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: ElevatedButton.icon(
+                    onPressed: _openSettings,
+                    icon: const Icon(Icons.settings),
+                    label: const Text('Open Settings'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.warning,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ),
 
               TextButton(
                 onPressed: _checkPermission,
