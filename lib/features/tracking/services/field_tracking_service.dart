@@ -180,6 +180,7 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
   LocationResult? lastPingPosition;
   DateTime? lastPingTime;
   StreamSubscription<Position>? positionSub;
+  StreamSubscription<ServiceStatus>? gpsStatusSub;
   Timer? timer;
 
   // ── Geofence auto-punch worker ─────────────────────────────────────────────
@@ -588,6 +589,39 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
     onError: (_) {},
   );
 
+  // ── GPS service status monitor ─────────────────────────────────────────────
+  // When user turns off GPS while geofence auto-punch is enabled, alert them
+  // that geofence will stop working.
+  late final FlutterLocalNotificationsPlugin gpsNotif =
+      FlutterLocalNotificationsPlugin();
+  gpsStatusSub = Geolocator.getServiceStatusStream().listen((status) async {
+    final prefs = await SharedPreferences.getInstance();
+    final gfEnabled = prefs.getBool('geofence_auto_enabled') ?? false;
+    if (status == ServiceStatus.disabled && gfEnabled) {
+      debugPrint('[GF_BG_ENTRY] GPS turned off while geofence active — sending alert');
+      try {
+        await gpsNotif.show(
+          996,
+          'GPS Turned Off',
+          'Geofence auto-punch paused — turn on GPS to resume monitoring',
+          const NotificationDetails(
+            android: AndroidNotificationDetails(
+              'gps_disabled',
+              'GPS Disabled',
+              importance: Importance.high,
+              priority: Priority.high,
+            ),
+          ),
+        );
+      } catch (e) {
+        debugPrint('[GF_BG_ENTRY] GPS disabled notification failed: $e');
+      }
+    } else if (status == ServiceStatus.enabled && gfEnabled) {
+      debugPrint('[GF_BG_ENTRY] GPS re-enabled — dismissing alert');
+      await gpsNotif.cancel(996);
+    }
+  });
+
   // ── Ping timer ─────────────────────────────────────────────────────────────
 
   timer = Timer.periodic(const Duration(minutes: 5), (_) async {
@@ -723,6 +757,7 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
     await emitDebug(event: 'service_stop', reason: 'Stop command received');
     timer?.cancel();
     await positionSub?.cancel();
+    await gpsStatusSub?.cancel();
     wifiWorker.stop();
     service.invoke('running', {'value': false});
     final stopPrefs = await SharedPreferences.getInstance();

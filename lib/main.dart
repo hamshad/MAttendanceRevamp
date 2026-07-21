@@ -101,6 +101,14 @@ void main() async {
         importance: Importance.low,
       ),
     );
+    await androidPlugin.createNotificationChannel(
+      const AndroidNotificationChannel(
+        'gps_disabled',
+        'GPS Disabled',
+        description: 'Alerts when GPS is turned off while geofence is active',
+        importance: Importance.high,
+      ),
+    );
   }
 
   // Background field tracking service — registers the entrypoint before runApp.
