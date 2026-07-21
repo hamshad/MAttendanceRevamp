@@ -225,7 +225,19 @@ class _MainShellState extends ConsumerState<MainShell>
 
   Future<void> _startFieldTracking() async {
     final perms = ref.read(accessPermissionsProvider).value;
-    if (perms?.allowFieldTracking != true) return;
+    final hasFieldTrackingPerm = perms?.allowFieldTracking == true;
+
+    // If field tracking not permitted, check if geofence auto-punch is enabled.
+    // On iOS we only run the background service when there's a reason to.
+    if (!hasFieldTrackingPerm) {
+      final prefs = await SharedPreferences.getInstance();
+      final geofenceEnabled = prefs.getBool('geofence_auto_enabled') ?? false;
+      if (!geofenceEnabled) {
+        debugPrint('SHELL_FT: No field tracking perm + geofence disabled — skipping bg service');
+        return;
+      }
+      debugPrint('SHELL_FT: Geofence enabled without field tracking — starting bg service');
+    }
 
     // On Android, request battery-optimization exemption before starting the
     // foreground service.  Without it Doze mode can pause the Dart timer and
