@@ -41,6 +41,12 @@
 	<string>mAttendance needs background location access to continuously track your field route while you are punched in.</string>
 	<key>NSLocationAlwaysUsageDescription</key>
 	<string>mAttendance needs background location access to continuously track your field route while you are punched in.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>mAttendance uses Bluetooth to improve location accuracy for attendance tracking.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>mAttendance uses the camera to take your profile photo.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>mAttendance accesses your photo library to set your profile photo.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>mAttendance uses your location to record field attendance punches.</string>
 	<key>UIApplicationSceneManifest</key>
