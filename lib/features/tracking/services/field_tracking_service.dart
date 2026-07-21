@@ -187,8 +187,11 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
   debugPrint('[GF_BG_ENTRY] GeoWorker created');
 
   // ── WiFi auto-punch background worker ──────────────────────────────────────
-  final wifiWorker = WifiBackgroundWorker(service);
-  debugPrint('[GF_BG_ENTRY] WifiWorker created');
+  late final WifiBackgroundWorker wifiWorker;
+  if (!Platform.isIOS) {
+    wifiWorker = WifiBackgroundWorker(service);
+    debugPrint('[GF_BG_ENTRY] WifiWorker created');
+  }
 
   // ── Foreground notification (required by Android for foreground service) ──
   if (service is AndroidServiceInstance) {
@@ -658,8 +661,12 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
   debugPrint('[GF_BG_ENTRY] geoWorker.loadData() complete');
 
   // ── Start WiFi background worker ─────────────────────────────────────────
-  wifiWorker.start();
-  debugPrint('[GF_BG_ENTRY] WiFi background worker started');
+  if (!Platform.isIOS) {
+    wifiWorker.start();
+    debugPrint('[GF_BG_ENTRY] WiFi background worker started');
+  } else {
+    debugPrint('[GF_BG_ENTRY] Skipping WiFi background worker on iOS');
+  }
 
   // ── Proactive initial location check ──────────────────────────────────────
   // On first start (fresh install, new login, app restart), the GPS stream may

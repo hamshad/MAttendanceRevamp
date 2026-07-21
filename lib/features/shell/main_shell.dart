@@ -855,37 +855,39 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
             ),
           ),
 
-          const Divider(height: 1),
+          if (Platform.isAndroid) ...[
+            const Divider(height: 1),
 
-          // ── WiFi Auto-Punch ──────────────────────────────────────────────
-          ListTile(
-            leading: Consumer(builder: (context, ref, _) {
-              final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
-              return Icon(
-                Icons.wifi_sharp,
-                color: wifiEnabled
-                    ? theme.colorScheme.primary
-                    : AppColors.gray,
-              );
-            }),
-            title: const Text('WiFi Auto-Punch'),
-            subtitle: Consumer(builder: (context, ref, _) {
-              final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
-              return Text(
-                wifiEnabled ? 'On' : 'Off',
-                style: TextStyle(
-                  color: wifiEnabled ? AppColors.success : AppColors.gray,
-                  fontSize: 12,
-                ),
-              );
-            }),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                  builder: (_) => const WifiSettingsScreen()),
+            // ── WiFi Auto-Punch ──────────────────────────────────────────────
+            ListTile(
+              leading: Consumer(builder: (context, ref, _) {
+                final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
+                return Icon(
+                  Icons.wifi_sharp,
+                  color: wifiEnabled
+                      ? theme.colorScheme.primary
+                      : AppColors.gray,
+                );
+              }),
+              title: const Text('WiFi Auto-Punch'),
+              subtitle: Consumer(builder: (context, ref, _) {
+                final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
+                return Text(
+                  wifiEnabled ? 'On' : 'Off',
+                  style: TextStyle(
+                    color: wifiEnabled ? AppColors.success : AppColors.gray,
+                    fontSize: 12,
+                  ),
+                );
+              }),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => const WifiSettingsScreen()),
+              ),
             ),
-          ),
+          ],
 
           const Divider(height: 1),
 
