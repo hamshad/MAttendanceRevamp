@@ -268,8 +268,6 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
         AppLogger.w('AUTH: Server-side logout failed (ignoring)', e);
       }
     }
-    await GeofenceScheduler.cancel();
-    await GeofenceScheduler.stopGeofenceService();
     await _tokenStorage.clearTokens();
     await AppUser.clear();
     ref.read(officeDataServiceProvider).reset();

@@ -5,7 +5,6 @@ import '../../../core/api/api_endpoints.dart';
 import '../../../core/utils/app_logger.dart';
 import '../../../core/utils/constants.dart';
 import '../../../models/shift.dart';
-import 'geofence_scheduler.dart';
 
 class ShiftService {
   final Dio _dio;
@@ -28,16 +27,6 @@ class ShiftService {
     final box = await Hive.openBox(AppConstants.shiftsBox);
     final json = shifts.map((s) => s.toJson()).toList();
     await box.put('cached', jsonEncode(json));
-
-    // Schedule Workmanager alarm for the next shift so the geofence
-    // background service auto-starts without requiring the app to be open.
-    _scheduleAlarm(shifts);
-  }
-
-  /// Schedule alarm for the most relevant shift from the list.
-  /// Also starts the combined service immediately if within shift window.
-  static void _scheduleAlarm(List<Shift> shifts) {
-    GeofenceScheduler.startIfWithinShiftWindow(shifts).catchError((_) {});
   }
 
   static List<Shift> loadCachedShifts() {
