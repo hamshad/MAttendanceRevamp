@@ -23,7 +23,10 @@ final attendanceStatusProvider = AsyncNotifierProvider<AttendanceStatusNotifier,
 
 class AttendanceStatusNotifier extends AsyncNotifier<EmployeeStatus?> {
   @override
-  Future<EmployeeStatus?> build() => _fetch();
+  Future<EmployeeStatus?> build() async {
+    ref.watch(authNotifierProvider);
+    return _fetch();
+  }
 
   Future<EmployeeStatus?> _fetch() async {
     try {
@@ -33,7 +36,15 @@ class AttendanceStatusNotifier extends AsyncNotifier<EmployeeStatus?> {
       final data = response.data['data'] as Map<String, dynamic>?;
       return data != null ? EmployeeStatus.fromJson(data) : null;
     } catch (_) {
-      return null;
+      try {
+        await Future.delayed(const Duration(milliseconds: 800));
+        final dio = ref.read(dioClientProvider).dio;
+        final response = await dio.get(ApiEndpoints.todayStatus);
+        final data = response.data['data'] as Map<String, dynamic>?;
+        return data != null ? EmployeeStatus.fromJson(data) : null;
+      } catch (_) {
+        return null;
+      }
     }
   }
 

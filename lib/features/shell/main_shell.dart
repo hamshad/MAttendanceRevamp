@@ -141,6 +141,9 @@ class _MainShellState extends ConsumerState<MainShell>
 
       // 4. Ensure the combined service is running if within shift window
       _initGeofenceScheduler();
+
+      // 5. Refresh dashboard data so it's never stale on resume
+      ref.invalidate(attendanceStatusProvider);
     }
   }
 
