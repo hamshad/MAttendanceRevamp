@@ -199,13 +199,17 @@ class DioClient {
           refreshSuccess = true;
         } catch (e) {
           retryCount++;
+          final status = (e is DioException) ? e.response?.statusCode : null;
+          // Transient = non-badResponse errors OR 5xx OR 429 (rate-limit)
           final isTransient = e is DioException && 
-              (e.type != DioExceptionType.badResponse || (e.response?.statusCode ?? 0) >= 500);
+              (e.type != DioExceptionType.badResponse || 
+               (status ?? 0) >= 500 ||
+               status == 429);
           
           if (!isTransient || retryCount >= 3) {
             rethrow;
           }
-          AppLogger.w('[AUTH] Refresh attempt $retryCount failed (transient). Retrying in 2s...');
+          AppLogger.w('[AUTH] Refresh attempt $retryCount failed. Retrying in 2s...');
           await Future.delayed(const Duration(seconds: 2));
         }
       }
@@ -226,6 +230,8 @@ class DioClient {
       await _tokenStorage.releaseRefreshLock();
       _isRefreshing = false;
 
+      final status = (e is DioException) ? e.response?.statusCode : null;
+
       final isNetworkError = e is DioException &&
           (e.type == DioExceptionType.connectionTimeout ||
               e.type == DioExceptionType.sendTimeout ||
@@ -233,24 +239,31 @@ class DioClient {
               e.type == DioExceptionType.connectionError ||
               e.response == null);
 
+      // Server 5xx AND rate-limit (429) should NOT force logout
       final isServerError = e is DioException &&
           e.response != null &&
-          e.response!.statusCode != null &&
-          e.response!.statusCode! >= 500;
+          status != null &&
+          (status >= 500 || status == 429);
 
       if (isNetworkError || isServerError) {
-        AppLogger.w('[AUTH] Refresh failed due to network/server error. Session retained.');
+        AppLogger.w('[AUTH] Refresh failed (network/server/rate-limit). Session retained. Status=$status');
         _rejectPendingRequests(e);
         return handler.next(_mapError(e));
       }
 
       // Fatal refresh failure (token revoked, 400 Bad Request, etc.)
-      AppLogger.e('[AUTH] Refresh FAILED (fatal) — clearing session', e);
+      AppLogger.e('[AUTH] Refresh FAILED (fatal) — clearing session. Status=$status, error=$e');
       await _handleRefreshFailure(error, handler);
     }
   }
 
   Future<void> _handleRefreshFailure(DioException error, ErrorInterceptorHandler handler) async {
+    AppLogger.e('[AUTH] _handleRefreshFailure — clearing session. '
+        'Path=${error.requestOptions.path}, '
+        'Status=${error.response?.statusCode}, '
+        'Type=${error.type}, '
+        'Error=${error.error}, '
+        'Msg=${error.message}');
     await _tokenStorage.clearTokens();
     _isRefreshing = false;
     _rejectPendingRequests(error);
@@ -286,9 +299,11 @@ class DioClient {
       attempts++;
     }
     
-    // If we waited too long, try to take over the refresh or fail
+    // If we waited too long, pass the error through instead of re-triggering
+    // another refresh cycle that could cascade into an accidental forceLogout.
     _isRefreshing = false;
-    _onError(error, handler);
+    AppLogger.w('[AUTH] Other isolate refresh did not complete within timeout. Passing error through.');
+    return handler.next(_mapError(error));
   }
 
   /// Retry all queued requests with the new access token after a successful refresh.

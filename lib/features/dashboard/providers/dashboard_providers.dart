@@ -4,6 +4,7 @@ import 'package:network_info_plus/network_info_plus.dart';
 import '../../../core/auth/auth_provider.dart';
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/offline/offline_providers.dart';
+import '../../../core/utils/app_logger.dart';
 import '../../punch/services/manual_geo_service.dart';
 import '../../../models/attendance.dart';
 import '../../../models/offline_punch.dart';
@@ -23,7 +24,11 @@ final attendanceStatusProvider = AsyncNotifierProvider<AttendanceStatusNotifier,
 
 class AttendanceStatusNotifier extends AsyncNotifier<EmployeeStatus?> {
   @override
-  Future<EmployeeStatus?> build() => _fetch();
+  Future<EmployeeStatus?> build() {
+    // Watch auth so this provider auto-refetches when user logs in/out.
+    ref.watch(authNotifierProvider);
+    return _fetch();
+  }
 
   Future<EmployeeStatus?> _fetch() async {
     try {
@@ -32,7 +37,8 @@ class AttendanceStatusNotifier extends AsyncNotifier<EmployeeStatus?> {
       print('[DEBUG_SHIFT] Raw /attendance/status JSON (dashboard): ${response.data}');
       final data = response.data['data'] as Map<String, dynamic>?;
       return data != null ? EmployeeStatus.fromJson(data) : null;
-    } catch (_) {
+    } catch (e) {
+      AppLogger.e('attendanceStatusProvider: fetch failed', e);
       return null;
     }
   }

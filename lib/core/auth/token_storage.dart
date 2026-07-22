@@ -42,7 +42,12 @@ class TokenStorage {
   Future<String?> getAccessToken() async {
     await _syncFromBackgroundMirror();
     try {
-      return await _storage.read(key: _accessKey);
+      final token = await _storage.read(key: _accessKey);
+      if (token != null) return token;
+      // Keychain returned null (write not propagated yet) — fall back to
+      // SharedPreferences mirror which is always available immediately.
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString(bgAccessTokenKey);
     } catch (e) {
       AppLogger.e('TokenStorage: SecureStorage read failed', e);
       // Fallback to background mirror if secure storage is transiently unavailable
@@ -54,7 +59,11 @@ class TokenStorage {
   Future<String?> getRefreshToken() async {
     await _syncFromBackgroundMirror();
     try {
-      return await _storage.read(key: _refreshKey);
+      final token = await _storage.read(key: _refreshKey);
+      if (token != null) return token;
+      // Same fallback for Keychain propagation delay
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString(bgRefreshTokenKey);
     } catch (e) {
       AppLogger.e('TokenStorage: SecureStorage read failed', e);
       final prefs = await SharedPreferences.getInstance();
