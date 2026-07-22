@@ -83,25 +83,20 @@ class DioClient {
     RequestOptions options,
     RequestInterceptorHandler handler,
   ) async {
-    final token = await _tokenStorage.getAccessToken();
+    String? token = await _tokenStorage.getAccessToken();
+    if (token == null && !options.path.contains('/auth/')) {
+      // Retry once — guards against transient FlutterSecureStorage failures
+      // that would cascade into forceLogout if we synthesised a 401 here.
+      token = await _tokenStorage.getAccessToken();
+    }
     if (token != null) {
       options.headers['Authorization'] = 'Bearer $token';
-    } else if (!options.path.contains('/auth/')) {
-      // No token available and this isn't an auth endpoint — skip request
-      // instead of sending an unauthenticated call that will 401 and
-      // possibly trigger a cascading forceLogout.
-      handler.reject(DioException(
-        requestOptions: options,
-        error: const ApiException('Not authenticated. Please log in.', statusCode: 401),
-        type: DioExceptionType.badResponse,
-        response: Response(
-          requestOptions: options,
-          statusCode: 401,
-          data: {'message': 'Not authenticated. Please log in.'},
-        ),
-      ));
-      return;
     }
+    // If token is still null for a non-auth endpoint, let the request through
+    // without auth header. The server returns a real 401 if auth is required,
+    // and our 401 interceptor handles refresh properly using the refresh token.
+    // Previously we synthesised a 401 here which could cascade into
+    // forceLogout on transient storage failures.
 
     options.headers['X-Client-Type'] = 'mobile';
     options.headers['X-Platform'] = _platform;
@@ -163,11 +158,31 @@ class DioClient {
     }
 
     try {
-      final refreshToken = await _tokenStorage.getRefreshToken();
-      final expiredAccessToken = await _tokenStorage.getAccessToken();
+      String? refreshToken = await _tokenStorage.getRefreshToken();
+      String? expiredAccessToken = await _tokenStorage.getAccessToken();
 
       if (refreshToken == null) {
-        AppLogger.w('[AUTH] No refresh token — forcing logout');
+        // Retry once — could be transient FlutterSecureStorage failure
+        AppLogger.w('[AUTH] Refresh token null — retrying read...');
+        await Future.delayed(const Duration(milliseconds: 100));
+        refreshToken = await _tokenStorage.getRefreshToken();
+        if (expiredAccessToken == null) {
+          expiredAccessToken = await _tokenStorage.getAccessToken();
+        }
+      }
+
+      if (refreshToken == null) {
+        if (expiredAccessToken != null ||
+            await _tokenStorage.getAccessToken() != null) {
+          // Access token exists but refresh missing — partial state, don't
+          // force logout. The request fails but session survives.
+          AppLogger.w('[AUTH] No refresh token but access token exists — retaining session');
+          _isRefreshing = false;
+          await _tokenStorage.releaseRefreshLock();
+          _rejectPendingRequests(error);
+          return handler.next(_mapError(error));
+        }
+        AppLogger.w('[AUTH] No refresh token — clearing session');
         await _handleRefreshFailure(error, handler);
         return;
       }
@@ -238,15 +253,31 @@ class DioClient {
           e.response!.statusCode != null &&
           e.response!.statusCode! >= 500;
 
+      // Only 400 Bad Request from the refresh endpoint means the token was
+      // definitively rejected (revoked / invalid). All other errors are
+      // transient and MUST NOT force-logout the user.
+      final isTokenRejected = e is DioException &&
+          e.response != null &&
+          e.response!.statusCode == 400;
+
       if (isNetworkError || isServerError) {
         AppLogger.w('[AUTH] Refresh failed due to network/server error. Session retained.');
         _rejectPendingRequests(e);
         return handler.next(_mapError(e));
       }
 
-      // Fatal refresh failure (token revoked, 400 Bad Request, etc.)
-      AppLogger.e('[AUTH] Refresh FAILED (fatal) — clearing session', e);
-      await _handleRefreshFailure(error, handler);
+      if (isTokenRejected) {
+        AppLogger.e('[AUTH] Refresh token rejected by server (400) — clearing session', e);
+        await _handleRefreshFailure(error, handler);
+        return;
+      }
+
+      // Catch-all for ambiguous errors (429, 403, parse failures, etc.).
+      // Never force-logout on errors we can't positively identify as
+      // token-revocation — the next request may succeed.
+      AppLogger.w('[AUTH] Refresh failed (non-fatal) — retaining session', e);
+      _rejectPendingRequests(error);
+      return handler.next(_mapError(error));
     }
   }
 
