@@ -36,6 +36,11 @@ class WifiAutoPunchService {
 
   static const String defaultCompanySsid = 'Moksha_Office';
 
+  // Cooldown after a punch action — prevents rapid IN→OUT when two
+  // WiFi scans within the same frame return different results on startup.
+  static const int _cooldownMs = 10000;
+  static int _lastPunchTimestamp = 0;
+
   final Dio _dio;
   final FlutterLocalNotificationsPlugin _notifications;
   final WifiService _wifiService = WifiService();
@@ -77,10 +82,9 @@ class WifiAutoPunchService {
   static Future<void> setRegisteredSsid(String ssid) =>
       Hive.box(AppConstants.cacheBox).put(_registeredSsidKey, ssid);
 
-  // ✅ NEW: Punch state
   static String get lastPunchStatus {
     final box = Hive.box(AppConstants.cacheBox);
-    return box.get(_lastPunchStatusKey, defaultValue: '') as String;
+    return box.get(_lastPunchStatusKey, defaultValue: 'unknown') as String;
   }
 
   static String get lastMac {
@@ -99,8 +103,10 @@ class WifiAutoPunchService {
   static Future<void> setCurrentOfficeName(String name) =>
       Hive.box(AppConstants.cacheBox).put(_currentOfficeNameKey, name);
 
-  static Future<void> setLastPunchStatus(String status) =>
-      Hive.box(AppConstants.cacheBox).put(_lastPunchStatusKey, status);
+  static Future<void> setLastPunchStatus(String status) async {
+    await Hive.box(AppConstants.cacheBox).put(_lastPunchStatusKey, status);
+    _lastPunchTimestamp = DateTime.now().millisecondsSinceEpoch;
+  }
 
   static bool get manualOutOnWifi {
     final box = Hive.box(AppConstants.cacheBox);
@@ -280,8 +286,12 @@ class WifiAutoPunchService {
 
     _running = true;
 
-    // Immediate check
-    await checkAndPunchIfEnabled();
+    // No immediate check here — the connectivity stream fires asynchronously
+    // right after subscription, which triggers _onConnectivityChanged →
+    // checkAndPunchIfEnabled().  Adding another call here would run two
+    // WiFi scans back-to-back, and the second scan can return a different
+    // BSSID (radio still busy), causing the first scan to punch IN and the
+    // second to punch OUT.
   }
 
   void stop() async {
@@ -411,6 +421,24 @@ class WifiAutoPunchService {
   Future<void> _triggerPunch(WifiInfo info, Office? matchedOffice) async {
     final lastStatus = lastPunchStatus;
     final isMatch = matchedOffice != null;
+
+    // ── Unknown-state guard ──────────────────────────────────────
+    // On fresh app start, lastPunchStatus defaults to 'unknown'.
+    // Don't punch until the server syncs the real state via
+    // _onAttendanceStatusChanged → syncState().
+    if (lastStatus == '' || lastStatus == 'unknown') {
+      AppLogger.i('WIFI_AUTO: Unknown punch state ($lastStatus) — deferring to server sync');
+      return;
+    }
+
+    // ── Cooldown guard ───────────────────────────────────────────
+    // Prevent rapid IN → OUT when two WiFi scans return different
+    // results within a short window (common on fresh app open).
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastPunchTimestamp > 0 && (now - _lastPunchTimestamp) < _cooldownMs) {
+      AppLogger.i('WIFI_AUTO: Cooldown active (${now - _lastPunchTimestamp}ms) — skipping punch');
+      return;
+    }
 
     if (isMatch) {
       if (lastStatus == 'In') {

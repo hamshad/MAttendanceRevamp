@@ -478,6 +478,7 @@ class WifiBackgroundWorker {
 
   Future<String?> _getLastPunchType() async {
     final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
     return prefs.getString(_kLastPunchType);
   }
 
