@@ -59,7 +59,7 @@ class WifiAutoPunchService {
 
   static bool get isEnabled {
     final box = Hive.box(AppConstants.cacheBox);
-    return box.get(_enabledKey, defaultValue: true) as bool;
+    return box.get(_enabledKey, defaultValue: false) as bool;
   }
 
   static Future<void> setEnabled(bool value) async {
@@ -99,8 +99,12 @@ class WifiAutoPunchService {
   static Future<void> setCurrentOfficeName(String name) =>
       Hive.box(AppConstants.cacheBox).put(_currentOfficeNameKey, name);
 
-  static Future<void> setLastPunchStatus(String status) =>
-      Hive.box(AppConstants.cacheBox).put(_lastPunchStatusKey, status);
+  static Future<void> setLastPunchStatus(String status) async {
+    await Hive.box(AppConstants.cacheBox).put(_lastPunchStatusKey, status);
+    // Write shared timestamp so background worker rate limiter sees this punch
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('gf_last_punch_time', DateTime.now().toIso8601String());
+  }
 
   static bool get manualOutOnWifi {
     final box = Hive.box(AppConstants.cacheBox);
@@ -318,7 +322,25 @@ class WifiAutoPunchService {
   Future<void> checkAndPunchIfEnabled() async {
     AppLogger.v('WIFI_AUTO: checkAndPunchIfEnabled() - isEnabled: $isEnabled');
     if (!isEnabled) return;
+
+    // Rate limit: skip if any WiFi/geofence punch in last 30s
+    // (coordinates with background worker via SharedPreferences).
+    if (await _isRateLimited()) {
+      AppLogger.d('WIFI_AUTO: Rate limited — skipping');
+      return;
+    }
+
     await _checkCurrentConnection();
+  }
+
+  /// Rate limiter: shares SP key `gf_last_punch_time` with background workers.
+  Future<bool> _isRateLimited([Duration duration = const Duration(seconds: 30)]) async {
+    final prefs = await SharedPreferences.getInstance();
+    final lastTs = prefs.getString('gf_last_punch_time');
+    if (lastTs == null) return false;
+    final last = DateTime.tryParse(lastTs);
+    if (last == null) return false;
+    return DateTime.now().difference(last) < duration;
   }
 
   // ── Check Current WiFi ─────────────────────────────────────

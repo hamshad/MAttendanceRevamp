@@ -104,6 +104,12 @@ class WifiBackgroundWorker {
       return;
     }
 
+    // Rate limit: skip if WiFi punch happened in last 30s
+    if (await _isRateLimited()) {
+      debugPrint('[WIFI_BG] Rate limited — skipping check');
+      return;
+    }
+
     try {
       // Verify WiFi is actually connected (BSSID can be stale on Android)
       final connectivity = await Connectivity().checkConnectivity();
@@ -195,6 +201,12 @@ class WifiBackgroundWorker {
 
   Future<void> _handleDisconnect() async {
     if (!await _isEnabled()) return;
+
+    // Rate limit
+    if (await _isRateLimited()) {
+      debugPrint('[WIFI_BG] Rate limited — skip disconnect');
+      return;
+    }
 
     // WiFi disconnect clears the manual-out-on-wifi guard
     if (await _isManualOutOnWifi()) {
@@ -504,9 +516,17 @@ class WifiBackgroundWorker {
   Future<bool> _isEnabled() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
-    // Check the main isolate's Hive key via SharedPreferences mirror
-    // Main isolate writes this when toggling WiFi auto-punch
-    return prefs.getBool('wifi_auto_punch_enabled_bg') ?? true;
+    return prefs.getBool('wifi_auto_punch_enabled_bg') ?? false;
+  }
+
+  /// Rate limiter: skip if a WiFi punch was recorded within [duration].
+  Future<bool> _isRateLimited([Duration duration = const Duration(seconds: 30)]) async {
+    final prefs = await SharedPreferences.getInstance();
+    final lastTs = prefs.getString(_kLastPunchTime);
+    if (lastTs == null) return false;
+    final last = DateTime.tryParse(lastTs);
+    if (last == null) return false;
+    return DateTime.now().difference(last) < duration;
   }
 
   // ── HTTP Helpers ───────────────────────────────────────────────────────────
