@@ -30,6 +30,7 @@ import '../notifications/screens/notifications_screen.dart';
 import '../punch/services/shift_service.dart';
 import '../punch/services/wifi_auto_punch_service.dart';
 import '../settings/screens/wifi_settings_screen.dart';
+import '../settings/screens/geofence_settings_screen.dart';
 
 import '../../models/attendance.dart';
 import '../../models/shift.dart';
@@ -85,6 +86,7 @@ class _MainShellState extends ConsumerState<MainShell>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initWifiAuto();
       _initFieldTracking();
+      _initGeofenceAuto();
       fetchUnreadCount(ref);
       _initFCM();
     });
@@ -188,6 +190,14 @@ class _MainShellState extends ConsumerState<MainShell>
       _wifiAutoService?.stop();
       _wifiAutoService = null;
     }
+  }
+
+  // ── Geofence Auto lifecycle ──────────────────────────────────────────────────
+
+  Future<void> _initGeofenceAuto() async {
+    if (!mounted) return;
+    final val = await isGeofenceAutoEnabled();
+    ref.read(geofenceAutoEnabledProvider.notifier).state = val;
   }
 
   // ── Field tracking lifecycle ───────────────────────────────────────────────
@@ -415,6 +425,19 @@ class _MainShellState extends ConsumerState<MainShell>
     debugPrint('SHELL: build() - index: $index, wifiAutoEnabled: $wifiAutoEnabled');
 
     ref.listen<bool>(wifiAutoEnabledProvider, _onWifiAutoToggle);
+    ref.listen<bool>(geofenceAutoEnabledProvider, (_, next) {
+      debugPrint('SHELL: Geofence Auto-Punch toggled -> $next');
+      if (next && mounted) {
+        _startFieldTracking();
+      } else if (mounted) {
+        final ftRunning = ref.read(fieldTrackingRunningProvider);
+        final prefs = ref.read(accessPermissionsProvider).value;
+        if (!ftRunning && prefs?.allowFieldTracking != true) {
+          debugPrint('SHELL: Geofence OFF + no field tracking — stopping bg service');
+          FieldTrackingService.stop();
+        }
+      }
+    });
     ref.listen<AsyncValue<EmployeeStatus?>>(
         attendanceStatusProvider, _onAttendanceStatusChanged);
     // Start field tracking if permissions arrive after _initFieldTracking ran.
@@ -900,6 +923,38 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
               ),
             ),
           ],
+
+          const Divider(height: 1),
+
+          // ── Geofence Auto-Punch ──────────────────────────────────────────
+          ListTile(
+            leading: Consumer(builder: (context, ref, _) {
+              final gfEnabled = ref.watch(geofenceAutoEnabledProvider);
+              return Icon(
+                Icons.near_me_sharp,
+                color: gfEnabled
+                    ? theme.colorScheme.primary
+                    : AppColors.gray,
+              );
+            }),
+            title: const Text('Geofence Auto-Punch'),
+            subtitle: Consumer(builder: (context, ref, _) {
+              final gfEnabled = ref.watch(geofenceAutoEnabledProvider);
+              return Text(
+                gfEnabled ? 'On' : 'Off',
+                style: TextStyle(
+                  color: gfEnabled ? AppColors.success : AppColors.gray,
+                  fontSize: 12,
+                ),
+              );
+            }),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                  builder: (_) => const GeofenceSettingsScreen()),
+            ),
+          ),
 
           const Divider(height: 1),
 
