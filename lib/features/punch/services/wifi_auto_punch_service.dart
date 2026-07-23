@@ -105,6 +105,11 @@ class WifiAutoPunchService {
 
   static Future<void> setLastPunchStatus(String status) async {
     await Hive.box(AppConstants.cacheBox).put(_lastPunchStatusKey, status);
+    // Mirror to SharedPreferences so background worker (which reads
+    // gf_last_punch_type) sees the update without waiting for a punch
+    // API response.
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('gf_last_punch_type', status);
     _lastPunchTimestamp = DateTime.now().millisecondsSinceEpoch;
   }
 
@@ -316,7 +321,9 @@ class WifiAutoPunchService {
     } else if (results.contains(ConnectivityResult.mobile)) {
       AppLogger.d('WIFI_AUTO: Mobile data available');
       await _flushPendingOut();
-      await checkAndPunchIfEnabled();
+      // Don't call checkAndPunchIfEnabled on mobile data — there's no WiFi
+      // connection to check, and getCurrentWifi() can return a stale cached
+      // BSSID on Android, causing a false IN punch on phantom WiFi.
     } else {
       AppLogger.d('WIFI_AUTO: Connectivity lost — re-checking before declaring disconnect');
       await checkAndPunchIfEnabled();

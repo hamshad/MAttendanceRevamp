@@ -32,6 +32,11 @@ class WifiBackgroundWorker {
   List<Office> _offices = [];
   bool _dataLoaded = false;
 
+  // Cooldown guard — prevents rapid IN→OUT when two scans return
+  // different results (e.g. fallback timer + connectivity stream).
+  static const int _cooldownMs = 10000;
+  int _lastActionTimestamp = 0;
+
   // SharedPreferences keys — shared with GeofenceBackgroundWorker
   // so both workers have a single source of truth for punch state
   static const _kLastBssid = 'wifi_bg_last_bssid';
@@ -104,6 +109,14 @@ class WifiBackgroundWorker {
       return;
     }
 
+    // Cooldown guard: prevent rapid punch decisions when the
+    // fallback timer and connectivity stream fire close together.
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastActionTimestamp > 0 && (now - _lastActionTimestamp) < _cooldownMs) {
+      debugPrint('[WIFI_BG] Cooldown active — skipping check');
+      return;
+    }
+
     try {
       // Verify WiFi is actually connected (BSSID can be stale on Android)
       final connectivity = await Connectivity().checkConnectivity();
@@ -147,6 +160,14 @@ class WifiBackgroundWorker {
       await _persistWifiStatus(bssid: bssid, matchedName: matched?.name);
 
       if (matched != null && lastPunchType != 'In') {
+        // Unknown state guard: on fresh app start, lastPunchType is null
+        // (no record in SharedPreferences yet).  Wait for the foreground
+        // to sync the real state from the server before punching.
+        if (lastPunchType == null) {
+          debugPrint('[WIFI_BG] Unknown punch state (null) — deferring to foreground sync');
+          return;
+        }
+
         // Manual-out-on-wifi guard: suppress auto re-IN until WiFi disconnects
         if (await _isManualOutOnWifi()) {
           debugPrint('[WIFI_BG] Manual-out-on-wifi active — skip auto IN');
@@ -334,6 +355,7 @@ class WifiBackgroundWorker {
   // ── Punch ──────────────────────────────────────────────────────────────────
 
   Future<void> _punchIn(Office office, String bssid) async {
+    _lastActionTimestamp = DateTime.now().millisecondsSinceEpoch;
     try {
       final dio = await _buildDio();
       if (dio == null) {
@@ -381,6 +403,7 @@ class WifiBackgroundWorker {
 
   /// Returns `true` if punch was accepted (200/201) or duplicate.
   Future<bool> _punchOut(String bssid) async {
+    _lastActionTimestamp = DateTime.now().millisecondsSinceEpoch;
     try {
       final dio = await _buildDio();
       if (dio == null) {
