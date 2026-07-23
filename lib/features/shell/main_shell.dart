@@ -749,6 +749,8 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     final user = ref.watch(authNotifierProvider).value;
     final allowFieldTracking =
         ref.watch(accessPermissionsProvider).value?.allowFieldTracking ?? false;
+    final allowGeofenceAuto =
+        ref.watch(accessPermissionsProvider).value?.allowGeofenceAuto ?? false;
     final fieldTrackingRunning = ref.watch(fieldTrackingRunningProvider);
     final unreadCount = ref.watch(unreadNotificationsCountProvider);
     final themeMode = ref.watch(themeModeProvider);
@@ -924,37 +926,39 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
             ),
           ],
 
-          const Divider(height: 1),
+          if (allowGeofenceAuto) ...[
+            const Divider(height: 1),
 
-          // ── Geofence Auto-Punch ──────────────────────────────────────────
-          ListTile(
-            leading: Consumer(builder: (context, ref, _) {
-              final gfEnabled = ref.watch(geofenceAutoEnabledProvider);
-              return Icon(
-                Icons.near_me_sharp,
-                color: gfEnabled
-                    ? theme.colorScheme.primary
-                    : AppColors.gray,
-              );
-            }),
-            title: const Text('Geofence Auto-Punch'),
-            subtitle: Consumer(builder: (context, ref, _) {
-              final gfEnabled = ref.watch(geofenceAutoEnabledProvider);
-              return Text(
-                gfEnabled ? 'On' : 'Off',
-                style: TextStyle(
-                  color: gfEnabled ? AppColors.success : AppColors.gray,
-                  fontSize: 12,
-                ),
-              );
-            }),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                  builder: (_) => const GeofenceSettingsScreen()),
+            // ── Geofence Auto-Punch ──────────────────────────────────────────
+            ListTile(
+              leading: Consumer(builder: (context, ref, _) {
+                final gfEnabled = ref.watch(geofenceAutoEnabledProvider);
+                return Icon(
+                  Icons.near_me_sharp,
+                  color: gfEnabled
+                      ? theme.colorScheme.primary
+                      : AppColors.gray,
+                );
+              }),
+              title: const Text('Geofence Auto-Punch'),
+              subtitle: Consumer(builder: (context, ref, _) {
+                final gfEnabled = ref.watch(geofenceAutoEnabledProvider);
+                return Text(
+                  gfEnabled ? 'On' : 'Off',
+                  style: TextStyle(
+                    color: gfEnabled ? AppColors.success : AppColors.gray,
+                    fontSize: 12,
+                  ),
+                );
+              }),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => const GeofenceSettingsScreen()),
+              ),
             ),
-          ),
+          ],
 
           const Divider(height: 1),
 
