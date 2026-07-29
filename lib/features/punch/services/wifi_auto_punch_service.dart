@@ -445,6 +445,15 @@ class WifiAutoPunchService {
         return;
       }
 
+      // Manual-IN guard: last punch was manual (GPS/NFC), not WiFi.
+      // Prevent duplicate IN when user manually punched in then connects to
+      // office WiFi.  `lastInMethod` persists in Hive so this survives
+      // app restarts and async race with syncState().
+      if (lastInMethod == 'manual') {
+        AppLogger.i('WIFI_AUTO: Last IN was manual — skip auto WiFi IN (prevent duplicate)');
+        return;
+      }
+
       // Manual-out-on-wifi guard: if user manually punched OUT while still
       // connected to office WiFi, suppress auto re-IN until WiFi disconnects
       // (trigger edge — handled in _handleWifiDisconnected).
