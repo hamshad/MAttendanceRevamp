@@ -72,10 +72,14 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
       }
 
       AppLogger.i('AUTH: Tokens found, attempting to load user data');
-      final user = await AppUser.load();
-      if (user != null) {
+
+      // Fast path: return cached user immediately without server call.
+      // Token validation happens lazily when other API calls are made;
+      // the 401 interceptor handles refresh if needed.
+      final cachedUser = await AppUser.load();
+      if (cachedUser != null) {
         AppLogger.i('AUTH: Auto-login successful (cached user)');
-        return user;
+        return cachedUser;
       }
 
       // Tokens exist but user data is missing — try fetching from server
@@ -101,6 +105,13 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
             return newUser;
           }
         } catch (e) {
+          // Token definitively rejected — clear stale session
+          if (e is DioException && e.response?.statusCode == 401) {
+            AppLogger.w('AUTH: Token rejected (401) — clearing stale session');
+            await _tokenStorage.clearTokens();
+            await AppUser.clear();
+            return null;
+          }
           final retryable = e is DioException && _isRetryableDioError(e);
           if (i < 2 && retryable) {
             AppLogger.w('AUTH: Profile fetch attempt $i failed (retryable) — retrying in 2s');
@@ -271,6 +282,7 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
     await GeofenceScheduler.cancel();
     await GeofenceScheduler.stopGeofenceService();
     await _tokenStorage.clearTokens();
+    await _tokenStorage.clearBackup();
     await AppUser.clear();
     ref.read(officeDataServiceProvider).reset();
     state = const AsyncData(null);

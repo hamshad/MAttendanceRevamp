@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/auth/auth_provider.dart';
-import '../../../core/offline/offline_providers.dart';
 import '../../../core/theme/app_colors.dart';
 import '../providers/dashboard_providers.dart';
 import '../widgets/status_card.dart';
@@ -26,20 +25,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final user = ref.watch(authNotifierProvider).value;
     final statusAsync = ref.watch(attendanceStatusProvider);
     final permissionsAsync = ref.watch(accessPermissionsProvider);
-    final isOnlineAsync = ref.watch(isOnlineProvider);
-    final pendingCount = ref.watch(pendingOfflineCountProvider);
-
-    // Assume online while connectivity stream hasn't emitted yet
-    final isOnline = isOnlineAsync.value ?? true;
 
     return Column(
       children: [
-        // ── Offline / Pending Banner ──────────────────────────────────────────
-        if (!isOnline)
-          _OfflineBanner(pendingCount: pendingCount)
-        else if (pendingCount > 0)
-          _PendingBanner(pendingCount: pendingCount),
-
         // ── Main Scroll Content ───────────────────────────────────────────────
         Expanded(
           child: RefreshIndicator(
@@ -219,85 +207,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
     ];
     return '${days[now.weekday - 1]}, ${months[now.month - 1]} ${now.day}, ${now.year}';
-  }
-}
-
-// ── Offline / Pending Banners ─────────────────────────────────────────────────
-
-class _OfflineBanner extends StatelessWidget {
-  final int pendingCount;
-  const _OfflineBanner({required this.pendingCount});
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: AppColors.error,
-      child: SafeArea(
-        bottom: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: Row(
-            children: [
-              const Icon(Icons.wifi_off, color: Colors.white, size: 16),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  pendingCount > 0
-                      ? 'No internet — $pendingCount punch${pendingCount == 1 ? '' : 'es'} saved locally'
-                      : 'No internet connection',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _PendingBanner extends StatelessWidget {
-  final int pendingCount;
-  const _PendingBanner({required this.pendingCount});
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: AppColors.warning,
-      child: SafeArea(
-        bottom: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: Row(
-            children: [
-              const SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  'Syncing $pendingCount offline punch${pendingCount == 1 ? '' : 'es'}...',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 }
 

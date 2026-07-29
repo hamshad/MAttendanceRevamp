@@ -283,6 +283,7 @@ class DioClient {
 
   Future<void> _handleRefreshFailure(DioException error, ErrorInterceptorHandler handler) async {
     await _tokenStorage.clearTokens();
+    await _tokenStorage.clearBackup();
     _isRefreshing = false;
     _rejectPendingRequests(error);
     _notifySessionExpired();

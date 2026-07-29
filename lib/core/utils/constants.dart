@@ -17,6 +17,7 @@ class AppConstants {
   static const String cacheBox = 'cache';
   static const String geofenceSettingsBox = 'geofence_settings';
   static const String shiftsBox = 'shifts';
+  static const String tokenBackupBox = 'token_backup';
 
   // Timeouts
   static const Duration connectTimeout = Duration(seconds: 15);

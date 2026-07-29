@@ -1,6 +1,8 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/app_logger.dart';
+import '../utils/constants.dart';
 
 class TokenStorage {
   static const _accessKey = 'access_token';
@@ -17,8 +19,11 @@ class TokenStorage {
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
   );
 
-  /// Saves tokens to encrypted secure storage AND mirrors them to
-  /// plain SharedPreferences for background isolate accessibility.
+  Box get _hive => Hive.box(AppConstants.tokenBackupBox);
+
+  /// Saves tokens to encrypted secure storage, SharedPreferences mirror, and
+  /// Hive backup.  Hive backup is NEVER touched by [clearTokens] — it survives
+  /// accidental token clearing and acts as a recovery source.
   Future<void> saveTokens(String access, String refresh) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     try {
@@ -29,37 +34,56 @@ class TokenStorage {
         prefs.setString(bgAccessTokenKey, access),
         prefs.setString(bgRefreshTokenKey, refresh),
         prefs.setInt(bgTokenTimestampKey, now),
+        _hive.put(_accessKey, access),
+        _hive.put(_refreshKey, refresh),
       ]);
     } catch (e) {
       AppLogger.e('TokenStorage: Failed to save tokens', e);
-      // Fallback: at least try to save to SharedPreferences if SecureStorage fails
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(bgAccessTokenKey, access);
-      await prefs.setString(bgRefreshTokenKey, refresh);
+      await Future.wait([
+        prefs.setString(bgAccessTokenKey, access),
+        prefs.setString(bgRefreshTokenKey, refresh),
+        _hive.put(_accessKey, access),
+        _hive.put(_refreshKey, refresh),
+      ]);
     }
   }
 
   Future<String?> getAccessToken() async {
     await _syncFromBackgroundMirror();
     try {
-      return await _storage.read(key: _accessKey);
+      final token = await _storage.read(key: _accessKey);
+      if (token != null && token.isNotEmpty) return token;
     } catch (e) {
       AppLogger.e('TokenStorage: SecureStorage read failed', e);
-      // Fallback to background mirror if secure storage is transiently unavailable
-      final prefs = await SharedPreferences.getInstance();
-      return prefs.getString(bgAccessTokenKey);
     }
+    return _fallbackAccessToken();
   }
 
   Future<String?> getRefreshToken() async {
     await _syncFromBackgroundMirror();
     try {
-      return await _storage.read(key: _refreshKey);
+      final token = await _storage.read(key: _refreshKey);
+      if (token != null && token.isNotEmpty) return token;
     } catch (e) {
       AppLogger.e('TokenStorage: SecureStorage read failed', e);
-      final prefs = await SharedPreferences.getInstance();
-      return prefs.getString(bgRefreshTokenKey);
     }
+    return _fallbackRefreshToken();
+  }
+
+  /// Fallback chain: SharedPreferences → Hive backup
+  Future<String?> _fallbackAccessToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    final bg = prefs.getString(bgAccessTokenKey);
+    if (bg != null && bg.isNotEmpty) return bg;
+    return _hive.get(_accessKey) as String?;
+  }
+
+  Future<String?> _fallbackRefreshToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    final bg = prefs.getString(bgRefreshTokenKey);
+    if (bg != null && bg.isNotEmpty) return bg;
+    return _hive.get(_refreshKey) as String?;
   }
 
   /// Checks if the background tracking isolate has refreshed tokens in
@@ -74,26 +98,24 @@ class TokenStorage {
 
       if (bgAccess == null || bgRefresh == null) return;
 
-      // We don't have a timestamp for SecureStorage tokens, so we rely on 
-      // the fact that background isolate only writes to SharedPreferences
-      // when it successfully refreshes. 
       final currentAccess = await _storage.read(key: _accessKey);
-      
+
       if (bgAccess != currentAccess) {
         AppLogger.i('TokenStorage: Syncing newer tokens from background mirror (TS: $bgTs)');
         await Future.wait([
           _storage.write(key: _accessKey, value: bgAccess),
           _storage.write(key: _refreshKey, value: bgRefresh),
+          _hive.put(_accessKey, bgAccess),
+          _hive.put(_refreshKey, bgRefresh),
         ]);
       }
     } catch (e) {
-      // Non-critical sync failed
       AppLogger.w('TokenStorage: _syncFromBackgroundMirror failed: $e');
     }
   }
 
-  /// Clears all tokens from both secure storage and the background-readable
-  /// SharedPreferences mirror.
+  /// Clears tokens from secure storage and SharedPreferences.
+  /// Hive backup is intentionally preserved — it survives accidental clears.
   Future<void> clearTokens() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -104,9 +126,36 @@ class TokenStorage {
         prefs.remove(bgTokenTimestampKey),
         prefs.remove(bgRefreshLockKey),
       ]);
-      AppLogger.i('TokenStorage: All tokens cleared');
+      AppLogger.i('TokenStorage: Secure tokens cleared (Hive backup preserved)');
     } catch (e) {
       AppLogger.e('TokenStorage: Failed to clear tokens', e);
+    }
+  }
+
+  /// Restores tokens from Hive backup back into secure storage.
+  /// Returns true if tokens were found and restored.
+  Future<bool> tryRestoreFromBackup() async {
+    try {
+      final access = _hive.get(_accessKey) as String?;
+      final refresh = _hive.get(_refreshKey) as String?;
+      if (access == null || refresh == null) return false;
+      AppLogger.i('TokenStorage: Restoring tokens from Hive backup');
+      await saveTokens(access, refresh);
+      return true;
+    } catch (e) {
+      AppLogger.e('TokenStorage: Failed to restore from backup', e);
+      return false;
+    }
+  }
+
+  /// Permanently clears the Hive backup.  Only called on explicit user logout.
+  Future<void> clearBackup() async {
+    try {
+      await _hive.delete(_accessKey);
+      await _hive.delete(_refreshKey);
+      AppLogger.i('TokenStorage: Hive backup cleared');
+    } catch (e) {
+      AppLogger.e('TokenStorage: Failed to clear backup', e);
     }
   }
 
@@ -114,11 +163,13 @@ class TokenStorage {
     try {
       await _syncFromBackgroundMirror();
       final token = await _storage.read(key: _accessKey);
-      return token != null && token.isNotEmpty;
-    } catch (_) {
-      final prefs = await SharedPreferences.getInstance();
-      return prefs.containsKey(bgAccessTokenKey);
-    }
+      if (token != null && token.isNotEmpty) return true;
+    } catch (_) {}
+    // Fallback to SharedPreferences (background mirror)
+    // Hive backup is NOT checked here — it is a reactive fallback for
+    // getAccessToken() mid-session, not an auto-login source.
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.containsKey(bgAccessTokenKey);
   }
 
   /// Acquisition of a cross-isolate refresh lock.

@@ -18,4 +18,26 @@ class OfflineQueueService {
   int get pendingCount => getPending().length;
 
   bool get hasPending => pendingCount > 0;
+
+  List<OfflinePunch> getAll() => _box.values.toList();
+
+  List<OfflinePunch> getTodayPunches() {
+    final now = DateTime.now();
+    return _box.values.where((p) =>
+      p.createdAt.year == now.year &&
+      p.createdAt.month == now.month &&
+      p.createdAt.day == now.day
+    ).toList()..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+  }
+
+  Future<void> deleteItem(dynamic key) async {
+    await _box.delete(key);
+  }
+
+  DateTime? get lastPunchTime {
+    final all = _box.values.toList();
+    if (all.isEmpty) return null;
+    all.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return all.first.createdAt;
+  }
 }

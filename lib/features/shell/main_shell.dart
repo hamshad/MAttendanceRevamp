@@ -36,6 +36,7 @@ import '../settings/screens/geofence_settings_screen.dart';
 import '../settings/screens/wifi_settings_screen.dart';
 import '../settings/screens/face_enrollment_screen.dart';
 import '../../models/attendance.dart';
+import '../offline/screens/offline_screen.dart';
 import '../../models/shift.dart';
 import '../tracking/screens/my_field_tracking_screen.dart';
 import '../tracking/services/field_tracking_service.dart';
@@ -60,6 +61,7 @@ class _MainShellState extends ConsumerState<MainShell>
   StreamSubscription<bool>? _trackingRunSub;
   StreamSubscription<Map<String, dynamic>>? _punchSub;
   StreamSubscription<Map<String, dynamic>>? _wifiPunchSub;
+  bool _offlineScreenPushed = false;
 
   static const _tabs = [
     HomeScreen(),
@@ -94,6 +96,8 @@ class _MainShellState extends ConsumerState<MainShell>
       _initGeofenceScheduler();
       fetchUnreadCount(ref);
       _initFCM();
+      _syncOfflinePunches();
+      _checkOfflineOnStart();
     });
   }
 
@@ -142,7 +146,10 @@ class _MainShellState extends ConsumerState<MainShell>
       // 4. Ensure the combined service is running if within shift window
       _initGeofenceScheduler();
 
-      // 5. Refresh dashboard data so it's never stale on resume
+      // 5. Try syncing offline punches on resume
+      _syncOfflinePunches();
+
+      // 6. Refresh dashboard data so it's never stale on resume
       ref.invalidate(attendanceStatusProvider);
     }
   }
@@ -601,7 +608,13 @@ class _MainShellState extends ConsumerState<MainShell>
     ref.listen<AsyncValue<bool>>(isOnlineProvider, (previous, next) {
       final wasOffline = previous?.value == false;
       final isNowOnline = next.value == true;
-      if (wasOffline && isNowOnline) _syncOfflinePunches();
+      final isNowOffline = next.value == false;
+      if (wasOffline && isNowOnline) {
+        _popOfflineScreen();
+        _syncOfflinePunches();
+      } else if (isNowOffline && !_offlineScreenPushed) {
+        _pushOfflineScreen();
+      }
     });
 
     void onTab(int i) => ref.read(_shellIndexProvider.notifier).state = i;
@@ -763,8 +776,35 @@ class _MainShellState extends ConsumerState<MainShell>
     );
   }
 
+  Future<void> _checkOfflineOnStart() async {
+    if (!mounted) return;
+    final isOnline = await ref.read(connectivityMonitorProvider).isOnline;
+    if (!isOnline && !_offlineScreenPushed) {
+      _pushOfflineScreen();
+    }
+  }
+
+  Future<void> _pushOfflineScreen() {
+    _offlineScreenPushed = true;
+    return Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const OfflineScreen(),
+        settings: const RouteSettings(name: 'offline_screen'),
+      ),
+    ).then((_) {
+      _offlineScreenPushed = false;
+    });
+  }
+
+  void _popOfflineScreen() {
+    if (!_offlineScreenPushed) return;
+    _offlineScreenPushed = false;
+    Navigator.of(context).popUntil((route) => route.isFirst);
+  }
+
   Future<void> _syncOfflinePunches() async {
-    if (ref.read(pendingOfflineCountProvider) == 0) return;
+    if (ref.read(offlineQueueServiceProvider).pendingCount == 0) return;
 
     final result =
         await ref.read(syncServiceProvider).syncPendingPunches();

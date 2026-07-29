@@ -70,6 +70,7 @@ void main() async {
   await Hive.openBox(AppConstants.cacheBox);
   await Hive.openBox(AppConstants.geofenceSettingsBox);
   await Hive.openBox(AppConstants.shiftsBox);
+  await Hive.openBox(AppConstants.tokenBackupBox);
 
   // Sync geofence flag to SharedPreferences BEFORE any service starts,
   // so the background worker's _isEnabled() reads the correct value from

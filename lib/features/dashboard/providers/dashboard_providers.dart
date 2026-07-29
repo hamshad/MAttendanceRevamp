@@ -1,12 +1,20 @@
+import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dio/dio.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 import '../../../core/auth/auth_provider.dart';
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/offline/offline_providers.dart';
+import '../../../core/utils/constants.dart';
 import '../../punch/services/manual_geo_service.dart';
 import '../../../models/attendance.dart';
 import '../../../models/offline_punch.dart';
+
+/// Injected so we don't create a new instance per punch (on iOS cellular
+/// a fresh [NetworkInfo] can freeze or throw trying to read WiFi IP).
+final networkInfoProvider = Provider<NetworkInfo>((_) => NetworkInfo());
 
 /// Set to `true` when the user manually punches "Out" from the UI.
 /// Consumed by [MainShell] to distinguish manual punch-out (→ stop geofence)
@@ -22,10 +30,14 @@ final attendanceStatusProvider = AsyncNotifierProvider<AttendanceStatusNotifier,
 );
 
 class AttendanceStatusNotifier extends AsyncNotifier<EmployeeStatus?> {
+  EmployeeStatus? _lastKnownValue;
+
   @override
   Future<EmployeeStatus?> build() async {
     ref.watch(authNotifierProvider);
-    return _fetch();
+    final result = await _fetch();
+    if (result != null) return result;
+    return _loadFromCache();
   }
 
   Future<EmployeeStatus?> _fetch() async {
@@ -34,23 +46,58 @@ class AttendanceStatusNotifier extends AsyncNotifier<EmployeeStatus?> {
       final response = await dio.get(ApiEndpoints.todayStatus);
       print('[DEBUG_SHIFT] Raw /attendance/status JSON (dashboard): ${response.data}');
       final data = response.data['data'] as Map<String, dynamic>?;
-      return data != null ? EmployeeStatus.fromJson(data) : null;
+      _lastKnownValue = data != null ? EmployeeStatus.fromJson(data) : null;
+      if (data != null) _saveToCache(data);
+      return _lastKnownValue;
     } catch (_) {
       try {
         await Future.delayed(const Duration(milliseconds: 800));
         final dio = ref.read(dioClientProvider).dio;
         final response = await dio.get(ApiEndpoints.todayStatus);
         final data = response.data['data'] as Map<String, dynamic>?;
-        return data != null ? EmployeeStatus.fromJson(data) : null;
+        _lastKnownValue = data != null ? EmployeeStatus.fromJson(data) : null;
+        if (data != null) _saveToCache(data);
+        return _lastKnownValue;
       } catch (_) {
-        return null;
+        return _lastKnownValue;
       }
     }
   }
 
+  /// Persist raw API response to Hive so it survives app restart.
+  void _saveToCache(Map<String, dynamic> data) {
+    try {
+      final box = Hive.box(AppConstants.cacheBox);
+      box.put('cached_status', jsonEncode(data));
+    } catch (_) {}
+  }
+
+  /// Restore cached status from Hive for fresh-offline launches.
+  EmployeeStatus? _loadFromCache() {
+    try {
+      final box = Hive.box(AppConstants.cacheBox);
+      final raw = box.get('cached_status') as String?;
+      if (raw == null) return null;
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+      final status = EmployeeStatus.fromJson(data);
+      // Discard cached data if it's from a different day
+      if (status.date != _todayString()) return null;
+      _lastKnownValue = status;
+      return status;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String _todayString() {
+    final n = DateTime.now();
+    return '${n.year}-${n.month.toString().padLeft(2, '0')}-${n.day.toString().padLeft(2, '0')}';
+  }
+
   Future<void> refresh() async {
+    final previous = state.value;
     state = const AsyncLoading();
-    state = await AsyncValue.guard(_fetch);
+    state = await AsyncValue.guard(() => _fetch().then((v) => v ?? previous));
   }
 }
 
@@ -86,7 +133,7 @@ class PunchNotifier extends AsyncNotifier<void> {
       // Get IP Address (Mandatory for backend)
       String ip = '0.0.0.0';
       try {
-        ip = await NetworkInfo().getWifiIP() ?? '0.0.0.0';
+        ip = await ref.read(networkInfoProvider).getWifiIP() ?? '0.0.0.0';
       } catch (_) {}
 
       // Capitalize keys to match backend expectations (PascalCase)
