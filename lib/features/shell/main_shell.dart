@@ -892,39 +892,28 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
             ),
           ),
 
-          if (Platform.isAndroid) ...[
-            const Divider(height: 1),
+          const Divider(height: 1),
 
-            // ── WiFi Auto-Punch ──────────────────────────────────────────────
-            ListTile(
-              leading: Consumer(builder: (context, ref, _) {
-                final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
-                return Icon(
-                  Icons.wifi_sharp,
-                  color: wifiEnabled
-                      ? theme.colorScheme.primary
-                      : AppColors.gray,
-                );
-              }),
-              title: const Text('WiFi Auto-Punch'),
-              subtitle: Consumer(builder: (context, ref, _) {
-                final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
-                return Text(
-                  wifiEnabled ? 'On' : 'Off',
-                  style: TextStyle(
-                    color: wifiEnabled ? AppColors.success : AppColors.gray,
-                    fontSize: 12,
-                  ),
-                );
-              }),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (_) => const WifiSettingsScreen()),
+          // ── WiFi Auto-Punch Toggle ──────────────────────────────────────────
+          Consumer(builder: (context, ref, _) {
+            final wifiOn = ref.watch(wifiAutoEnabledProvider);
+            return SwitchListTile(
+              secondary: Icon(
+                Icons.wifi,
+                color: wifiOn ? AppColors.primary : AppColors.gray,
               ),
-            ),
-          ],
+              title: const Text('WiFi Auto-Punch'),
+              subtitle: const Text(
+                'Auto-record attendance on office WiFi',
+                style: TextStyle(fontSize: 13),
+              ),
+              value: wifiOn,
+              onChanged: (val) async {
+                await WifiAutoPunchService.setEnabled(val);
+                ref.read(wifiAutoEnabledProvider.notifier).state = val;
+              },
+            );
+          }),
 
           if (allowGeofenceAuto) ...[
             const Divider(height: 1),
