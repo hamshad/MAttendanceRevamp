@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/auth/auth_provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/constants.dart';
-import 'biometric_screen.dart';
 import 'forgot_password_screen.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
@@ -197,10 +196,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                   ),
                 ),
-                const SizedBox(height: 32),
-
-                // Biometric shortcut (if available)
-                _BiometricLoginButton(),
               ],
             ),
           ),
@@ -209,29 +204,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     );
   }
 }
-
-// ── Biometric login button ────────────────────────────────────────────────────
-
-class _BiometricLoginButton extends ConsumerWidget {
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return FutureBuilder<bool>(
-      future: ref.read(biometricServiceProvider).isAvailable(),
-      builder: (context, snapshot) {
-        if (snapshot.data != true) return const SizedBox.shrink();
-        return TextButton.icon(
-          onPressed: () => Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(builder: (_) => const BiometricScreen()),
-          ),
-          icon: const Icon(Icons.fingerprint),
-          label: const Text('Use Biometric'),
-        );
-      },
-    );
-  }
-}
-
 // ── Google icon ───────────────────────────────────────────────────────────────
 
 class _GoogleIcon extends StatelessWidget {
