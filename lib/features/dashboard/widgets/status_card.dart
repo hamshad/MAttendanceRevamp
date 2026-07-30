@@ -49,7 +49,7 @@ class StatusCard extends StatelessWidget {
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Text(
-                      'Late by ${status.lateByMinutes}m',
+                      _formatLateDuration(status.lateByMinutes!),
                       style: const TextStyle(color: Colors.orange, fontSize: 12),
                     ),
                   ),
@@ -107,6 +107,14 @@ class StatusCard extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  String _formatLateDuration(int minutes) {
+    final h = minutes ~/ 60;
+    final m = minutes % 60;
+    if (h == 0) return 'Late by ${m}m';
+    if (m == 0) return 'Late by ${h}h';
+    return 'Late by ${h}h ${m}m';
   }
 
   String _time(DateTime dt) {
