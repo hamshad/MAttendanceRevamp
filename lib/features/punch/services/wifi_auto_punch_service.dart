@@ -36,6 +36,26 @@ class WifiAutoPunchService {
 
   static const String defaultCompanySsid = 'Moksha_Office';
 
+  // Cross-isolate disconnect guard — shared with WifiBackgroundWorker.
+  // Only one isolate should punch OUT per disconnect event.
+  // The first to process marks the timestamp; the other skips.
+  static const String _disconnectProcessedKey = 'wifi_disconnect_processed_ts';
+  static const int _disconnectGuardMs = 30000;
+
+  static Future<bool> isDisconnectAlreadyProcessed() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final ts = prefs.getInt(_disconnectProcessedKey) ?? 0;
+    if (ts == 0) return false;
+    return (DateTime.now().millisecondsSinceEpoch - ts) < _disconnectGuardMs;
+  }
+
+  static Future<void> markDisconnectProcessed() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_disconnectProcessedKey, DateTime.now().millisecondsSinceEpoch);
+    AppLogger.d('WIFI_AUTO: Disconnect marked as processed (guard: ${_disconnectGuardMs}ms)');
+  }
+
   // Cooldown after a punch action — prevents rapid IN→OUT when two
   // WiFi scans within the same frame return different results on startup.
   static const int _cooldownMs = 10000;
@@ -579,6 +599,14 @@ class WifiAutoPunchService {
   Future<void> _handleWifiDisconnected() async {
     if (!isEnabled) return;
 
+    // ── Cross-isolate guard: skip if background already processed ──
+    if (await isDisconnectAlreadyProcessed()) {
+      AppLogger.i('WIFI_AUTO: Disconnect already processed by other isolate — skipping');
+      await setLastPunchStatus('Out');
+      await setCurrentOfficeName('');
+      return;
+    }
+
     // WiFi disconnect clears the manual-out-on-wifi guard — the trigger edge
     // has now cycled, so auto IN is allowed again on next reconnect.
     if (manualOutOnWifi) {
@@ -596,6 +624,9 @@ class WifiAutoPunchService {
       }
 
       AppLogger.i('WIFI_AUTO: WiFi lost → Punch OUT');
+
+      // Mark processed BEFORE HTTP so background isolate skips its attempt.
+      await markDisconnectProcessed();
 
       final mac = _getRegisteredOfficeMac(currentOfficeName);
   

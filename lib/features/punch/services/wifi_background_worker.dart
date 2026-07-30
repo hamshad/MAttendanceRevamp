@@ -45,6 +45,13 @@ class WifiBackgroundWorker {
   static const _kMatchedOfficeName = 'gf_last_punch_office';
   static const _kDataLoadedAt = 'wifi_bg_data_loaded_at';
 
+  // Cross-isolate disconnect guard — prevents both foreground and
+  // background isolates from punching OUT for the same disconnect event.
+  // Written by whichever isolate punches first; the other checks this
+  // before punching and skips if within the cooldown window.
+  static const _kDisconnectProcessedTs = 'wifi_disconnect_processed_ts';
+  static const _disconnectGuardMs = 30000; // 30-second guard window
+
   // Pending OUT chamber — saves a failed OUT punch (no internet) and
   // retries it when connectivity returns, preserving the original
   // disconnect timestamp.
@@ -89,9 +96,13 @@ class WifiBackgroundWorker {
     if (results.contains(ConnectivityResult.wifi)) {
       _checkCurrentWifi();
     } else if (results.contains(ConnectivityResult.mobile)) {
-      // Mobile data available — try flushing any pending OUT
-      debugPrint('[WIFI_BG] Mobile data available — flushing pending OUT if any');
-      _checkCurrentWifi();
+      // Mobile data only — flush pending OUT, don't check WiFi.
+      // Mirror foreground behavior: on mobile data, only deliver
+      // a previously-queued pending OUT; don't punch fresh OUT.
+      // Checking WiFi here would trigger _handleDisconnect → _punchOut
+      // which races with the foreground service (same event, two isolates).
+      debugPrint('[WIFI_BG] Mobile data — flushing pending OUT only');
+      _flushPendingOut();
     } else {
       // Stream says no connectivity — but the phone may have already
       // transitioned to another WiFi.  Re-check before declaring
@@ -217,6 +228,21 @@ class WifiBackgroundWorker {
   Future<void> _handleDisconnect() async {
     if (!await _isEnabled()) return;
 
+    // ── Cooldown guard: prevent rapid re-entry from timer + stream ──
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastActionTimestamp > 0 && (now - _lastActionTimestamp) < _cooldownMs) {
+      debugPrint('[WIFI_BG] _handleDisconnect cooldown active — skip');
+      return;
+    }
+
+    // ── Cross-isolate guard: only one isolate punches per disconnect ──
+    if (await _isDisconnectAlreadyProcessed()) {
+      debugPrint('[WIFI_BG] Disconnect already processed by other isolate — skip');
+      // Still clear local state so UI reflects correct status
+      await _clearLastInMethod();
+      return;
+    }
+
     // WiFi disconnect clears the manual-out-on-wifi guard
     if (await _isManualOutOnWifi()) {
       final prefs = await SharedPreferences.getInstance();
@@ -224,18 +250,18 @@ class WifiBackgroundWorker {
       debugPrint('[WIFI_BG] WiFi disconnected — manual-out-on-wifi guard CLEARED');
     }
 
-    // Last-IN-method guard: only punch OUT on disconnect if last IN was
-    // via WiFi. Manual IN (GPS/NFC) should not be undone by WiFi state.
+    // Last-IN-method guard: only punch OUT if last IN was via WiFi
     final lastInByWifi = await _isLastInByWifi();
-    final lastPunchType = await _getLastPunchType();
-
     if (!lastInByWifi) {
       debugPrint('[WIFI_BG] Last IN not via WiFi — skip auto OUT on disconnect');
       return;
     }
 
+    // Read punch state BEFORE flush (flush may change it)
+    final preFlushPunchType = await _getLastPunchType();
+
     // Clear last-in-method and manual IN — WiFi IN state is being left
-    if (lastPunchType != 'In') {
+    if (preFlushPunchType != 'In') {
       debugPrint('[WIFI_BG] WiFi disconnected — already OUT, clearing state');
     } else {
       debugPrint('[WIFI_BG] WiFi disconnected — punching OUT');
@@ -251,13 +277,27 @@ class WifiBackgroundWorker {
       await _loadOffices();
     }
 
-    // Also try flushing pending before punching fresh
+    // Flush any pending OUT before considering fresh punch
     await _flushPendingOut();
 
-    if (lastPunchType == 'In') {
-      final ok = await _punchOut('');
-      if (!ok) {
-        await _savePendingOut(bssid: '');
+    // Re-read punch type AFTER flush — _flushPendingOut may have
+    // succeeded (setting type to 'Out') so we don't punch twice.
+    if (preFlushPunchType == 'In') {
+      final freshPunchType = await _getLastPunchType();
+      if (freshPunchType == 'In') {
+        // Still IN after flush — punch OUT now.
+        // Mark BEFORE HTTP so the cross-isolate guard prevents
+        // the foreground from racing us.
+        await _markDisconnectProcessed();
+        final ok = await _punchOut('');
+        if (!ok) {
+          await _savePendingOut(bssid: '');
+        }
+      } else {
+        // Flush already handled the OUT — still mark processed
+        // so the foreground isolate skips its attempt.
+        await _markDisconnectProcessed();
+        debugPrint('[WIFI_BG] Flush already set punch to Out — no fresh punch needed');
       }
     }
   }
@@ -747,6 +787,28 @@ class WifiBackgroundWorker {
     } else {
       debugPrint('[WIFI_BG] Pending OUT still failing — keeping for later');
     }
+  }
+
+  // ── Cross-isolate disconnect guard ──────────────────────────────────────────
+  //
+  // Both foreground and background subscribe to the same connectivity stream
+  // with independent cooldowns.  This guard ensures only ONE isolate punches
+  // OUT per disconnect event — the first one to process marks the timestamp,
+  // and the other skips.
+
+  Future<bool> _isDisconnectAlreadyProcessed() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final ts = prefs.getInt(_kDisconnectProcessedTs) ?? 0;
+    if (ts == 0) return false;
+    final expired = (DateTime.now().millisecondsSinceEpoch - ts) >= _disconnectGuardMs;
+    return !expired;
+  }
+
+  Future<void> _markDisconnectProcessed() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_kDisconnectProcessedTs, DateTime.now().millisecondsSinceEpoch);
+    debugPrint('[WIFI_BG] Disconnect marked as processed (guard: ${_disconnectGuardMs}ms)');
   }
 
   // ── Notification ───────────────────────────────────────────────────────────
