@@ -11,7 +11,7 @@ abstract final class AppTheme {
     final colorScheme = ColorScheme.fromSeed(
       seedColor: AppColors.primary,
       brightness: brightness,
-      primary:    AppColors.primary,
+      primary:    isDark ? AppColors.darkPrimary : AppColors.primary,
       surface:    isDark ? AppColors.darkSurface : AppColors.surface,
       error:      isDark ? AppColors.darkError : AppColors.error,
     ).copyWith(
@@ -25,7 +25,7 @@ abstract final class AppTheme {
       brightness:   brightness,
       colorScheme:  colorScheme,
       fontFamily:   'Roboto',
-      scaffoldBackgroundColor: isDark ? AppColors.darkSurface : AppColors.surface,
+      scaffoldBackgroundColor: isDark ? AppColors.darkBackground : AppColors.surface,
 
       // ── Card ────────────────────────────────────────────────────────────
       cardTheme: CardThemeData(
@@ -42,21 +42,21 @@ abstract final class AppTheme {
       ),
 
       // ── AppBar ──────────────────────────────────────────────────────────
-      appBarTheme: AppBarTheme(
-        backgroundColor:      isDark ? AppColors.darkCard : AppColors.card,
-        foregroundColor:      isDark ? Colors.white : AppColors.textPrimary,
-        elevation:            0,
-        scrolledUnderElevation: 0,
-        centerTitle:          false,
-        titleTextStyle: TextStyle(
-          color:      isDark ? Colors.white : AppColors.textPrimary,
-          fontSize:   18,
-          fontWeight: FontWeight.w600,
-          fontFamily: 'Roboto',
-        ),
-        iconTheme: IconThemeData(
-          color: isDark ? AppColors.gray : AppColors.textSecondary,
-        ),
+        appBarTheme: AppBarTheme(
+          backgroundColor:      isDark ? AppColors.darkCard : AppColors.card,
+          foregroundColor:      isDark ? AppColors.darkTextPrimary : AppColors.textPrimary,
+          elevation:            0,
+          scrolledUnderElevation: 0,
+          centerTitle:          false,
+          titleTextStyle: TextStyle(
+            color:      isDark ? AppColors.darkTextPrimary : AppColors.textPrimary,
+            fontSize:   18,
+            fontWeight: FontWeight.w600,
+            fontFamily: 'Roboto',
+          ),
+          iconTheme: IconThemeData(
+            color: isDark ? AppColors.darkMuted : AppColors.textSecondary,
+          ),
         shape: Border(
           bottom: BorderSide(
             color: isDark ? AppColors.darkBorder : AppColors.border,
@@ -67,7 +67,7 @@ abstract final class AppTheme {
       // ── Bottom Navigation Bar ────────────────────────────────────────────
       bottomNavigationBarTheme: BottomNavigationBarThemeData(
         backgroundColor:     isDark ? AppColors.darkCard : AppColors.card,
-        selectedItemColor:   AppColors.primary,
+        selectedItemColor:   isDark ? AppColors.darkPrimary : AppColors.primary,
         unselectedItemColor: AppColors.gray,
         elevation:           8,
         type:                BottomNavigationBarType.fixed,
@@ -76,17 +76,21 @@ abstract final class AppTheme {
       ),
       navigationBarTheme: NavigationBarThemeData(
         backgroundColor:       isDark ? AppColors.darkCard : AppColors.card,
-        indicatorColor:        AppColors.primarySubtle,
+        indicatorColor:        isDark ? AppColors.darkPrimary.withAlpha(28) : AppColors.primarySubtle,
         surfaceTintColor:      Colors.transparent,
         labelTextStyle: WidgetStateProperty.resolveWith((states) {
           if (states.contains(WidgetState.selected)) {
-            return const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.primary);
+            return TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: isDark ? AppColors.darkPrimary : AppColors.primary,
+            );
           }
-          return const TextStyle(fontSize: 11, color: AppColors.gray);
+          return TextStyle(fontSize: 11, color: isDark ? AppColors.darkMuted : AppColors.gray);
         }),
         iconTheme: WidgetStateProperty.resolveWith((states) {
           if (states.contains(WidgetState.selected)) {
-            return const IconThemeData(color: AppColors.primary);
+            return IconThemeData(color: isDark ? AppColors.darkPrimary : AppColors.primary);
           }
           return const IconThemeData(color: AppColors.gray);
         }),
@@ -95,7 +99,7 @@ abstract final class AppTheme {
       // ── Elevated Button ─────────────────────────────────────────────────
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
-          backgroundColor: AppColors.primary,
+          backgroundColor: isDark ? AppColors.darkPrimary : AppColors.primary,
           foregroundColor: Colors.white,
           disabledBackgroundColor: AppColors.gray.withAlpha(80),
           disabledForegroundColor: Colors.white54,
@@ -109,8 +113,8 @@ abstract final class AppTheme {
       // ── Outlined Button ─────────────────────────────────────────────────
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
-          foregroundColor: AppColors.primary,
-          side:            const BorderSide(color: AppColors.border, width: 1.5),
+          foregroundColor: isDark ? AppColors.darkPrimary : AppColors.primary,
+          side:            BorderSide(color: isDark ? AppColors.darkBorder : AppColors.border, width: 1.5),
           minimumSize:     const Size(double.infinity, 52),
           shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
           textStyle:       const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
@@ -120,7 +124,7 @@ abstract final class AppTheme {
       // ── Text Button ─────────────────────────────────────────────────────
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
-          foregroundColor: AppColors.primary,
+          foregroundColor: isDark ? AppColors.darkPrimary : AppColors.primary,
           textStyle:       const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
         ),
       ),
@@ -150,15 +154,18 @@ abstract final class AppTheme {
           borderRadius: BorderRadius.circular(8),
           borderSide:   const BorderSide(color: AppColors.error, width: 1.5),
         ),
-        hintStyle:  TextStyle(color: AppColors.textSecondary.withAlpha(160), fontSize: 14),
-        errorStyle: const TextStyle(color: AppColors.error, fontSize: 12),
-        labelStyle: TextStyle(color: isDark ? AppColors.gray : AppColors.textSecondary),
+        hintStyle:  TextStyle(
+          color: isDark ? AppColors.darkTextSecondary.withAlpha(160) : AppColors.textSecondary.withAlpha(160),
+          fontSize: 14,
+        ),
+        errorStyle: TextStyle(color: isDark ? AppColors.darkError : AppColors.error, fontSize: 12),
+        labelStyle: TextStyle(color: isDark ? AppColors.darkMuted : AppColors.textSecondary),
       ),
 
       // ── Chip ─────────────────────────────────────────────────────────────
       chipTheme: ChipThemeData(
         backgroundColor: isDark ? AppColors.darkCard : AppColors.graySubtle,
-        selectedColor:   AppColors.primarySubtle,
+        selectedColor:   isDark ? AppColors.darkPrimary.withAlpha(28) : AppColors.primarySubtle,
         labelStyle:      const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
         side:            BorderSide(color: isDark ? AppColors.darkBorder : AppColors.border),
         shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
@@ -176,32 +183,36 @@ abstract final class AppTheme {
       // ── List Tile ────────────────────────────────────────────────────────
       listTileTheme: ListTileThemeData(
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        iconColor:      isDark ? AppColors.gray : AppColors.textSecondary,
+        iconColor:      isDark ? AppColors.darkMuted : AppColors.textSecondary,
         titleTextStyle: TextStyle(
           fontSize:   15,
           fontWeight: FontWeight.w500,
-          color:      isDark ? Colors.white : AppColors.textPrimary,
+          color:      isDark ? AppColors.darkTextPrimary : AppColors.textPrimary,
         ),
-        subtitleTextStyle: const TextStyle(
+        subtitleTextStyle: TextStyle(
           fontSize: 13,
-          color:    AppColors.textSecondary,
+          color:    isDark ? AppColors.darkTextSecondary : AppColors.textSecondary,
         ),
       ),
 
       // ── Switch ───────────────────────────────────────────────────────────
       switchTheme: SwitchThemeData(
         thumbColor: WidgetStateProperty.resolveWith((s) =>
-            s.contains(WidgetState.selected) ? AppColors.primary : AppColors.gray),
+            s.contains(WidgetState.selected)
+                ? (isDark ? AppColors.darkPrimary : AppColors.primary)
+                : AppColors.gray),
         trackColor: WidgetStateProperty.resolveWith((s) =>
-            s.contains(WidgetState.selected) ? AppColors.primarySubtle : AppColors.graySubtle),
+            s.contains(WidgetState.selected)
+                ? (isDark ? AppColors.darkPrimary.withAlpha(40) : AppColors.primarySubtle)
+                : AppColors.graySubtle),
       ),
 
       // ── FloatingActionButton ─────────────────────────────────────────────
-      floatingActionButtonTheme: const FloatingActionButtonThemeData(
-        backgroundColor: AppColors.primary,
+      floatingActionButtonTheme: FloatingActionButtonThemeData(
+        backgroundColor: isDark ? AppColors.darkPrimary : AppColors.primary,
         foregroundColor: Colors.white,
         elevation:       4,
-        shape:           CircleBorder(),
+        shape:           const CircleBorder(),
       ),
 
       // ── Text Theme ───────────────────────────────────────────────────────
@@ -224,7 +235,7 @@ abstract final class AppTheme {
         fontSize:   size,
         fontWeight: weight,
         color:      secondary
-            ? AppColors.textSecondary
-            : (isDark ? Colors.white : AppColors.textPrimary),
+            ? (isDark ? AppColors.darkTextSecondary : AppColors.textSecondary)
+            : (isDark ? AppColors.darkTextPrimary : AppColors.textPrimary),
       );
 }
