@@ -67,6 +67,16 @@ class OfflineQueueService {
     await _box.delete(key);
   }
 
+  /// Delete all queued punches of a given method — e.g. cancel a queued
+  /// WiFi OUT when the user reconnects to the registered office wifi
+  /// (the disconnect that triggered it never actually happened).
+  Future<void> deleteQueuedByMethod(String method) async {
+    final queued = _box.values.where((p) => p.method == method).toList();
+    for (final p in queued) {
+      await _box.delete(p.key);
+    }
+  }
+
   DateTime? get lastPunchTime {
     final all = _box.values.toList();
     if (all.isEmpty) return null;

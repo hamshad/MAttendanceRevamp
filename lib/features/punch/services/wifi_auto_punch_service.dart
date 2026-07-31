@@ -6,9 +6,12 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/api/api_endpoints.dart';
+import '../../../core/offline/offline_queue.dart';
+import '../../../core/offline/offline_sync_manager.dart';
 import '../../../core/services/office_data_service.dart';
 import '../../../core/utils/constants.dart';
 import '../../../core/utils/app_logger.dart';
+import '../../../models/offline_punch.dart';
 import '../../../models/office.dart';
 import './wifi_service.dart';
 
@@ -244,6 +247,22 @@ class WifiAutoPunchService {
     await prefs.setBool(_pendingOutKey, true);
     await prefs.setString(_pendingOutTsKey, DateTime.now().toIso8601String());
     await prefs.setString(_pendingOutBssidKey, lastMac);
+
+    // Also queue into the Hive offline queue so OfflineSyncManager delivers
+    // it when connectivity returns — even if the app is killed (the SP flag
+    // only survives while the isolate runs).
+    try {
+      final punch = OfflinePunch()
+        ..method = 'WiFi'
+        ..direction = 'Out'
+        ..wifiMAC = lastMac.isNotEmpty ? lastMac : 'unknown'
+        ..createdAt = DateTime.now();
+      await OfflineQueueService().enqueue(punch);
+      await OfflineSyncManager.scheduleNow();
+      AppLogger.i('WIFI_AUTO: queued WiFi OUT to offline queue');
+    } catch (e) {
+      AppLogger.e('WIFI_AUTO: offline queue enqueue failed', e);
+    }
   }
 
   Future<void> _flushPendingOut() async {
@@ -423,6 +442,12 @@ class WifiAutoPunchService {
         if (matchedOffice != null) {
           AppLogger.i('WIFI_AUTO: Pending OUT cancelled — user returned to ${matchedOffice.name}');
           await _clearPendingOut();
+          // Drop queued WiFi punches too — the disconnect never really happened.
+          try {
+            await OfflineQueueService().deleteQueuedByMethod('WiFi');
+          } catch (e) {
+            AppLogger.e('WIFI_AUTO: clear queued WiFi punches error', e);
+          }
         } else {
           await _flushPendingOut();
         }

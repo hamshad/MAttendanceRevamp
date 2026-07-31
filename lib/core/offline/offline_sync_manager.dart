@@ -209,6 +209,8 @@ class OfflineSyncManager {
     };
     if (punch.latitude != null) body['Latitude'] = punch.latitude.toString();
     if (punch.longitude != null) body['Longitude'] = punch.longitude.toString();
+    if (punch.wifiMAC != null) body['WifiMAC'] = punch.wifiMAC;
+    if (punch.wifiSSID != null) body['WifiSSID'] = punch.wifiSSID;
     return body;
   }
 }

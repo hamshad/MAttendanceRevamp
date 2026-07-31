@@ -8,6 +8,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -15,6 +16,7 @@ import 'package:intl/intl.dart';
 
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/utils/constants.dart';
+import '../../../models/offline_punch.dart';
 import '../../punch/services/geofence_background_worker.dart';
 import '../../punch/services/wifi_background_worker.dart';
 import '../models/location_result.dart';
@@ -161,6 +163,18 @@ Future<bool> _iosBackground(ServiceInstance service) async => true;
 @pragma('vm:entry-point')
 void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
   debugPrint('[GF_BG_ENTRY] Entrypoint started — isAndroid=${service is AndroidServiceInstance}');
+
+  // Initialize Hive in this isolate so background workers can write to the
+  // offline punch queue (auto punches that fail due to no internet get
+  // queued and synced later by OfflineSyncManager).
+  try {
+    await Hive.initFlutter();
+    Hive.registerAdapter(OfflinePunchAdapter());
+    await Hive.openBox<OfflinePunch>(AppConstants.offlinePunchBox);
+    await Hive.openBox(AppConstants.cacheBox);
+  } catch (e) {
+    debugPrint('[GF_BG_ENTRY] Hive init failed: $e');
+  }
 
   // Guard: if no auth token, do nothing — user not logged in.
   final prefs = await SharedPreferences.getInstance();

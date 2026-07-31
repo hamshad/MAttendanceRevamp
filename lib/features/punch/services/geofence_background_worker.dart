@@ -9,7 +9,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/api/punch_state_interceptor.dart';
+import '../../../core/offline/offline_queue.dart';
+import '../../../core/offline/offline_sync_manager.dart';
 import '../../../core/utils/constants.dart';
+import '../../../models/offline_punch.dart';
 import '../../../models/office.dart';
 import '../../../models/shift.dart';
 import '../../tracking/models/location_result.dart';
@@ -610,18 +613,28 @@ class GeofenceBackgroundWorker {
         }
       } on DioException catch (e) {
         debugPrint('[GF_BG] PUNCH_API DioException: ${e.message}');
-        if (e.response != null) {
-          debugPrint('[GF_BG] PUNCH_API response: ${e.response?.statusCode} ${e.response?.data}');
-          final body = e.response?.data;
-          if (body is Map && body['message'] is String) {
-            final msg = body['message'] as String;
+        final resp = e.response;
+        if (resp != null &&
+            resp.statusCode != null &&
+            resp.statusCode! >= 400 &&
+            resp.statusCode! < 500) {
+          // Permanent rejection — do NOT queue (server said no: duplicate,
+          // invalid state, etc). Punch is dropped.
+          if (resp.data is Map && resp.data['message'] is String) {
+            final msg = resp.data['message'] as String;
             if (msg.contains('already recorded') || msg.contains('Duplicate punch')) {
               debugPrint('[GF_BG] PUNCH_API: server rejected (duplicate) — $msg');
             }
           }
+        } else if (await _queueOfflinePunch(direction, location)) {
+          // Network failure or 5xx — queue for offline sync.
+          punchAccepted = true;
         }
       } catch (e) {
         debugPrint('[GF_BG] PUNCH_API error: $e');
+        if (await _queueOfflinePunch(direction, location)) {
+          punchAccepted = true;
+        }
       }
 
       if (punchAccepted) {
@@ -664,6 +677,30 @@ class GeofenceBackgroundWorker {
       }
     } finally {
       _punchInProgress = false;
+    }
+  }
+
+  /// Enqueue an auto punch that failed due to no network / server 5xx.
+  /// OfflineSyncManager picks it up when connectivity returns.  Also requests
+  /// an immediate one-off sync (Workmanager runs it once online).
+  Future<bool> _queueOfflinePunch(
+    String direction,
+    LocationResult location,
+  ) async {
+    try {
+      final punch = OfflinePunch()
+        ..method = 'GeofenceAuto'
+        ..direction = direction
+        ..latitude = location.latitude
+        ..longitude = location.longitude
+        ..createdAt = DateTime.now();
+      await OfflineQueueService().enqueue(punch);
+      await OfflineSyncManager.scheduleNow();
+      debugPrint('[GF_BG] queued $direction offline (no network)');
+      return true;
+    } catch (e) {
+      debugPrint('[GF_BG] offline queue enqueue failed: $e');
+      return false;
     }
   }
 

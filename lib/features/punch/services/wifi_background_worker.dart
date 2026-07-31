@@ -10,7 +10,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/api/punch_state_interceptor.dart';
+import '../../../core/offline/offline_queue.dart';
+import '../../../core/offline/offline_sync_manager.dart';
 import '../../../core/utils/constants.dart';
+import '../../../models/offline_punch.dart';
 import '../../../models/office.dart';
 
 /// Background WiFi auto-punch worker.
@@ -159,6 +162,13 @@ class WifiBackgroundWorker {
       // If user is back at a known office, cancel any pending OUT
       if (matched != null) {
         await _clearPendingOut();
+        // Also drop queued WiFi OUTs from the offline queue — the disconnect
+        // that triggered them never really happened (user reconnected).
+        try {
+          await OfflineQueueService().deleteQueuedByMethod('WiFi');
+        } catch (e) {
+          debugPrint('[WIFI_BG] clear queued WiFi punches error: $e');
+        }
       }
 
       _emitDebug(
@@ -435,24 +445,41 @@ class WifiBackgroundWorker {
       }
     } on DioException catch (e) {
       debugPrint('[WIFI_BG] Punch IN DioException: ${e.message}');
-      await _handleDuplicateError(e, 'In', office.name);
+      if (await _handleDuplicateError(e, 'In', office.name)) return;
+      // Network failure or 5xx → queue for offline sync (keep local state in
+      // sync so nothing re-triggers).
+      if (_isTransientError(e) && await _queueWifiPunch('In', office, bssid)) {
+        await _setLastPunchType('In');
+        await _setMatchedOffice(office.name);
+        await _setLastPunchTime(DateTime.now());
+        await _clearManualIn();
+        await _setLastInByWifi();
+        await _showNotification('Auto-Punch In (queued)', '${office.name} · will sync when online');
+      }
     } catch (e) {
       debugPrint('[WIFI_BG] Punch IN error: $e');
+      if (await _queueWifiPunch('In', office, bssid)) {
+        await _setLastPunchType('In');
+        await _setMatchedOffice(office.name);
+        await _setLastPunchTime(DateTime.now());
+        await _clearManualIn();
+        await _setLastInByWifi();
+        await _showNotification('Auto-Punch In (queued)', '${office.name} · will sync when online');
+      }
     }
   }
 
   /// Returns `true` if punch was accepted (200/201) or duplicate.
   Future<bool> _punchOut(String bssid) async {
     _lastActionTimestamp = DateTime.now().millisecondsSinceEpoch;
+    final officeName = await _getMatchedOffice();
+    final officeMac = _getOfficeMac(officeName);
     try {
       final dio = await _buildDio();
       if (dio == null) {
         debugPrint('[WIFI_BG] No auth token — cannot punch OUT');
         return false;
       }
-
-      final officeName = await _getMatchedOffice();
-      final officeMac = _getOfficeMac(officeName);
 
       String ip = '0.0.0.0';
       try {
@@ -490,9 +517,74 @@ class WifiBackgroundWorker {
     } on DioException catch (e) {
       debugPrint('[WIFI_BG] Punch OUT DioException: ${e.message}');
       if (await _handleDuplicateError(e, 'Out', '')) return true;
+      // Network failure or 5xx → queue for offline sync.  Local state is
+      // updated so the worker does not keep re-attempting the punch.
+      if (_isTransientError(e) && await _queueWifiPunch('Out', null, bssid)) {
+        await _setLastPunchType('Out');
+        await _setMatchedOffice('');
+        await _setLastPunchTime(DateTime.now());
+        await _clearManualIn();
+        await _clearLastInMethod();
+        await _showNotification('Auto-Punch Out (queued)', '${_formatTime(DateTime.now())} · will sync when online');
+        _service.invoke('wifi_punch', {
+          'direction': 'Out',
+          'officeName': officeName,
+          'time': DateTime.now().toIso8601String(),
+        });
+        return true;
+      }
       return false;
     } catch (e) {
       debugPrint('[WIFI_BG] Punch OUT error: $e');
+      if (await _queueWifiPunch('Out', null, bssid)) {
+        await _setLastPunchType('Out');
+        await _setMatchedOffice('');
+        await _setLastPunchTime(DateTime.now());
+        await _clearManualIn();
+        await _clearLastInMethod();
+        await _showNotification('Auto-Punch Out (queued)', '${_formatTime(DateTime.now())} · will sync when online');
+        _service.invoke('wifi_punch', {
+          'direction': 'Out',
+          'officeName': officeName,
+          'time': DateTime.now().toIso8601String(),
+        });
+        return true;
+      }
+      return false;
+    }
+  }
+
+  /// `true` when a DioException means "transient, retry later" — no response
+  /// (no network / timeout) or server 5xx.  4xx (permanent rejection) and
+  /// duplicates are excluded — those must NOT be queued.
+  bool _isTransientError(DioException e) {
+    final resp = e.response;
+    if (resp != null && resp.statusCode != null) {
+      return resp.statusCode! >= 500;
+    }
+    return true; // no response → network problem
+  }
+
+  /// Queue a WiFi auto punch that failed due to no connectivity.  OfflineSyncManager
+  /// sends it when the network comes back.  Requests an immediate one-off sync.
+  Future<bool> _queueWifiPunch(String direction, Office? office, String bssid) async {
+    try {
+      String mac = bssid;
+      if (direction == 'Out' && office == null) {
+        final officeName = await _getMatchedOffice();
+        mac = _getOfficeMac(officeName);
+      }
+      final punch = OfflinePunch()
+        ..method = 'WiFi'
+        ..direction = direction
+        ..wifiMAC = mac.isNotEmpty ? mac : 'unknown'
+        ..createdAt = DateTime.now();
+      await OfflineQueueService().enqueue(punch);
+      await OfflineSyncManager.scheduleNow();
+      debugPrint('[WIFI_BG] queued WiFi $direction offline');
+      return true;
+    } catch (e) {
+      debugPrint('[WIFI_BG] offline queue enqueue failed: $e');
       return false;
     }
   }
