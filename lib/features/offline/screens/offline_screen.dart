@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/offline/offline_providers.dart';
+import '../../../core/offline/offline_sync_manager.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/constants.dart';
 import '../../../models/attendance.dart';
@@ -57,11 +58,20 @@ class _OfflineScreenState extends ConsumerState<OfflineScreen> {
     final status = ref.read(attendanceStatusProvider).value;
     final offlinePunches = ref.read(offlineQueueServiceProvider).getTodayPunches();
 
-    // Find latest punch across server + offline
+    // Find latest punch across server + offline.
+    // Failed offline punches (retryCount >= max) were never accepted by the
+    // server — they must NOT influence alternation (would flip direction and
+    // cause a duplicate on the next successful queue).
     DateTime? latestTime;
     String? latestType;
 
     if (status != null) {
+      // Prefer the server's authoritative punched-in state over the punch
+      // list — covers days where the list is empty but isPunchedIn is true.
+      if (status.isPunchedIn && status.todaysPunches.isEmpty) {
+        latestTime = DateTime.now();
+        latestType = 'In';
+      }
       for (final p in status.todaysPunches) {
         if (latestTime == null || p.punchTime.isAfter(latestTime)) {
           latestTime = p.punchTime;
@@ -70,6 +80,7 @@ class _OfflineScreenState extends ConsumerState<OfflineScreen> {
       }
     }
     for (final p in offlinePunches) {
+      if (p.retryCount >= AppConstants.maxRetryCount) continue;
       if (latestTime == null || p.createdAt.isAfter(latestTime)) {
         latestTime = p.createdAt;
         latestType = p.direction;
@@ -118,6 +129,15 @@ class _OfflineScreenState extends ConsumerState<OfflineScreen> {
     }
 
     final queue = ref.read(offlineQueueServiceProvider);
+
+    // Hard guard: never queue the same direction twice in a row — the
+    // backend alternates In/Out, a duplicate would be rejected on sync.
+    if (queue.lastPendingDirection == direction) {
+      _showSnackBar('$direction punch already queued — waiting to sync');
+      setState(() => _isPunching = false);
+      return;
+    }
+
     final punch = OfflinePunch()
       ..method = 'GPS'
       ..direction = direction
@@ -129,6 +149,9 @@ class _OfflineScreenState extends ConsumerState<OfflineScreen> {
     ref.read(lastOfflinePunchTimeProvider.notifier).state = DateTime.now();
     ref.invalidate(offlinePunchListProvider);
     ref.invalidate(todayOfflinePunchesProvider);
+
+    // Ask the background manager to sync as soon as connectivity returns.
+    OfflineSyncManager.scheduleNow();
 
     setState(() => _isPunching = false);
     _startCooldownTimer();

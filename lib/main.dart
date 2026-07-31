@@ -1,7 +1,6 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -9,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'models/offline_punch.dart';
 import 'core/notifications/fcm_service.dart';
 import 'core/notifications/local_notifications.dart';
+import 'core/offline/offline_sync_manager.dart';
 import 'core/utils/constants.dart';
 import 'core/utils/app_logger.dart';
 import 'core/utils/log_buffer.dart';
@@ -117,6 +117,10 @@ void main() async {
 
   // Workmanager for shift-start alarm scheduling
   await GeofenceScheduler.init();
+
+  // Background manager for the offline punch queue — periodic safety-net
+  // sync every 15 min while connected (one-off tasks are scheduled on enqueue).
+  await OfflineSyncManager.start();
 
   // Schedule initial Workmanager alarm from cached shifts
   // so the geofence service auto-starts at the next shift without

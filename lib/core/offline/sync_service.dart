@@ -24,6 +24,8 @@ class SyncService {
     if (_isSyncing) return const SyncResult(synced: 0, failed: 0);
     _isSyncing = true;
     try {
+      // getPending() returns punches sorted oldest-first — the backend
+      // must receive them in chronological order for In/Out alternation.
       final pending = _queue.getPending();
       if (pending.isEmpty) return const SyncResult(synced: 0, failed: 0);
 

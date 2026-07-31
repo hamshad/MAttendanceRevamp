@@ -7,8 +7,10 @@ import 'package:network_info_plus/network_info_plus.dart';
 import '../../../core/auth/auth_provider.dart';
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/offline/offline_providers.dart';
+import '../../../core/offline/offline_sync_manager.dart';
 import '../../../core/utils/constants.dart';
 import '../../punch/services/manual_geo_service.dart';
+import '../../punch/services/location_service.dart';
 import '../../../models/attendance.dart';
 import '../../../models/offline_punch.dart';
 
@@ -200,26 +202,62 @@ class PunchNotifier extends AsyncNotifier<void> {
   }) async {
     final queue = ref.read(offlineQueueServiceProvider);
 
+    // ── GPS-only policy ─────────────────────────────────────────────────
+    // Offline punches are GPS punches: the backend timeline alternates and
+    // a location is required.  Other methods are NOT queued offline — the
+    // user gets a clear failure instead of a silently-failed queued punch.
+    if (method != 'GPS') {
+      state = const AsyncData(null);
+      return PunchResult(
+        success: false,
+        message: 'Offline punches only supported with GPS — select GPS or go online',
+      );
+    }
+
+    // ── Location is mandatory ───────────────────────────────────────────
+    // The caller may pass coords (GPSPunchScreen) or not (punch flow when
+    // the location provider hadn't resolved).  Never queue a GPS punch
+    // without coordinates — sync validation would permanently fail it.
+    double? lat = (extras?['latitude'] as num?)?.toDouble();
+    double? lng = (extras?['longitude'] as num?)?.toDouble();
+    if (lat == null || lng == null) {
+      final loc = await _captureLocation();
+      if (loc == null) {
+        state = const AsyncData(null);
+        return PunchResult(
+          success: false,
+          message: 'Could not get GPS location — enable GPS and try again',
+        );
+      }
+      lat = loc.latitude;
+      lng = loc.longitude;
+    }
+
+    // ── Alternation guard ───────────────────────────────────────────────
+    // If the most recent queued (non-failed) punch is the same direction,
+    // don't enqueue a duplicate — the server alternates In/Out.
+    final direction = extras?['direction'] as String? ?? 'In';
+    if (queue.lastPendingDirection == direction) {
+      state = const AsyncData(null);
+      return PunchResult(
+        success: false,
+        message: 'A $direction punch is already queued — waiting to sync',
+      );
+    }
+
     final punch = OfflinePunch()
-      ..method = method
-      ..direction = extras?['direction'] as String?
-      ..latitude = (extras?['latitude'] as num?)?.toDouble()
-      ..longitude = (extras?['longitude'] as num?)?.toDouble()
-      ..selfieBase64 = extras?['selfieBase64'] as String?
-      ..qrToken = extras?['qrCodeToken'] as String?
-      ..wifiMAC = extras?['wifiMAC'] as String?
-      ..wifiSSID = extras?['wifiSSID'] as String?
-      ..deviceId = extras?['deviceId'] as String?
-      ..beaconUUID = extras?['beaconUUID'] as String?
-      ..beaconMajor = extras?['beaconMajor'] as int?
-      ..beaconMinor = extras?['beaconMinor'] as int?
-      ..nfcTagId = extras?['nfcTagId'] as String?
-      ..faceEmbedding = extras?['faceEmbedding'] as String?;
+      ..method = 'GPS'
+      ..direction = direction
+      ..latitude = lat
+      ..longitude = lng;
 
     await queue.enqueue(punch);
 
     // Notify UI — update the reactive pending count
     ref.read(pendingOfflineCountProvider.notifier).state = queue.pendingCount;
+
+    // Ask the background manager to sync as soon as connectivity returns.
+    OfflineSyncManager.scheduleNow();
 
     state = const AsyncData(null);
 
@@ -229,6 +267,18 @@ class PunchNotifier extends AsyncNotifier<void> {
         : 'Network error — punch saved locally ($count pending)';
 
     return PunchResult(success: true, message: msg);
+  }
+
+  /// Tries to obtain a fresh GPS fix (3 attempts).  Returns null on failure.
+  Future<LocationResult?> _captureLocation() async {
+    for (int i = 0; i < 3; i++) {
+      try {
+        return await LocationService().getCurrentPosition();
+      } catch (_) {
+        if (i < 2) await Future.delayed(const Duration(seconds: 1));
+      }
+    }
+    return null;
   }
 }
 

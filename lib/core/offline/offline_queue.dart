@@ -2,24 +2,46 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../../models/offline_punch.dart';
 import '../utils/constants.dart';
 
+/// Persistent queue of offline punches stored in Hive.
+///
+/// All reads that drive sync or timeline logic must use [getPending] (sorted
+/// chronologically) so the backend receives punches in the order they were
+/// made — alternation (In → Out → In) only works server-side if ordering is
+/// preserved.
 class OfflineQueueService {
   Box<OfflinePunch> get _box => Hive.box<OfflinePunch>(AppConstants.offlinePunchBox);
+
+  Box get _cache => Hive.box(AppConstants.cacheBox);
+
+  static const _lastPunchTimeKey = 'offline_last_punch_time';
 
   Future<void> enqueue(OfflinePunch punch) async {
     punch.createdAt = DateTime.now();
     punch.retryCount = 0;
+    punch.errorMessage = null;
     await _box.add(punch);
+    await _cache.put(_lastPunchTimeKey, punch.createdAt.toIso8601String());
   }
 
-  List<OfflinePunch> getPending() => _box.values
-      .where((p) => p.retryCount < AppConstants.maxRetryCount)
-      .toList();
+  /// Pending (retryable) punches sorted oldest-first — the order the backend
+  /// must receive them in.
+  List<OfflinePunch> getPending() {
+    final pending = _box.values
+        .where((p) => p.retryCount < AppConstants.maxRetryCount)
+        .toList()
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    return pending;
+  }
 
   int get pendingCount => getPending().length;
 
   bool get hasPending => pendingCount > 0;
 
-  List<OfflinePunch> getAll() => _box.values.toList();
+  List<OfflinePunch> getAll() {
+    final all = _box.values.toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return all;
+  }
 
   List<OfflinePunch> getTodayPunches() {
     final now = DateTime.now();
@@ -28,6 +50,17 @@ class OfflineQueueService {
       p.createdAt.month == now.month &&
       p.createdAt.day == now.day
     ).toList()..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+  }
+
+  /// Direction of the most recent NON-FAILED queued punch, or null.
+  /// Failed punches (retryCount >= max) were never accepted by the server,
+  /// so they must NOT influence timeline alternation.
+  String? get lastPendingDirection {
+    final all = _box.values
+        .where((p) => p.retryCount < AppConstants.maxRetryCount)
+        .toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return all.isEmpty ? null : all.first.direction;
   }
 
   Future<void> deleteItem(dynamic key) async {
@@ -39,5 +72,12 @@ class OfflineQueueService {
     if (all.isEmpty) return null;
     all.sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return all.first.createdAt;
+  }
+
+  /// Last punch time persisted to Hive — survives app restart, so the
+  /// 5-minute offline cooldown is not bypassed by killing the app.
+  DateTime? get persistedLastPunchTime {
+    final raw = _cache.get(_lastPunchTimeKey) as String?;
+    return raw != null ? DateTime.tryParse(raw) : null;
   }
 }

@@ -15,6 +15,7 @@ import 'biometric_service.dart';
 import '../utils/app_logger.dart';
 import '../services/office_data_service.dart';
 import '../../features/punch/services/geofence_scheduler.dart';
+import '../offline/offline_sync_manager.dart';
 
 // ── Providers ─────────────────────────────────────────────────────────────────
 
@@ -284,6 +285,8 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
     }
     await GeofenceScheduler.cancel();
     await GeofenceScheduler.stopGeofenceService();
+    // No queued punches to sync after logout — stop the background manager.
+    await OfflineSyncManager.cancel();
     await _tokenStorage.clearTokens();
     await _tokenStorage.clearBackup();
     await AppUser.clear();
@@ -298,6 +301,7 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
     // Definitive logout: also destroy the Hive backup so a future
     // hasTokens() cannot restore the rejected/expired session.
     await _tokenStorage.clearBackup();
+    await OfflineSyncManager.cancel();
     await AppUser.clear();
     ref.read(officeDataServiceProvider).reset();
     state = const AsyncData(null);

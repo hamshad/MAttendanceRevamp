@@ -5,7 +5,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
-import '../../../core/utils/constants.dart';
+import '../../../core/offline/offline_sync_manager.dart';
 import '../../../models/shift.dart';
 import '../../tracking/services/field_tracking_service.dart';
 
@@ -27,6 +27,13 @@ const _kAlarmChannel = MethodChannel('com.mattendance.mattendance_mobile/geofenc
 @pragma('vm:entry-point')
 void geofenceWorkmanagerCallback() {
   Workmanager().executeTask((taskName, inputData) async {
+    // ── Offline queue sync tasks ────────────────────────────────────────
+    // Route to the offline sync manager BEFORE geofence logic.  These tasks
+    // sync queued punches when connectivity returns, then close.
+    if (OfflineSyncManager.handles(taskName)) {
+      return OfflineSyncManager.executeSyncTask();
+    }
+
     if (taskName == _kTaskName) {
       debugPrint('[GF_SCHED] Shift-start task fired');
 
