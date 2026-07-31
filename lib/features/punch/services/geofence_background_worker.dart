@@ -866,8 +866,13 @@ class GeofenceBackgroundWorker {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
     final val = prefs.getBool('geofence_auto_enabled') ?? false;
-    debugPrint('[GF_BG] _isEnabled = $val');
-    return val;
+    // Permission gate: block ONLY when the server definitively denied geofence
+    // auto.  Flag absent (never fetched / offline) → treated as unknown and
+    // allowed — preserves legacy behavior, never blocks a permitted user.
+    final allow = prefs.getBool('bg_allow_geofence_auto');
+    final permitted = allow != false;
+    debugPrint('[GF_BG] _isEnabled = $val, allowGeofenceAuto = ${allow == null ? 'unknown' : allow}');
+    return val && permitted;
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────

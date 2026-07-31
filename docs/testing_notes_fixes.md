@@ -25,21 +25,35 @@ Debug session docs: `.planning/debug/resolved/` (token-flush-logout, wifi-duplic
 **Test signals:** app randomly logs out; login screen flashes after login;
 geofence worker dies after wrong password attempt.
 
-## 2. GPS auto-punch runs WITHOUT geofence permission — NOT YET FIXED
+## 2. GPS auto-punch runs WITHOUT geofence permission — FIXED in `1b3ea5f` (pending commit)
 
-Auto-geofence background path checks **only the auth token**, never
-`allowGeofenceAuto` permission:
+Root cause: auto-geofence background path checked only the auth token, never
+`allowGeofenceAuto` permission.
 
 - `main.dart:44-59` `_scheduleAlarmFromCachedShifts()` — token-only check
 - `geofence_scheduler.dart:233` `startIfWithinShiftWindow()` — no check
-- `geofence_background_worker.dart:828` `_isEnabled()` — only
+- `geofence_background_worker.dart` `_isEnabled()` — only
   `geofence_auto_enabled` SP flag (defaults **true** via
   `main.dart:28-37` `_syncGeofenceFlag`, Hive `auto_punch_enabled`)
 - Only gate: `main_shell.dart:164` `if (perms?.allowGeofenceAuto != true)`
-  — stops only the foreground service
+  — stopped only the foreground service
 
-**Known symptom:** user WITHOUT geofence permission gets auto punched In/Out
-with GPS records. Reported by real user before.
+**Fix (4 files, non-breaking):**
+- `accessPermissionsProvider` mirrors `allowGeofenceAuto` → SP key
+  `bg_allow_geofence_auto`. Written ONLY on successful fetch — a transient
+  fetch failure never revokes a permitted user.
+- Worker `_isEnabled()` now also requires `bg_allow_geofence_auto != false`.
+  Flag ABSENT (never fetched / offline) → allowed (legacy behavior — the
+  safety valve so geofence keeps working for permitted users).
+- `main.dart` cold start skips alarm/service when flag definitively false.
+- `_initGeofence()` distinguishes perms-null (loading → do nothing) from
+  definitive denial → cancels shift alarms + `notifyGeofenceToggle()`, stops
+  combined service only when field tracking is off too.
+- NOT gated: workmanager shift/restart alarm service-start (shared with
+  field tracking + wifi workers — gating would break them).
+
+**Test signals:** user WITHOUT geofence permission → no auto punches (worker
+gated). User WITH permission → unchanged.
 
 ## 3. Offline queue sync via Workmanager — commit `a41763c`
 

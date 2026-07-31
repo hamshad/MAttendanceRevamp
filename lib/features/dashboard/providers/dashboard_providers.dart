@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dio/dio.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:network_info_plus/network_info_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/auth/auth_provider.dart';
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/offline/offline_providers.dart';
@@ -357,7 +358,17 @@ final accessPermissionsProvider = FutureProvider<AccessPermissions>((ref) async 
     final dio = ref.read(dioClientProvider).dio;
     final response = await dio.get(ApiEndpoints.accessPermissions);
     final data = response.data['data'] as Map<String, dynamic>?;
-    if (data != null) return AccessPermissions.fromJson(data);
+    if (data != null) {
+      final perms = AccessPermissions.fromJson(data);
+      // Mirror the geofence permission to SharedPreferences so the background
+      // worker (_isEnabled) can enforce it — the bg isolate has no access to
+      // this Riverpod provider.  Written ONLY on success: a transient fetch
+      // failure must never revoke a previously-permitted user (the flag is
+      // absent → treated as "unknown/legacy", which does not block).
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('bg_allow_geofence_auto', perms.allowGeofenceAuto);
+      return perms;
+    }
   } catch (_) {
     // Fall through to minimal defaults on any error
   }

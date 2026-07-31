@@ -48,6 +48,13 @@ void _scheduleAlarmFromCachedShifts() {
       debugPrint('[MAIN] No auth token — skipping geofence service start');
       return;
     }
+    // Permission gate (mirrored by accessPermissionsProvider on fetch): skip
+    // only when the server definitively denied geofence auto.  Absent flag
+    // (not fetched yet) → proceed, MainShell re-evaluates once perms load.
+    if (prefs.getBool('bg_allow_geofence_auto') == false) {
+      debugPrint('[MAIN] Geofence not permitted by backend — skipping alarm/service start');
+      return;
+    }
     try {
       final cached = ShiftService.loadCachedShifts();
       if (cached.isEmpty) return;

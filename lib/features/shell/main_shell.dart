@@ -161,8 +161,24 @@ class _MainShellState extends ConsumerState<MainShell>
     debugPrint('SHELL: _initGeofence() triggered — GeofenceAutoPunchService.isEnabled=${GeofenceAutoPunchService.isEnabled}');
 
     final perms = ref.read(accessPermissionsProvider).value;
-    if (perms?.allowGeofenceAuto != true) {
-      debugPrint('SHELL: Geofence not permitted by backend — skipping');
+    if (perms == null) {
+      // Perms still loading / fetch failed — do nothing (never revoke on
+      // transient failure).
+      debugPrint('SHELL: Geofence perms unknown (loading) — skipping init');
+      return;
+    }
+    if (!perms.allowGeofenceAuto) {
+      debugPrint('SHELL: Geofence not permitted by backend — stopping geofence service/alarms');
+      // Definitive denial → revoke the background path: cancel shift alarms
+      // and tell the running service geofence is off.  The combined service
+      // stays alive if field tracking needs it.
+      await GeofenceScheduler.cancel();
+      FieldTrackingService.notifyGeofenceToggle();
+      final prefs = await SharedPreferences.getInstance();
+      final ftEnabled = prefs.getBool('field_tracking_enabled') ?? false;
+      if (!ftEnabled) {
+        await GeofenceScheduler.stopGeofenceService();
+      }
       return;
     }
 
