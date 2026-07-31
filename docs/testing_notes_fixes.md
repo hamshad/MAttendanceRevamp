@@ -124,14 +124,41 @@ Scenario matrix (each: normal online, airplane-mode offline, app killed while of
 8. **4xx rejection** — manual punch while GPS off / invalid state → NOT queued,
    clear error shown.
 
-## 6. Known pre-existing failures (not caused by our changes)
+## 6. Home screen load time — `uncommitted` (performance, not a bug fix)
+
+Cold-start blockers found + fixed:
+
+1. **`Firebase.initializeApp()` awaited before `runApp()`** — blocks first
+   frame seconds on slow networks (config/metadata fetch). Now deferred:
+   `unawaited(Firebase.initializeApp().then(...))`; FCM background handler
+   registered once ready. `_initFCM()` in MainShell waits for
+   `Firebase.apps.isNotEmpty` (max 8s) so push registration never races it.
+   → first frame renders immediately; push unaffected.
+2. **`attendanceStatusProvider` cache was last-resort** — fetch → fail →
+   800ms delay → retry → fail → cache. Skeleton showed the whole time, and
+   every `ref.invalidate` (app resume, punch event) flashed loading.
+   Now **cache-first + stale-while-revalidate**: today's cached status
+   renders instantly, `_refreshInBackground()` swaps in fresh data when it
+   arrives. No skeleton flash on open or resume.
+3. `refresh()` (pull-to-refresh) also cache-first — keeps UI stable.
+
+**Test signals:** cold start reaches home fast even on slow network; home
+shows yesterday-free real data instantly (same-day cache) then updates;
+resume no longer flashes skeletons. Push notifications still register
+(device token in backend). If push token registration stops working →
+check `_initFCM` wait loop (Firebase.apps never becomes non-empty).
+
+Not touched: workmanager registrations, field tracking init (kept awaited —
+background service registration must precede scheduling).
+
+## 7. Known pre-existing failures (not caused by our changes)
 
 - `geofence_scheduler_test.dart` — 3 failures, stale shift dates in tests
   (verified identical on unmodified code via git stash).
 - `geofence_background_worker_test.dart` — 3 failures, same pre-existing.
 - `wifi_auto_punch_service_test.dart` — load error (missing test infra).
 
-## 7. Test infra notes
+## 8. Test infra notes
 
 - `flutter analyze` clean (0 errors) on all our changes.
 - Baseline comparison method: `git stash` → run test → `git stash pop`.

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart' as geo;
@@ -558,6 +559,14 @@ class _MainShellState extends ConsumerState<MainShell>
 
   Future<void> _initFCM() async {
     try {
+      // Firebase init is deferred in main() (non-blocking).  Wait until it
+      // is ready so token registration does not race it (max 8s).
+      if (Firebase.apps.isEmpty) {
+        final deadline = DateTime.now().add(const Duration(seconds: 8));
+        while (Firebase.apps.isEmpty && DateTime.now().isBefore(deadline)) {
+          await Future.delayed(const Duration(milliseconds: 100));
+        }
+      }
       await FCMService(ref, onDeepLink: _handleDeepLink).initialize();
     } catch (_) {
       // Firebase not configured or permission denied — fail silently.

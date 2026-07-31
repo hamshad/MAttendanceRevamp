@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
@@ -138,15 +139,16 @@ void main() async {
   // CannotPostForegroundServiceNotificationException on Android 14+.
   WidgetsBinding.instance.addPostFrameCallback((_) => _scheduleAlarmFromCachedShifts());
 
-  // Firebase — requires google-services.json (Android) / GoogleService-Info.plist (iOS).
-  // Wrapped in try/catch so the app runs normally without the config files.
-  try {
-    await Firebase.initializeApp();
-    // Register the background handler before runApp (FCM requirement).
+  // Firebase — deferred: initializing BEFORE runApp() blocks the first frame
+  // for seconds on slow networks (config/metadata fetch).  Initialized
+  // fire-and-forget; the FCM background handler is registered once ready.
+  // MainShell._initFCM() waits for Firebase readiness before requesting
+  // tokens, so push notifications are unaffected.
+  unawaited(Firebase.initializeApp().then((_) {
     FirebaseMessaging.onBackgroundMessage(fcmBackgroundHandler);
-  } catch (_) {
-    // Firebase not configured — FCM and push notifications will be unavailable.
-  }
+  }).catchError((Object e) {
+    // Firebase not configured — FCM and push notifications unavailable.
+  }));
 
   runApp(const ProviderScope(child: MAttendanceApp()));
 }

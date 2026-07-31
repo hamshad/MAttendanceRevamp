@@ -38,9 +38,29 @@ class AttendanceStatusNotifier extends AsyncNotifier<EmployeeStatus?> {
   @override
   Future<EmployeeStatus?> build() async {
     ref.watch(authNotifierProvider);
+    // Cache-first: if today's cached status exists, render it instantly and
+    // refresh in the background — no skeleton flash, no waiting on the
+    // network before the home screen shows real data.
+    final cached = _loadFromCache();
+    if (cached != null) {
+      _lastKnownValue = cached;
+      _refreshInBackground();
+      return cached;
+    }
     final result = await _fetch();
     if (result != null) return result;
     return _loadFromCache();
+  }
+
+  /// Fetch fresh data in the background and swap it into the UI when it
+  /// arrives.  Never clobbers a loading/error state with stale data.
+  Future<void> _refreshInBackground() async {
+    try {
+      final fresh = await _fetch();
+      if (fresh != null && state is AsyncData) {
+        state = AsyncData<EmployeeStatus?>(fresh);
+      }
+    } catch (_) {}
   }
 
   Future<EmployeeStatus?> _fetch() async {
@@ -99,8 +119,15 @@ class AttendanceStatusNotifier extends AsyncNotifier<EmployeeStatus?> {
 
   Future<void> refresh() async {
     final previous = state.value;
-    state = const AsyncLoading();
-    state = await AsyncValue.guard(() => _fetch().then((v) => v ?? previous));
+    final cached = _loadFromCache() ?? previous;
+    if (cached != null) {
+      // Keep showing current data — swap when fresh arrives (no flash).
+      state = AsyncData<EmployeeStatus?>(cached);
+      await _refreshInBackground();
+    } else {
+      state = const AsyncLoading();
+      state = await AsyncValue.guard(() => _fetch().then((v) => v ?? previous));
+    }
   }
 }
 
