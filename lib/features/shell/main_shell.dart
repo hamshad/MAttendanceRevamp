@@ -19,6 +19,7 @@ import '../../core/notifications/local_notifications.dart';
 import '../../core/offline/offline_providers.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/theme_provider.dart';
+import '../alignment/alignment_providers.dart';
 import '../settings/screens/debug_log_screen.dart';
 import '../dashboard/providers/dashboard_providers.dart';
 import '../dashboard/screens/home_screen.dart';
@@ -91,6 +92,7 @@ class _MainShellState extends ConsumerState<MainShell>
       }
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(alignmentMonitorProvider); // starts the user-alignment watchdog
       _initGeofence();
       _initWifiAuto();
       _initFieldTracking();

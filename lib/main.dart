@@ -126,6 +126,16 @@ void main() async {
         importance: Importance.high,
       ),
     );
+    await androidPlugin.createNotificationChannel(
+      const AndroidNotificationChannel(
+        'user_alignment',
+        'Attendance Alerts',
+        description:
+            'Heads-up alerts when a phone setting breaks auto punch '
+            '(GPS off, airplane mode, location permission)',
+        importance: Importance.high,
+      ),
+    );
   }
 
   // Background field tracking service — registers the entrypoint before runApp.

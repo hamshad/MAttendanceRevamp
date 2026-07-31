@@ -638,17 +638,21 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
   gpsStatusSub = Geolocator.getServiceStatusStream().listen((status) async {
     final prefs = await SharedPreferences.getInstance();
     final gfEnabled = prefs.getBool('geofence_auto_enabled') ?? false;
-    if (status == ServiceStatus.disabled && gfEnabled) {
-      debugPrint('[GF_BG_ENTRY] GPS turned off while geofence active — sending alert');
+    final ftEnabled = prefs.getBool('field_tracking_enabled') ?? false;
+    final wifiEnabled = prefs.getBool('wifi_auto_punch_enabled_bg') ?? false;
+    final anyAuto = gfEnabled || ftEnabled || wifiEnabled;
+    if (status == ServiceStatus.disabled && anyAuto) {
+      debugPrint('[GF_BG_ENTRY] GPS turned off while auto punch active — sending alert');
       try {
         await gpsNotif.show(
           996,
-          'GPS Turned Off',
-          'Geofence auto-punch paused — turn on GPS to resume monitoring',
+          'GPS is off',
+          'Auto punch and tracking won\u2019t work until you turn Location back '
+          'on. Open phone Settings \u2192 Location \u2192 turn it on.',
           const NotificationDetails(
             android: AndroidNotificationDetails(
-              'gps_disabled',
-              'GPS Disabled',
+              'user_alignment',
+              'Attendance Alerts',
               importance: Importance.high,
               priority: Priority.high,
             ),
@@ -657,7 +661,7 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
       } catch (e) {
         debugPrint('[GF_BG_ENTRY] GPS disabled notification failed: $e');
       }
-    } else if (status == ServiceStatus.enabled && gfEnabled) {
+    } else if (status == ServiceStatus.enabled && anyAuto) {
       debugPrint('[GF_BG_ENTRY] GPS re-enabled — dismissing alert');
       await gpsNotif.cancel(996);
     }

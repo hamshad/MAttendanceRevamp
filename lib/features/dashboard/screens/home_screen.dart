@@ -9,6 +9,8 @@ import '../widgets/today_timeline.dart';
 import '../widgets/quick_stats.dart';
 import '../../history/screens/attendance_history_screen.dart';
 import '../../punch/screens/break_screen.dart';
+import '../../alignment/alignment_providers.dart';
+import '../../alignment/widgets/alignment_banner.dart';
 import '../../../widgets/skeleton_loader.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
@@ -67,6 +69,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       ),
                       const SizedBox(height: 12),
 
+                      // ── User Alignment Alerts (GPS off, permission, etc.) ──
+                      AlignmentBanner(
+                        alerts: ref.watch(alignmentMonitorProvider).activeAlerts,
+                        onDismiss: (id) =>
+                            ref.read(alignmentMonitorProvider).dismissAlert(id),
+                      ),
+
                       // ── Status Card ────────────────────────────────────────
                       statusAsync.when(
                         loading: () => const _StatusCardSkeleton(),
@@ -77,7 +86,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                             : const _ErrorCard('No attendance data for today'),
                       ),
                       const SizedBox(height: 24),
-
                       // ── Punch Section ──────────────────────────────────────
                       Center(
                         child: statusAsync.when(

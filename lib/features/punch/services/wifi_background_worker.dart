@@ -97,8 +97,10 @@ class WifiBackgroundWorker {
   void _onConnectivity(List<ConnectivityResult> results) {
     debugPrint('[WIFI_BG] Connectivity changed: $results');
     if (results.contains(ConnectivityResult.wifi)) {
+      _clearNoConnectivityWarning();
       _checkCurrentWifi();
     } else if (results.contains(ConnectivityResult.mobile)) {
+      _clearNoConnectivityWarning();
       // Mobile data only — flush pending OUT, don't check WiFi.
       // Mirror foreground behavior: on mobile data, only deliver
       // a previously-queued pending OUT; don't punch fresh OUT.
@@ -107,6 +109,11 @@ class WifiBackgroundWorker {
       debugPrint('[WIFI_BG] Mobile data — flushing pending OUT only');
       _flushPendingOut();
     } else {
+      // No connectivity at all (airplane mode / no signal) — warn once so
+      // the employee knows punches will be saved and sent later.  The
+      // re-check below still runs: if WiFi comes back before the poll it
+      // will re-match and cancel the warning.
+      _warnNoConnectivity();
       // Stream says no connectivity — but the phone may have already
       // transitioned to another WiFi.  Re-check before declaring
       // disconnect so we don't OUT just to IN again on a registered AP.
@@ -141,6 +148,10 @@ class WifiBackgroundWorker {
         return;
       }
 
+      // WiFi is up — any no-connectivity warning is resolved (covers the
+      // fallback-timer path where the connectivity stream may have dropped).
+      await _clearNoConnectivityWarning();
+
       // Load offices if not yet loaded or stale (>30 min)
       if (_offices.isEmpty || _isDataStale()) {
         await _loadOffices();
@@ -148,11 +159,18 @@ class WifiBackgroundWorker {
 
       final bssid = await _getCurrentBssid();
       if (bssid == null) {
-        debugPrint('[WIFI_BG] No BSSID available — treating as disconnected');
+        // Connectivity above confirmed WiFi is connected, so "no BSSID"
+        // means Android hid it (location/GPS off) or the radio is mid-scan —
+        // NOT a disconnect.  Punching OUT here would falsely end an
+        // employee's shift while they sit at the office.  Warn instead.
+        debugPrint('[WIFI_BG] BSSID unreadable while connected (location off?) — skipping, no punch');
         _emitDebug(enabled: true);
-        await _handleDisconnect();
+        await _warnBssidUnreadable();
         return;
       }
+
+      // BSSID readable — any previous "hidden network" warning is resolved.
+      await _clearBssidWarning();
 
       debugPrint('[WIFI_BG] Current BSSID: $bssid');
 
@@ -237,6 +255,13 @@ class WifiBackgroundWorker {
 
   Future<void> _handleDisconnect() async {
     if (!await _isEnabled()) return;
+
+    // Real disconnect — any network-hidden warning is resolved.  The
+    // no-connectivity warning is NOT cleared here: a disconnect proves
+    // nothing about connectivity returning (and _onConnectivity fires
+    // _warnNoConnectivity before _checkCurrentWifi, so clearing here
+    // would cancel the popup the same instant it posts).
+    await _clearBssidWarning();
 
     // ── Cooldown guard: prevent rapid re-entry from timer + stream ──
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -929,6 +954,97 @@ class WifiBackgroundWorker {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_kDisconnectProcessedTs, DateTime.now().millisecondsSinceEpoch);
     debugPrint('[WIFI_BG] Disconnect marked as processed (guard: ${_disconnectGuardMs}ms)');
+  }
+
+  // ── User Alignment Warnings ────────────────────────────────────────────────
+  // Heads-up notifications that tell the employee (in plain words) when a
+  // phone setting they changed is quietly breaking their auto punch, and
+  // how to fix it.  Notification IDs are shared with the main-isolate
+  // AlignmentMonitor so both isolates replace (not duplicate) each other.
+
+  static const _kNoConnectivityWarned = 'wifi_bg_no_connectivity_warned';
+  static const _kBssidWarnedTs = 'wifi_bg_bssid_warned_ts';
+  static const _kAlignWarnCooldownMs = 10 * 60 * 1000; // 10 min
+  static const _kNoConnectivityNotifId = 998;
+  static const _kBssidHiddenNotifId = 997;
+
+  /// Airplane mode / no signal at all — punches will be saved and sent later.
+  Future<void> _warnNoConnectivity() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getBool(_kNoConnectivityWarned) ?? false) return;
+      await prefs.setBool(_kNoConnectivityWarned, true);
+      await _showAlertNotification(
+        _kNoConnectivityNotifId,
+        'No network (airplane mode?)',
+        'Attendance can\u2019t send or receive right now. WiFi punches will be '
+        'saved and sent when you\u2019re back online. Swipe down from the top of '
+        'your screen and turn off airplane mode.',
+      );
+    } catch (e) {
+      debugPrint('[WIFI_BG] No-connectivity warning failed: $e');
+    }
+  }
+
+  Future<void> _clearNoConnectivityWarning() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getBool(_kNoConnectivityWarned) ?? false) {
+        await prefs.setBool(_kNoConnectivityWarned, false);
+        await _notifications.cancel(_kNoConnectivityNotifId);
+      }
+    } catch (e) {
+      debugPrint('[WIFI_BG] No-connectivity warning clear failed: $e');
+    }
+  }
+
+  /// Connected to WiFi but Android hides the network name (location/GPS off).
+  /// Rate-limited so the 15s fallback poll doesn't spam the user.
+  Future<void> _warnBssidUnreadable() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final lastWarned = prefs.getInt(_kBssidWarnedTs) ?? 0;
+      if (now - lastWarned < _kAlignWarnCooldownMs) return;
+      await prefs.setInt(_kBssidWarnedTs, now);
+      await _showAlertNotification(
+        _kBssidHiddenNotifId,
+        'Connected to WiFi, but the app can\u2019t read it',
+        'This happens when Location is off. Turn it on so auto punch can '
+        'confirm you\u2019re on the office network. Phone Settings \u2192 Location.',
+      );
+    } catch (e) {
+      debugPrint('[WIFI_BG] BSSID warning failed: $e');
+    }
+  }
+
+  Future<void> _clearBssidWarning() async {
+    try {
+      await _notifications.cancel(_kBssidHiddenNotifId);
+    } catch (e) {
+      debugPrint('[WIFI_BG] BSSID warning clear failed: $e');
+    }
+  }
+
+  /// Heads-up alert on the shared user-alignment channel.
+  Future<void> _showAlertNotification(int id, String title, String body) async {
+    try {
+      await _notifications.show(
+        id,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'user_alignment',
+            'Attendance Alerts',
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+        ),
+      );
+    } catch (e) {
+      debugPrint('[WIFI_BG] Alert notification failed: $e');
+    }
   }
 
   // ── Notification ───────────────────────────────────────────────────────────

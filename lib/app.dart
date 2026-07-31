@@ -5,6 +5,7 @@ import 'core/auth/auth_provider.dart';
 import 'core/theme/app_theme.dart';
 import 'core/theme/theme_provider.dart';
 import 'core/utils/constants.dart';
+import 'features/alignment/alignment_monitor.dart';
 import 'features/auth/screens/login_screen.dart';
 import 'features/auth/screens/permission_blocking_screen.dart';
 import 'features/shell/main_shell.dart';
@@ -17,6 +18,7 @@ class MAttendanceApp extends ConsumerWidget {
     return MaterialApp(
       title: AppConstants.appName,
       debugShowCheckedModeBanner: false,
+      navigatorKey: appNavigatorKey,
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,
       themeMode: ref.watch(themeModeProvider),

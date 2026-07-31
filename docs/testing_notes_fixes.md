@@ -186,3 +186,74 @@ background service registration must precede scheduling).
 
 - `flutter analyze` clean (0 errors) on all our changes.
 - Baseline comparison method: `git stash` → run test → `git stash pop`.
+
+## 9. User alignment layer (employee-facing warnings)
+
+Purpose: employees do things that quietly break auto punch (GPS off,
+airplane mode, revoking "Allow all the time", location hiding WiFi names).
+The app now warns them in plain words + tells them the tap-path fix.
+
+**Architecture — `lib/features/alignment/`:**
+- `AlignmentMonitor` (singleton, main isolate): subscribes GPS service-status
+  stream + connectivity stream, polls `Geolocator.checkPermission()` every
+  1 min + on app resume. Owns the PERMISSION alert (bg workers can't detect
+  permission changes). Surface: in-app dialog (critical, app open) /
+  heads-up notification (app backgrounded, id 999) / home banner.
+- Background isolate owns the other three popups (keeps running when app
+  killed):
+  - GPS off (id 996, `field_tracking_service.dart` gpsStatusSub) — now also
+    fires for wifi-only users, not just geofence.
+  - No connectivity / airplane mode (id 998, `wifi_background_worker.dart`
+    `_onConnectivity` none-branch, transition-gated via prefs flag).
+  - WiFi connected but BSSID hidden (id 997, same worker `_checkCurrentWifi`
+    bssid-null branch, 10-min cooldown).
+- Notification IDs shared main↔bg so both sides REPLACE not duplicate.
+- Home banner (`AlignmentBanner`): persistent alert list, warnings
+  dismissible per session, critical stay until fixed. Refresh on resolution.
+- `user_alignment` high-importance channel created in `main()`.
+
+**Fixed bug in the same change (false punch-OUT):** `_checkCurrentWifi`
+previously called `_handleDisconnect()` when BSSID was null WHILE
+connectivity confirmed WiFi was connected — GPS off (Android hides BSSID
+when location off) punched employees OUT while sitting at the office.
+Now: bssid-null while connected = warn + skip. Foreground
+`wifi_auto_punch_service._checkCurrentConnection` catch does the same
+(verify `Connectivity` before flushing pending OUT / punching OUT).
+Android platform truth: SSID/BSSID unreadable unless location permission +
+location services ON (SSID since API 29, BSSID since API 31).
+
+**Alert copy (employee-facing, human):**
+- GPS off (🔴): "Auto punch won't work and you could be marked absent even
+  at the office. Turn Location back on." → Fix: open Location settings.
+- Permission (🔴): "Allow location 'All the time'" — auto punch stops when
+  app closed. → Fix: app settings.
+- Airplane (🟠): "No network (airplane mode?) — WiFi punches will be saved
+  and sent when you're back online." (no fix button; swipe-down instruction
+  in bg notification body).
+- WiFi hidden (🟠): "Connected to WiFi, but the app can't read it — turn on
+  Location so auto punch can confirm the office network." → Fix: Location.
+
+**Manual test scenarios (physical device):**
+1. Geofence on → toggle GPS off → expect heads-up "GPS is off" (id 996)
+   + banner on home; toggle on → notification dismissed + banner gone.
+2. WiFi auto on → toggle airplane mode → expect "No network" popup (998);
+   turn off airplane → popup clears.
+3. WiFi auto on + GPS off while connected to office WiFi → expect
+   "Connected to WiFi, but the app can't read it" (997) + NO auto punch OUT
+   (was the bug). Turn GPS on → popup clears, auto punch resumes.
+4. Geofence/field tracking on → revoke location to "While using" → open app
+   → permission dialog + banner. Grant "All the time" → clears.
+5. All alerts resolve → banner empty, notification shade clean.
+
+**Emulator verification (API 36, `emulator-5554`):**
+- GPS off → notification 996 posted on `user_alignment` (importance 4,
+  sound+vibrate), `[ALIGN] alert active: gps_off` + in-app dialog shown.
+  PASS.
+- Airplane mode on → notification 998 posted; off → `alert resolved:
+  no_connectivity` + banner cleared. PASS. (Found + fixed a race here:
+  `_warnNoConnectivity` fired before `_checkCurrentWifi → _handleDisconnect`,
+  which cancelled the popup instantly; `_handleDisconnect` no longer clears
+  the no-connectivity warning.)
+- Revoke FINE location while on WiFi → `[ALIGN] alert active: wifi_hidden`
+  + banner (997). PASS, and no false punch-OUT.
+- Permission alert (999): NOT emulator-testable end-to-end. `field_tracking_enabled`/`geofence_auto_enabled` are app-managed (auto-false when not punched in; Hive box for geofence can't be seeded via prefs file — `_syncGeofenceFlag` overwrites the SP copy from Hive each boot). In-session revoke while tracking active should be verified on a physical device (scenario 4). The 999 branch shares the exact `_setOrClear` dialog/notification machinery proven by the GPS-off test.

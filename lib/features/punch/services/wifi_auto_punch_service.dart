@@ -461,7 +461,18 @@ class WifiAutoPunchService {
         await _triggerPunch(info, null);
       }
     } catch (e) {
-      AppLogger.v('WIFI_AUTO: No WiFi connection, verifying punch status');
+      AppLogger.v('WIFI_AUTO: getCurrentWifi failed — verifying real connectivity');
+      // getCurrentWifi() throws when Android hides SSID/BSSID (location/GPS
+      // off) even though WiFi is connected.  Check connectivity first: if
+      // WiFi is still up, this is a READ failure, not a disconnect — do NOT
+      // flush pending OUT or punch OUT.
+      try {
+        final conn = await Connectivity().checkConnectivity();
+        if (conn.contains(ConnectivityResult.wifi)) {
+          AppLogger.w('WIFI_AUTO: WiFi connected but BSSID unreadable (location off?) — skipping disconnect');
+          return;
+        }
+      } catch (_) {}
       // Flush any pending OUT via mobile data if available
       await _flushPendingOut();
       await _handleWifiDisconnected();
