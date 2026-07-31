@@ -47,34 +47,42 @@ abstract final class AppColors {
   static const graySubtle = Color(0xFFF1F5F9);
 
   // ── Dark Mode ─────────────────────────────────────────────────────────────
-  static const darkSurface = Color(0xFF0F172A);
-  static const darkCard    = Color(0xFF1E293B);
-  static const darkBorder  = Color(0xFF334155);
+  static const darkBackground   = Color(0xFF0F172A); // Background
+  static const darkSurface      = Color(0xFF172033); // Surface (sheets, nav, dialogs)
+  static const darkCard         = Color(0xFF1D273B); // Card
+  static const darkBorder       = Color(0xFF2C3752); // Border
 
-  static const darkSuccess = Color(0xFF7DFF95);
-  static const darkWarning = Color(0xFFFFBC5E);
-  static const darkError   = Color(0xFFFF8080);
-  static const darkInfo    = Color(0xFF87D1FF);
+  static const darkPrimary     = Color(0xFF6366F1); // Primary
+  static const darkPrimaryDark = Color(0xFF4F46E5); // Primary Dark (pressed)
+
+  static const darkSuccess = Color(0xFF10B981);
+  static const darkWarning = Color(0xFFFBBF24);
+  static const darkError   = Color(0xFFF87171);
+  static const darkInfo    = Color(0xFF60A5FA);
+
+  static const darkTextPrimary   = Color(0xFFF8FAFC); // Text
+  static const darkTextSecondary = Color(0xFFCBD5E1); // Subtext
+  static const darkMuted         = Color(0xFF94A3B8); // Muted
 
   // ── Theme-aware Getters ───────────────────────────────────────────────────
-  static Color getSuccess(bool isDark) => success;
-  static Color getError(bool isDark)   => error;
-  static Color getWarning(bool isDark) => warning;
-  static Color getInfo(bool isDark)    => info;
+  static Color getSuccess(bool isDark) => isDark ? darkSuccess : success;
+  static Color getError(bool isDark)   => isDark ? darkError   : error;
+  static Color getWarning(bool isDark) => isDark ? darkWarning : warning;
+  static Color getInfo(bool isDark)    => isDark ? darkInfo    : info;
 
   // ── Status Color Helpers ──────────────────────────────────────────────────
   /// Returns the foreground color for a given attendance status string.
   static Color statusColor(String status, {bool isDark = false}) {
     final s = status.toLowerCase();
     return switch (s) {
-      'present'   => success,
-      'absent'    => error,
-      'leave'     => warning,
+      'present'   => isDark ? darkSuccess : success,
+      'absent'    => isDark ? darkError   : error,
+      'leave'     => isDark ? darkWarning : warning,
       'halfday'   => orange,
-      'holiday'   => info,
+      'holiday'   => isDark ? darkInfo : info,
       'weekoff'   => gray,
-      'wfh'       => info,
-      'late'      => warning,
+      'wfh'       => isDark ? darkInfo : info,
+      'late'      => isDark ? darkWarning : warning,
       'compoff'   => purple,
       'onduty'    => purple,
       _           => gray,
@@ -91,9 +99,9 @@ abstract final class AppColors {
   static Color approvalColor(String status, {bool isDark = false}) {
     final s = status.toLowerCase();
     return switch (s) {
-      'approved'  => success,
-      'rejected'  => error,
-      'pending'   => warning,
+      'approved'  => isDark ? darkSuccess : success,
+      'rejected'  => isDark ? darkError   : error,
+      'pending'   => isDark ? darkWarning : warning,
       'cancelled' => gray,
       'expired'   => gray,
       _           => gray,
