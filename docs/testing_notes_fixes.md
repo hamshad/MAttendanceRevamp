@@ -141,6 +141,14 @@ Cold-start blockers found + fixed:
    renders instantly, `_refreshInBackground()` swaps in fresh data when it
    arrives. No skeleton flash on open or resume.
 3. `refresh()` (pull-to-refresh) also cache-first — keeps UI stable.
+4. **Splash blank-with-loader on EVERY open** — `AppUser.load()` did 7
+   SEQUENTIAL `FlutterSecureStorage` reads (encrypted storage, each
+   50-300ms+ on Android) → ~1-2s blank splash per open.  Now:
+   - Hive fast-read mirror (`cached_user` in cacheBox) → load is
+     near-instant on open; secure storage stays source of truth on write
+   - cold path (first open after update): 7 reads run in PARALLEL + lazy
+     backfill to Hive so next open skips secure storage
+   - `clear()` also deletes the Hive mirror (logout stays clean)
 
 **Test signals:** cold start reaches home fast even on slow network; home
 shows yesterday-free real data instantly (same-day cache) then updates;
