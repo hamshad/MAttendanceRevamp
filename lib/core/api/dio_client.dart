@@ -22,6 +22,10 @@ class DioClient {
   // Prevents concurrent refresh loops
   bool _isRefreshing = false;
 
+  // Guards against spawning multiple "wait for other isolate" loops for
+  // the same refresh window.
+  bool _waitingForLock = false;
+
   // Requests that arrived while a refresh was already in progress
   final List<({RequestOptions options, ErrorInterceptorHandler handler})>
       _pendingRequests = [];
@@ -151,11 +155,25 @@ class DioClient {
     if (!await _tokenStorage.acquireRefreshLock()) {
       AppLogger.w('[AUTH] 401: Another isolate is already refreshing tokens. Queuing request.');
       _pendingRequests.add((options: error.requestOptions, handler: handler));
-      
-      // Periodically check if the lock is released or if we should try ourselves
-      _waitForOtherIsolateRefresh(error, handler);
+
+      // Only start ONE wait loop for all queued requests.  When the other
+      // isolate's refresh completes, we re-read tokens and retry everything.
+      if (!_waitingForLock) {
+        _waitingForLock = true;
+        _waitForOtherIsolateRefresh();
+      }
       return;
     }
+
+    // Snapshot of the mirror timestamp BEFORE our refresh attempt.  On a
+    // refresh 400 we compare against this to detect that another isolate
+    // refreshed successfully while we were trying (concurrent-refresh race)
+    // so we can adopt its tokens instead of force-logging-out.
+    final refreshStartTs = await _mirrorTokenTs();
+
+    // Refresh token we actually sent — captured outside try so the catch
+    // block can compare against the current pair on a 400.
+    String? sentRefreshToken;
 
     try {
       String? refreshToken = await _tokenStorage.getRefreshToken();
@@ -188,6 +206,7 @@ class DioClient {
       }
 
       AppLogger.i('[AUTH] Starting token refresh...');
+      sentRefreshToken = refreshToken;
       
       // Implement retry for the refresh call itself (max 3 attempts)
       String? newAccess;
@@ -267,6 +286,21 @@ class DioClient {
       }
 
       if (isTokenRejected) {
+        // A 400 from /auth/refresh means the refresh token we sent was
+        // definitively rejected.  BUT this can also be the loser's outcome
+        // in a concurrent-refresh race: another isolate refreshed with the
+        // SAME refresh token a moment earlier, the server rotated it, and our
+        // attempt failed.  Before force-logging-out, check whether the token
+        // pair actually changed while we were refreshing — if so, adopt the
+        // newer pair and retry instead of destroying the session.
+        final adopted = await _adoptNewerTokensIfRefreshed(
+          refreshStartTs: refreshStartTs,
+          attemptedRefresh: sentRefreshToken ?? '',
+          error: error,
+          handler: handler,
+        );
+        if (adopted) return;
+
         AppLogger.e('[AUTH] Refresh token rejected by server (400) — clearing session', e);
         await _handleRefreshFailure(error, handler);
         return;
@@ -283,44 +317,110 @@ class DioClient {
 
   Future<void> _handleRefreshFailure(DioException error, ErrorInterceptorHandler handler) async {
     await _tokenStorage.clearTokens();
-    await _tokenStorage.clearBackup();
+    // NOTE: Hive backup is intentionally preserved here.  It survives an
+    // accidental/race-induced clear and acts as a recovery source in
+    // AuthProvider._tryAutoLogin (restore + re-validate).  Only explicit
+    // user logout calls clearBackup().
     _isRefreshing = false;
     _rejectPendingRequests(error);
     _notifySessionExpired();
     handler.next(_mapError(error));
   }
 
-  /// Helper to wait for another isolate's refresh to complete.
-  void _waitForOtherIsolateRefresh(DioException error, ErrorInterceptorHandler handler) async {
-    int attempts = 0;
-    while (attempts < 10) {
-      await Future.delayed(const Duration(seconds: 3));
+  /// Timestamp of the token mirror before we started refreshing.  Used to
+  /// detect whether another isolate completed a refresh while we were trying.
+  Future<int> _mirrorTokenTs() async {
+    try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.reload();
-      if (!prefs.containsKey(TokenStorage.bgRefreshLockKey)) {
-        AppLogger.i('[AUTH] Other isolate finished refresh. Syncing and retrying.');
-        final newAccess = await _tokenStorage.getAccessToken();
-        if (newAccess != null) {
-          _isRefreshing = false;
-          _flushPendingRequests(newAccess);
-          
-          // Retry THIS request
-          error.requestOptions.headers['Authorization'] = 'Bearer $newAccess';
-          try {
-            final resp = await _dio.fetch(error.requestOptions);
-            return handler.resolve(resp);
-          } catch (e) {
-            return handler.next(e is DioException ? e : error);
-          }
-        }
-        break; 
-      }
-      attempts++;
+      return prefs.getInt(TokenStorage.bgTokenTimestampKey) ?? 0;
+    } catch (_) {
+      return 0;
     }
-    
-    // If we waited too long, try to take over the refresh or fail
+  }
+
+  /// If tokens changed while we were refreshing (another isolate won the
+  /// concurrent-refresh race and rotated the refresh token), adopt the newer
+  /// pair and retry the original request instead of force-logging-out.
+  Future<bool> _adoptNewerTokensIfRefreshed({
+    required int refreshStartTs,
+    required String attemptedRefresh,
+    required DioException error,
+    required ErrorInterceptorHandler handler,
+  }) async {
+    try {
+      await _tokenStorage.releaseRefreshLock();
+      // Re-read current tokens (getRefreshToken syncs a newer mirror first).
+      final currentRefresh = await _tokenStorage.getRefreshToken();
+      if (currentRefresh == null || currentRefresh == attemptedRefresh) {
+        // Tokens did not change — our 400 was genuine token rejection.
+        return false;
+      }
+      final newAccess = await _tokenStorage.getAccessToken();
+      if (newAccess == null) return false;
+
+      AppLogger.i('[AUTH] Concurrent refresh detected (ts $refreshStartTs) — adopting newer tokens and retrying');
+      _isRefreshing = false;
+      _flushPendingRequests(newAccess);
+
+      error.requestOptions.headers['Authorization'] = 'Bearer $newAccess';
+      try {
+        final resp = await _dio.fetch(error.requestOptions);
+        handler.resolve(resp);
+        return true;
+      } catch (e) {
+        handler.next(e is DioException ? e : error);
+        return true;
+      }
+    } catch (e) {
+      AppLogger.w('[AUTH] _adoptNewerTokensIfRefreshed failed: $e');
+      return false;
+    }
+  }
+
+  /// Waits for another isolate's refresh to complete, then flushes queued
+  /// requests with the refreshed token.  NEVER re-enters [_onError] — if the
+  /// other isolate never releases the lock, queued requests are rejected and
+  /// the next API call starts a fresh refresh attempt (no double-refresh loop).
+  void _waitForOtherIsolateRefresh() async {
+    final deadline = DateTime.now().add(const Duration(seconds: 40));
+    while (DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(seconds: 2));
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.reload();
+        if (prefs.containsKey(TokenStorage.bgRefreshLockKey)) continue;
+
+        // Other isolate finished — sync mirror → secure storage, retry queue.
+        AppLogger.i('[AUTH] Other isolate finished refresh. Syncing and retrying queued requests.');
+        final newAccess = await _tokenStorage.getAccessToken();
+        _isRefreshing = false;
+        _waitingForLock = false;
+        if (newAccess != null) {
+          _flushPendingRequests(newAccess);
+        } else {
+          _rejectPendingRequests(DioException(
+            requestOptions: RequestOptions(path: ''),
+            type: DioExceptionType.unknown,
+            error: 'Token refresh failed',
+          ));
+        }
+        return;
+      } catch (_) {
+        // Transient SharedPreferences error — keep waiting.
+      }
+    }
+
+    // Timed out: the other isolate never released the lock.  Fail queued
+    // requests cleanly; do NOT re-enter _onError (would double-refresh).
+    AppLogger.w('[AUTH] Timed out waiting for other isolate refresh');
     _isRefreshing = false;
-    _onError(error, handler);
+    _waitingForLock = false;
+    _rejectPendingRequests(DioException(
+      requestOptions: RequestOptions(path: ''),
+      type: DioExceptionType.unknown,
+      error: 'Token refresh timed out',
+    ));
   }
 
   /// Retry all queued requests with the new access token after a successful refresh.

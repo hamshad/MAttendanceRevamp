@@ -625,6 +625,9 @@ class WifiBackgroundWorker {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
 
+    // Atomic cross-isolate lock claim (same protocol as TokenStorage):
+    // write unique owner token, re-read, verify ownership.  If another
+    // isolate wrote after us we lost the race → skip.
     final lockTs = prefs.getInt('bg_refresh_lock') ?? 0;
     final now = DateTime.now().millisecondsSinceEpoch;
     if (lockTs > 0 && (now - lockTs) < 30000) {
@@ -632,13 +635,27 @@ class WifiBackgroundWorker {
       return null;
     }
 
+    final owner = '$now-${DateTime.now().microsecondsSinceEpoch}';
     await prefs.setInt('bg_refresh_lock', now);
+    await prefs.setString('bg_refresh_lock_owner', owner);
+    await prefs.reload();
+    final persistedOwner = prefs.getString('bg_refresh_lock_owner');
+    final persistedTs = prefs.getInt('bg_refresh_lock') ?? 0;
+    if (persistedOwner != owner || persistedTs != now) {
+      debugPrint('[WIFI_BG] Lost refresh-lock race — skipping');
+      return null;
+    }
 
     try {
+      // Capture session generation BEFORE refreshing.  If it changes while
+      // we are on the network (logout/relogin elsewhere), discard results —
+      // prevents token resurrection after logout.
+      final sessionId = prefs.getString('auth_session_id');
       final refreshToken = prefs.getString('bg_refresh_token');
       final accessToken = prefs.getString('bg_access_token');
-      if (refreshToken == null || accessToken == null) {
+      if (sessionId == null || refreshToken == null || accessToken == null) {
         await prefs.remove('bg_refresh_lock');
+        await prefs.remove('bg_refresh_lock_owner');
         return null;
       }
 
@@ -655,17 +672,28 @@ class WifiBackgroundWorker {
       final newAccess = resp.data['accessToken'] as String;
       final newRefresh = resp.data['refreshToken'] as String;
 
+      // Session guard: verify session marker is unchanged before persisting.
+      await prefs.reload();
+      if (prefs.getString('auth_session_id') != sessionId) {
+        debugPrint('[WIFI_BG] Session changed during refresh — discarding tokens');
+        await prefs.remove('bg_refresh_lock');
+        await prefs.remove('bg_refresh_lock_owner');
+        return null;
+      }
+
       await Future.wait([
         prefs.setString('bg_access_token', newAccess),
         prefs.setString('bg_refresh_token', newRefresh),
         prefs.setInt('bg_token_ts', DateTime.now().millisecondsSinceEpoch),
         prefs.remove('bg_refresh_lock'),
+        prefs.remove('bg_refresh_lock_owner'),
       ]);
 
       debugPrint('[WIFI_BG] Token refreshed successfully');
       return newAccess;
     } catch (e) {
       await prefs.remove('bg_refresh_lock');
+      await prefs.remove('bg_refresh_lock_owner');
 
       debugPrint('[WIFI_BG] Token refresh failed — retaining tokens for main isolate');
       return null;

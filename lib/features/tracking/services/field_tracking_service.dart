@@ -338,8 +338,18 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
           return;
         }
 
-        // Acquire lock
+        // Atomic lock claim: write unique owner token, re-read, verify
+        // ownership.  If another isolate wrote after us, we lost the race.
+        final owner = '$now-${DateTime.now().microsecondsSinceEpoch}';
         await prefs.setInt(_kBgRefreshLock, now);
+        await prefs.setString('bg_refresh_lock_owner', owner);
+        await prefs.reload();
+        final persistedOwner = prefs.getString('bg_refresh_lock_owner');
+        final persistedTs = prefs.getInt(_kBgRefreshLock) ?? 0;
+        if (persistedOwner != owner || persistedTs != now) {
+          debugPrint('[FieldTracking] Lost refresh-lock race — skipping ping');
+          return;
+        }
 
         try {
           final refreshToken = prefs.getString(_kBgRefreshToken);
@@ -348,8 +358,14 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
             // We DON'T wipe tokens here to avoid accidental logout. 
             // The main isolate will handle it when the app is opened.
             await prefs.remove(_kBgRefreshLock);
+            await prefs.remove('bg_refresh_lock_owner');
             return;
           }
+
+          // Session guard: capture session generation BEFORE the network
+          // call.  If it changed (logout/relogin elsewhere) while we were
+          // refreshing, discard results — prevents token resurrection.
+          final sessionId = prefs.getString('auth_session_id');
 
           final refreshDio = Dio(BaseOptions(
             baseUrl: AppConstants.apiBaseUrl,
@@ -367,18 +383,29 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
           final newAccess  = refreshResp.data['accessToken']  as String;
           final newRefresh = refreshResp.data['refreshToken'] as String;
 
+          // Verify session marker is unchanged before persisting.
+          await prefs.reload();
+          if (prefs.getString('auth_session_id') != sessionId) {
+            debugPrint('[FieldTracking] Session changed during refresh — discarding tokens');
+            await prefs.remove(_kBgRefreshLock);
+            await prefs.remove('bg_refresh_lock_owner');
+            return;
+          }
+
           // Persist refreshed tokens with timestamp
           await Future.wait([
             prefs.setString(_kBgAccessToken, newAccess),
             prefs.setString(_kBgRefreshToken, newRefresh),
             prefs.setInt(_kBgTokenTimestamp, DateTime.now().millisecondsSinceEpoch),
             prefs.remove(_kBgRefreshLock),
+            prefs.remove('bg_refresh_lock_owner'),
           ]);
 
           debugPrint('[FieldTracking] Token refreshed — retrying ping');
           await _buildDio(newAccess).post(ApiEndpoints.trackingPing, data: pingData);
         } catch (refreshErr) {
           await prefs.remove(_kBgRefreshLock);
+          await prefs.remove('bg_refresh_lock_owner');
           
           final isNetworkError = refreshErr is DioException &&
               (refreshErr.type == DioExceptionType.connectionTimeout ||

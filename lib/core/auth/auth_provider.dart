@@ -68,6 +68,9 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
       final hasTokens = await _tokenStorage.hasTokens();
       if (!hasTokens) {
         AppLogger.d('AUTH: No tokens found for auto-login');
+        // Clear any stale cached user so a later auto-login does not start
+        // from a phantom logged-in state.
+        await AppUser.clear();
         return null;
       }
 
@@ -292,6 +295,9 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
   Future<void> forceLogout() async {
     AppLogger.w('AUTH: forceLogout() called — clearing session and navigating to LoginScreen');
     await _tokenStorage.clearTokens();
+    // Definitive logout: also destroy the Hive backup so a future
+    // hasTokens() cannot restore the rejected/expired session.
+    await _tokenStorage.clearBackup();
     await AppUser.clear();
     ref.read(officeDataServiceProvider).reset();
     state = const AsyncData(null);
