@@ -150,6 +150,22 @@ Cold-start blockers found + fixed:
      backfill to Hive so next open skips secure storage
    - `clear()` also deletes the Hive mirror (logout stays clean)
 
+### Benchmark (emulator, `am start -W`, cold start)
+
+| Phase | Debug | Release |
+|---|---|---|
+| Hive boxes (parallel) | 595-757ms | 343-757ms (IO variance) |
+| runApp (all pre-work) | ~700ms | 350-830ms |
+| hasTokens | 68-560ms | 113-430ms (1 secure read) |
+| AppUser.load | 0ms | **0ms** (Hive mirror) |
+| First frame (TotalTime) | 1900-2030ms | **666-1563ms** (engine variance) |
+| Status fetch (warm cache) | — | 380ms, renders instantly (cache-first) |
+
+Debug builds are ~2x slower (JIT) — always benchmark RELEASE for real
+numbers. Remaining cold-start cost is Hive init + engine start (emulator
+IO-bound, real devices faster). `[BENCH]` prints remain in code for
+re-measuring.
+
 **Test signals:** cold start reaches home fast even on slow network; home
 shows yesterday-free real data instantly (same-day cache) then updates;
 resume no longer flashes skeletons. Push notifications still register

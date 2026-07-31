@@ -68,25 +68,33 @@ void _scheduleAlarmFromCachedShifts() {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  final _bench = Stopwatch()..start();
   _initLogCapture();
   AppLogger.activity('Application Starting');
 
   // Hive
   await Hive.initFlutter();
   Hive.registerAdapter(OfflinePunchAdapter());
-  await Hive.openBox<OfflinePunch>(AppConstants.offlinePunchBox);
-  await Hive.openBox(AppConstants.cacheBox);
-  await Hive.openBox(AppConstants.geofenceSettingsBox);
-  await Hive.openBox(AppConstants.shiftsBox);
-  await Hive.openBox(AppConstants.tokenBackupBox);
+  // Open boxes in parallel — sequential opens serialized directory IO
+  // (~650ms cold); parallel cuts it to roughly the slowest single box.
+  await Future.wait([
+    Hive.openBox<OfflinePunch>(AppConstants.offlinePunchBox),
+    Hive.openBox(AppConstants.cacheBox),
+    Hive.openBox(AppConstants.geofenceSettingsBox),
+    Hive.openBox(AppConstants.shiftsBox),
+    Hive.openBox(AppConstants.tokenBackupBox),
+  ]);
+  debugPrint('[BENCH] Hive boxes: ${_bench.elapsedMilliseconds}ms');
 
   // Sync geofence flag to SharedPreferences BEFORE any service starts,
   // so the background worker's _isEnabled() reads the correct value from
   // the very first GPS fix — no race with _initGeofence() post-frame callback.
   await _syncGeofenceFlag();
+  debugPrint('[BENCH] geofence flag sync: ${_bench.elapsedMilliseconds}ms');
 
   // Local notifications (for geofence auto-punch alerts)
   await initLocalNotifications();
+  debugPrint('[BENCH] local notifications: ${_bench.elapsedMilliseconds}ms');
 
   // Create notification channels explicitly BEFORE any background service
   // starts. Android 14+ requires the channel to exist at startForeground time
@@ -122,13 +130,16 @@ void main() async {
 
   // Background field tracking service — registers the entrypoint before runApp.
   await FieldTrackingService.init();
+  debugPrint('[BENCH] field tracking init: ${_bench.elapsedMilliseconds}ms');
 
   // Workmanager for shift-start alarm scheduling
   await GeofenceScheduler.init();
+  debugPrint('[BENCH] workmanager init: ${_bench.elapsedMilliseconds}ms');
 
   // Background manager for the offline punch queue — periodic safety-net
   // sync every 15 min while connected (one-off tasks are scheduled on enqueue).
   await OfflineSyncManager.start();
+  debugPrint('[BENCH] offline sync start: ${_bench.elapsedMilliseconds}ms');
 
   // Schedule initial Workmanager alarm from cached shifts
   // so the geofence service auto-starts at the next shift without
@@ -151,4 +162,5 @@ void main() async {
   }));
 
   runApp(const ProviderScope(child: MAttendanceApp()));
+  debugPrint('[BENCH] runApp: ${_bench.elapsedMilliseconds}ms');
 }

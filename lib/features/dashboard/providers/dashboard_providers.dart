@@ -64,11 +64,13 @@ class AttendanceStatusNotifier extends AsyncNotifier<EmployeeStatus?> {
   }
 
   Future<EmployeeStatus?> _fetch() async {
+    final _bench = Stopwatch()..start();
     try {
       final dio = ref.read(dioClientProvider).dio;
       final response = await dio.get(ApiEndpoints.todayStatus);
       print('[DEBUG_SHIFT] Raw /attendance/status JSON (dashboard): ${response.data}');
       final data = response.data['data'] as Map<String, dynamic>?;
+      print('[BENCH] status fetch: ${_bench.elapsedMilliseconds}ms (cached=${_lastKnownValue != null || _loadFromCache() != null})');
       _lastKnownValue = data != null ? EmployeeStatus.fromJson(data) : null;
       if (data != null) _saveToCache(data);
       return _lastKnownValue;
@@ -78,10 +80,12 @@ class AttendanceStatusNotifier extends AsyncNotifier<EmployeeStatus?> {
         final dio = ref.read(dioClientProvider).dio;
         final response = await dio.get(ApiEndpoints.todayStatus);
         final data = response.data['data'] as Map<String, dynamic>?;
+        print('[BENCH] status fetch (retry): ${_bench.elapsedMilliseconds}ms');
         _lastKnownValue = data != null ? EmployeeStatus.fromJson(data) : null;
         if (data != null) _saveToCache(data);
         return _lastKnownValue;
       } catch (_) {
+        print('[BENCH] status fetch FAILED: ${_bench.elapsedMilliseconds}ms');
         return _lastKnownValue;
       }
     }

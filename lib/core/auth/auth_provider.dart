@@ -55,8 +55,10 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
   Future<AppUser?> build() async {
     _tokenStorage = ref.read(tokenStorageProvider);
     _authApi = ref.read(authApiProvider);
-    
+
+    final _bench = Stopwatch()..start();
     final user = await _tryAutoLogin();
+    debugPrint('[BENCH] _tryAutoLogin total: ${_bench.elapsedMilliseconds}ms');
     if (user != null) {
       // Fetch and save offices on app open if user is already logged in
       _fetchAndSaveOffices();
@@ -66,7 +68,9 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
 
   Future<AppUser?> _tryAutoLogin() async {
     try {
+      final _bench = Stopwatch()..start();
       final hasTokens = await _tokenStorage.hasTokens();
+      debugPrint('[BENCH] hasTokens: ${_bench.elapsedMilliseconds}ms');
       if (!hasTokens) {
         AppLogger.d('AUTH: No tokens found for auto-login');
         // Clear any stale cached user so a later auto-login does not start
@@ -80,7 +84,9 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
       // Fast path: return cached user immediately without server call.
       // Token validation happens lazily when other API calls are made;
       // the 401 interceptor handles refresh if needed.
+      final _bench2 = Stopwatch()..start();
       final cachedUser = await AppUser.load();
+      debugPrint('[BENCH] AppUser.load: ${_bench2.elapsedMilliseconds}ms');
       if (cachedUser != null) {
         AppLogger.i('AUTH: Auto-login successful (cached user)');
         return cachedUser;
