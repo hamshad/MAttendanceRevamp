@@ -35,6 +35,24 @@ class WifiBackgroundWorker {
   List<Office> _offices = [];
   bool _dataLoaded = false;
 
+  // Re-entrancy guard — start() fires an immediate check AND the connectivity
+  // stream emits an initial event, so two _checkCurrentWifi() calls can run
+  // concurrently. Without this, the first scan can read a stale cached BSSID
+  // (Android returns the last-known network at process start) → false IN,
+  // while the second scan reads the real BSSID → false OUT, same second.
+  bool _checkInProgress = false;
+
+  // Server punch-state sync in flight at startup (see start()).  Checks wait
+  // for it so a stale cross-day 'In' cannot cause a false OUT.
+  Future<void>? _stateSyncFuture;
+
+  // BSSID confirmation — Android can return a stale cached BSSID on the first
+  // read after isolate spawn. We only punch IN when the SAME matched BSSID is
+  // observed on two separate checks (like the geofence worker's 3-fix rule).
+  String? _lastMatchedBssid;
+  DateTime? _lastMatchedAt;
+  static const Duration _bssidConfirmWindow = Duration(seconds: 30);
+
   // Cooldown guard — prevents rapid IN→OUT when two scans return
   // different results (e.g. fallback timer + connectivity stream).
   static const int _cooldownMs = 10000;
@@ -69,6 +87,11 @@ class WifiBackgroundWorker {
   void start() {
     debugPrint('[WIFI_BG] start() called');
 
+    // Sync real punch state from server BEFORE any check runs.  A stale
+    // local 'In' from a previous day would otherwise cause a false OUT punch
+    // when the worker wakes from an alarm while the user is at home.
+    _stateSyncFuture = _syncPunchStateFromServer();
+
     // Subscribe to connectivity changes
     _connSub = Connectivity().onConnectivityChanged.listen(_onConnectivity);
 
@@ -77,8 +100,10 @@ class WifiBackgroundWorker {
       _checkCurrentWifi();
     });
 
-    // Immediate check on start
-    _checkCurrentWifi();
+    // Immediate check on start — behind the state sync (see above).
+    _stateSyncFuture!.whenComplete(() {
+      _checkCurrentWifi();
+    });
 
     // Listen for stop signal
     _service.on('stop_wifi_bg').listen((_) => stop());
@@ -124,6 +149,20 @@ class WifiBackgroundWorker {
   // ── Core Check ─────────────────────────────────────────────────────────────
 
   Future<void> _checkCurrentWifi() async {
+    if (_checkInProgress) {
+      debugPrint('[WIFI_BG] Check already in progress — skipping');
+      return;
+    }
+    _checkInProgress = true;
+    try {
+      await _checkCurrentWifiInner();
+    } finally {
+      _checkInProgress = false;
+    }
+  }
+
+  Future<void> _checkCurrentWifiInner() async {
+    await _waitForStateSync();
     final enabled = await _isEnabled();
     if (!enabled) {
       debugPrint('[WIFI_BG] Not enabled — skipping check');
@@ -213,9 +252,30 @@ class WifiBackgroundWorker {
           return;
         }
 
-        debugPrint('[WIFI_BG] Match found: ${matched.name} — punching IN');
+        // ── BSSID confirmation gate ──────────────────────────────────────
+        // Android can return a stale cached BSSID on the first scan after
+        // isolate spawn (the last network the phone was connected to).  One
+        // matching read is NOT proof of being at the office — the same BSSID
+        // must be observed on two separate checks.  Prevents a false auto-IN
+        // when the worker wakes from an alarm while the user is at home.
+        final now = DateTime.now();
+        if (_lastMatchedBssid != bssid ||
+            _lastMatchedAt == null ||
+            now.difference(_lastMatchedAt!) > _bssidConfirmWindow) {
+          _lastMatchedBssid = bssid;
+          _lastMatchedAt = now;
+          debugPrint('[WIFI_BG] Match seen once ($bssid) — waiting for confirmation');
+          return;
+        }
+        _lastMatchedBssid = null;
+        _lastMatchedAt = null;
+        debugPrint('[WIFI_BG] Match confirmed across two checks: ${matched.name} — punching IN');
         await _punchIn(matched, bssid);
       } else if (matched == null && lastPunchType == 'In') {
+        // Not on a registered network — a pending BSSID confirmation from a
+        // stale read must not fire later.  Clear it.
+        _lastMatchedBssid = null;
+        _lastMatchedAt = null;
         // Manual-out-on-wifi guard also applies for BSSID-mismatch OUT
         if (await _isManualOutOnWifi()) {
           debugPrint('[WIFI_BG] Manual-out-on-wifi active — skip auto OUT (no match)');
@@ -242,6 +302,8 @@ class WifiBackgroundWorker {
       } else if (matched != null && lastPunchType == 'In') {
         // Phone connected to registered WiFi while already IN.  Mark last IN
         // as WiFi so a future disconnect triggers OUT correctly, even though
+        _lastMatchedBssid = null;
+        _lastMatchedAt = null;
         // we don't need to punch duplicate IN.
         await _setLastInByWifi();
         debugPrint('[WIFI_BG] Registered WiFi connected — already IN, marking lastIn=wifi');
@@ -254,6 +316,7 @@ class WifiBackgroundWorker {
   }
 
   Future<void> _handleDisconnect() async {
+    await _waitForStateSync();
     if (!await _isEnabled()) return;
 
     // Real disconnect — any network-hidden warning is resolved.  The
@@ -338,6 +401,50 @@ class WifiBackgroundWorker {
   }
 
   // ── Office Data ────────────────────────────────────────────────────────────
+
+  /// Wait for the startup server punch-state sync to settle (max 10s) so a
+  /// stale cross-day local state can't drive a punch.  No-op if no sync is in
+  /// flight (steady state) — checks then run on the last-known local state.
+  Future<void> _waitForStateSync() async {
+    final sync = _stateSyncFuture;
+    if (sync == null) return;
+    try {
+      await sync.timeout(const Duration(seconds: 10));
+    } catch (_) {
+      // Sync failed or timed out — fall through on local state (legacy
+      // behavior); the BSSID confirmation gate still protects the IN side.
+    }
+  }
+
+  /// Fetch todayStatus from the server once and persist the current punch
+  /// state so the worker never acts on a stale local 'In' carried over from
+  /// a previous day / session (e.g. alarm-manager wake while at home).
+  /// Mirrors [GeofenceBackgroundWorker._syncPunchStateFromServer].
+  Future<void> _syncPunchStateFromServer() async {
+    try {
+      final dio = await _buildDio();
+      if (dio == null) {
+        debugPrint('[WIFI_BG] No auth token — cannot sync punch state');
+        return;
+      }
+      final resp = await dio.get(ApiEndpoints.todayStatus);
+      final status = resp.data['data'] as Map<String, dynamic>?;
+      if (status == null) return;
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      if (status['isPunchedIn'] == true) {
+        await prefs.setString(_kLastPunchType, 'In');
+        debugPrint('[WIFI_BG] Synced punch state — IN (from server)');
+      } else if (status['isPunchedOut'] == true ||
+          status['hasNotPunchedIn'] == true) {
+        await prefs.setString(_kLastPunchType, 'Out');
+        debugPrint('[WIFI_BG] Synced punch state — OUT (from server)');
+      }
+    } catch (e) {
+      debugPrint('[WIFI_BG] Failed to sync punch state from server: $e');
+    }
+  }
 
   Future<void> _loadOffices() async {
     debugPrint('[WIFI_BG] Loading offices...');
