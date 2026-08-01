@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
 	<key>API_KEY</key>
-	<string>AIzaSyABkgF6pxBZmHADCAqL2MDte0-9MgmC7pM</string>
+	<string>AIzaSyBLb5s3uGdxkDmwBmqTA_Ti9uK9hHZFJAY</string>
 	<key>GCM_SENDER_ID</key>
-	<string>223439476632</string>
+	<string>615219020722</string>
 	<key>PLIST_VERSION</key>
 	<string>1</string>
 	<key>BUNDLE_ID</key>
 	<string>com.mattendance.mattendanceMobile</string>
 	<key>PROJECT_ID</key>
-	<string>mattendancev3</string>
+	<string>mattendance-4e83d</string>
 	<key>STORAGE_BUCKET</key>
-	<string>mattendancev3.firebasestorage.app</string>
+	<string>mattendance-4e83d.firebasestorage.app</string>
 	<key>IS_ADS_ENABLED</key>
 	<false></false>
 	<key>IS_ANALYTICS_ENABLED</key>
@@ -24,11 +24,7 @@
 	<true></true>
 	<key>IS_SIGNIN_ENABLED</key>
 	<true></true>
-	<key>CLIENT_ID</key>
-	<string>1053038395822-o88a33837i7rflvod995mp33rm4h9uri.apps.googleusercontent.com</string>
-	<key>REVERSED_CLIENT_ID</key>
-	<string>com.googleusercontent.apps.1053038395822-o88a33837i7rflvod995mp33rm4h9uri</string>
 	<key>GOOGLE_APP_ID</key>
-	<string>1:223439476632:ios:a9017ec5c653d4e1bb3ded</string>
+	<string>1:615219020722:ios:7dab42e69c6d2942de9aab</string>
 </dict>
 </plist>
