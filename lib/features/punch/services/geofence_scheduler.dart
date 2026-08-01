@@ -194,6 +194,12 @@ class GeofenceScheduler {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kPrefShiftName, shift.name);
     await prefs.setString(_kPrefNextShiftStart, nextAlarm.toIso8601String());
+    // Persist the raw start time ("HH:mm") so the native GeofenceAlarmReceiver
+    // can self re-arm the next alarm without the Dart isolate.  The Dart
+    // background isolate cannot reach the app's MethodChannel (it is only
+    // registered on the main UI engine), so without this the next-day alarm
+    // would be armed only by the inexact Workmanager task.
+    await prefs.setString('gf_cached_shift_start_time', shift.startTime);
 
     // Schedule Workmanager alarm (no network constraint — must fire even offline)
     await Workmanager().registerOneOffTask(
