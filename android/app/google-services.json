@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "615219020722",
+    "project_id": "mattendance-4e83d",
+    "storage_bucket": "mattendance-4e83d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:615219020722:android:0f624d47f741e0f4de9aab",
+        "android_client_info": {
+          "package_name": "com.mattendance.mattendance_mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAwvWtgEGvHih_tDI3Q_x13lLZ_jFi_xQA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
