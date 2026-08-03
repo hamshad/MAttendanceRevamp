@@ -398,6 +398,7 @@ final accessPermissionsProvider = FutureProvider<AccessPermissions>((ref) async 
       // absent → treated as "unknown/legacy", which does not block).
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('bg_allow_geofence_auto', perms.allowGeofenceAuto);
+      await prefs.setBool('bg_allow_client_site', perms.allowClientSite);
       return perms;
     }
   } catch (_) {
