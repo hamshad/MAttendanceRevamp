@@ -4,6 +4,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mattendance_mobile/features/punch/services/geofence_background_worker.dart';
 import 'package:mattendance_mobile/features/tracking/models/location_result.dart';
+import 'package:mattendance_mobile/models/client_site.dart';
 import 'package:mattendance_mobile/models/office.dart';
 import 'package:mattendance_mobile/models/shift.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -54,6 +55,7 @@ Map<String, dynamic> _officeToJson(Office o) => {
 class _MockInterceptor extends Interceptor {
   final List<Office> offices;
   final List<Shift> shifts;
+  final List<ClientSite> clientSites;
 
   bool isPunchedIn = false;
   bool isPunchedOut = false;
@@ -69,6 +71,7 @@ class _MockInterceptor extends Interceptor {
   _MockInterceptor({
     List<Office>? offices,
     List<Shift>? shifts,
+    List<ClientSite>? clientSites,
   })  : offices = offices ??
             [
               const Office(
@@ -92,7 +95,8 @@ class _MockInterceptor extends Interceptor {
                 isOvernight: false,
                 isActive: true,
               ),
-            ];
+            ],
+        clientSites = clientSites ?? [];
 
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
@@ -100,6 +104,8 @@ class _MockInterceptor extends Interceptor {
     try {
       if (path.contains('/offices')) {
         handler.resolve(_rsp(options, offices.map(_officeToJson).toList()));
+      } else if (path.contains('/client-sites')) {
+        handler.resolve(_rsp(options, clientSites.map((s) => s.toJson()).toList()));
       } else if (path.contains('/shifts')) {
         handler.resolve(_rsp(options, shifts.map((s) => s.toJson()).toList()));
       } else if (path.contains('/status')) {
@@ -1024,6 +1030,77 @@ void main() {
       const direction = 'Out';
       final blocked = direction == 'Out' && status != null && status['isPunchedOut'] == true;
       expect(blocked, isTrue);
+    });
+  });
+
+  group('Client site auto-punch', () {
+    const site = ClientSite(
+      id: 17,
+      siteName: 'Moksha Client',
+      address: 'Test address',
+      latitude: 19.861624,
+      longitude: 75.310963,
+      radiusMeters: 40,
+    );
+
+    // User standing inside the client-site geofence (~20m from site center).
+    LocationResult atSite({double accuracy = 10}) => LocationResult(
+          latitude: 19.8618,
+          longitude: 75.3110,
+          accuracy: accuracy,
+          speed: 0.5,
+          jumpScore: 0.0,
+        );
+
+    setUp(() {
+      // Grant BOTH permissions — client sites only join auto-geofence when
+      // geofence-auto AND client-site are both allowed.
+      SharedPreferences.setMockInitialValues({
+        'bg_access_token': 'test_token',
+        'geofence_auto_enabled': true,
+        'bg_allow_geofence_auto': true,
+        'bg_allow_client_site': true,
+      });
+    });
+
+    test('punches IN with ClientSiteId when inside a client-site zone', () async {
+      final siteInterceptor = _MockInterceptor(clientSites: [site]);
+      final siteDio = Dio(BaseOptions(baseUrl: 'http://test'));
+      siteDio.interceptors.add(siteInterceptor);
+
+      final worker = GeofenceBackgroundWorker(service, dio: siteDio);
+      await worker.loadData();
+
+      await worker.onLocationFix(atSite(), TrackingState.STATIONARY, defaultConfidence);
+
+      expect(service.calls.didPunchIn, isTrue,
+          reason: 'Auto-IN should fire inside client-site geofence');
+      expect(siteInterceptor.lastPunchDirection, 'In');
+      expect(siteInterceptor.lastPunchPayload?['ClientSiteId'], 17,
+          reason: 'Punch payload must carry the client site id');
+      expect(siteInterceptor.lastPunchPayload?['Method'], 'GeofenceAuto');
+    });
+
+    test('does NOT auto-punch client site without the client-site permission', () async {
+      // Only geofence-auto granted — client sites stay manual (selfie) punches.
+      SharedPreferences.setMockInitialValues({
+        'bg_access_token': 'test_token',
+        'geofence_auto_enabled': true,
+        'bg_allow_geofence_auto': true,
+        'bg_allow_client_site': false,
+      });
+
+      final siteInterceptor = _MockInterceptor(clientSites: [site]);
+      final siteDio = Dio(BaseOptions(baseUrl: 'http://test'));
+      siteDio.interceptors.add(siteInterceptor);
+
+      final worker = GeofenceBackgroundWorker(service, dio: siteDio);
+      await worker.loadData();
+
+      await worker.onLocationFix(atSite(), TrackingState.STATIONARY, defaultConfidence);
+
+      expect(service.calls.didPunchIn, isFalse,
+          reason: 'Client-site zones excluded when allowClientSite is false');
     });
   });
 }
