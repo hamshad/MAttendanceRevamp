@@ -44,6 +44,7 @@ import '../tracking/screens/my_field_tracking_screen.dart';
 import '../tracking/services/field_tracking_service.dart';
 import '../tracking/widgets/accuracy_debug_overlay.dart';
 import '../punch/screens/punch_flow_screen.dart';
+import '../punch/screens/geofence_places_screen.dart';
 
 // ── Shell ─────────────────────────────────────────────────────────────────────
 
@@ -1172,6 +1173,23 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                 (await SharedPreferences.getInstance()).setBool('geofence_auto_enabled', value);
                 ref.read(geofenceEnabledProvider.notifier).state = value;
               },
+            ),
+          if (allowGeofenceAuto)
+            ListTile(
+              leading: Icon(
+                Icons.place_outlined,
+                color: AppColors.gray,
+              ),
+              title: const Text('Geofence Places'),
+              subtitle: const Text(
+                'Offices & client sites used for auto-punch',
+                style: TextStyle(fontSize: 12),
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const GeofencePlacesScreen()),
+              ),
             ),
           if (allowGeofenceAuto) const Divider(height: 1),
 
