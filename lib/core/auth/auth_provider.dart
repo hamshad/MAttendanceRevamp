@@ -317,6 +317,9 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
   Future<void> _fetchAndSaveOffices() async {
     try {
       await ref.read(officeDataServiceProvider).fetchAndSaveOffices();
+      // Preload active client sites so the auto-geofence engine and the
+      // Geofence Places screen can use them without a fresh round-trip.
+      await ref.read(officeDataServiceProvider).fetchAndSaveClientSites();
     } catch (e) {
       AppLogger.e('AUTH: Failed to trigger office data fetch', e);
     }
