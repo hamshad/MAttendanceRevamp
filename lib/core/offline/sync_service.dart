@@ -104,6 +104,7 @@ class SyncService {
     if (punch.beaconMinor != null) body['BeaconMinor'] = punch.beaconMinor.toString();
     if (punch.nfcTagId != null) body['NfcTagId'] = punch.nfcTagId;
     if (punch.faceEmbedding != null) body['FaceEmbedding'] = punch.faceEmbedding;
+    if (punch.clientSiteId != null) body['ClientSiteId'] = punch.clientSiteId;
     return body;
   }
 }

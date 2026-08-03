@@ -12,6 +12,7 @@ import '../../../core/api/punch_state_interceptor.dart';
 import '../../../core/offline/offline_queue.dart';
 import '../../../core/offline/offline_sync_manager.dart';
 import '../../../core/utils/constants.dart';
+import '../../../models/client_site.dart';
 import '../../../models/offline_punch.dart';
 import '../../../models/office.dart';
 import '../../../models/shift.dart';
@@ -19,6 +20,50 @@ import '../../tracking/models/location_result.dart';
 import '../../tracking/services/filters/confidence_scorer.dart';
 import '../../tracking/services/filters/exit_trend_analyzer.dart';
 import 'geofence_scheduler.dart';
+
+/// Normalized geofence zone — wraps either an [Office] or a [ClientSite] so
+/// the proximity engine can treat both uniformly (nearest-wins on overlap).
+class _Zone {
+  final int id;
+  final String name;
+  final double latitude;
+  final double longitude;
+  final double radius; // meters
+  final bool isClientSite;
+  final int? officeId;
+  final int? clientSiteId;
+
+  const _Zone({
+    required this.id,
+    required this.name,
+    required this.latitude,
+    required this.longitude,
+    required this.radius,
+    required this.isClientSite,
+    this.officeId,
+    this.clientSiteId,
+  });
+
+  factory _Zone.fromOffice(Office o) => _Zone(
+        id: o.id,
+        name: o.name,
+        latitude: o.latitude!,
+        longitude: o.longitude!,
+        radius: o.geofenceRadius!.toDouble(),
+        isClientSite: false,
+        officeId: o.id,
+      );
+
+  factory _Zone.fromClientSite(ClientSite s) => _Zone(
+        id: s.id,
+        name: s.siteName,
+        latitude: s.latitude,
+        longitude: s.longitude,
+        radius: s.radiusMeters.toDouble(),
+        isClientSite: true,
+        clientSiteId: s.id,
+      );
+}
 
 /// Geofence auto-punch logic designed to run inside the background isolate.
 ///
@@ -33,8 +78,17 @@ class GeofenceBackgroundWorker {
   final ExitTrendAnalyzer _exitAnalyzer = ExitTrendAnalyzer();
 
   List<Office> _offices = [];
+  List<ClientSite> _clientSites = [];
   List<Shift> _shifts = [];
   bool _dataLoaded = false;
+
+  /// Combined geofence zones: offices first, then client sites.
+  /// Client sites are only present when the user holds both permissions.
+  List<_Zone> get _zones => [
+        ..._offices.where((o) => o.hasCoordinates && o.geofenceRadius != null)
+            .map(_Zone.fromOffice),
+        ..._clientSites.map(_Zone.fromClientSite),
+      ];
 
   DateTime? _lastPunchTime;
   String? _lastPunchType;
@@ -44,7 +98,7 @@ class GeofenceBackgroundWorker {
   final Dio? _testDio;
 
   // Pending exit tracking state
-  int? _pendingOfficeId;
+  _Zone? _pendingZone;
   double? _pendingRadius;
   double _pendingLat = 0;
   double _pendingLng = 0;
@@ -101,9 +155,14 @@ class GeofenceBackgroundWorker {
         return;
       }
       _offices = await _fetchOffices(dio);
+      if (await _clientSitesAllowed()) {
+        _clientSites = await _fetchClientSites(dio);
+      } else {
+        debugPrint('[GF_BG] Client sites not permitted — skipping fetch');
+      }
       _shifts = await _fetchShifts(dio);
       _dataLoaded = true;
-      debugPrint('[GF_BG] Loaded ${_offices.length} offices, ${_shifts.length} shifts — calling scheduleShiftWindow');
+      debugPrint('[GF_BG] Loaded ${_offices.length} offices, ${_clientSites.length} client sites, ${_shifts.length} shifts — calling scheduleShiftWindow');
       _scheduleShiftWindow();
       _proactivelyScheduleAlarm();
       _restorePunchState();
@@ -181,9 +240,9 @@ class GeofenceBackgroundWorker {
     final fixAcc = filtered.accuracy;
     final fixConf = confidence;
     final fixJump = filtered.jumpScore;
-    debugPrint('[GF_BG] FIX: lat=${filtered.latitude.toStringAsFixed(5)} lng=${filtered.longitude.toStringAsFixed(5)} acc=${fixAcc.toStringAsFixed(1)}m conf=${fixConf.toStringAsFixed(2)} jump=${fixJump.toStringAsFixed(2)} inShift=$_inShiftWindow inside=$_isInsideGeofence pendingOut=$_pendingOfficeId');
-    if (_offices.isEmpty) {
-      debugPrint('[GF_BG] GATE FAIL: _offices is empty');
+    debugPrint('[GF_BG] FIX: lat=${filtered.latitude.toStringAsFixed(5)} lng=${filtered.longitude.toStringAsFixed(5)} acc=${fixAcc.toStringAsFixed(1)}m conf=${fixConf.toStringAsFixed(2)} jump=${fixJump.toStringAsFixed(2)} inShift=$_inShiftWindow inside=$_isInsideGeofence pendingOut=${_pendingZone?.id}');
+    if (_zones.isEmpty) {
+      debugPrint('[GF_BG] GATE FAIL: no geofence zones loaded');
       return;
     }
     if (!await _isEnabled()) {
@@ -227,24 +286,23 @@ class GeofenceBackgroundWorker {
       _simulateExitUntil = null;
       debugPrint('[GF_BG] SIMULATE_EXIT: expired — entry re-enabled');
     }
-    if (simulateActive && _pendingOfficeId == null) {
-      _pendingOfficeId = null; // force re-init
+    if (simulateActive && _pendingZone == null) {
+      _pendingZone = null; // force re-init
       double nearestDist = double.infinity;
-      Office? nearest;
-      for (final o in _offices) {
-        if (!o.hasCoordinates || o.geofenceRadius == null) continue;
+      _Zone? nearest;
+      for (final z in _zones) {
         final d = geo.Geolocator.distanceBetween(
-          filtered.latitude, filtered.longitude, o.latitude!, o.longitude!,
+          filtered.latitude, filtered.longitude, z.latitude, z.longitude,
         );
-        if (d < nearestDist) { nearestDist = d; nearest = o; }
+        if (d < nearestDist) { nearestDist = d; nearest = z; }
       }
       if (nearest != null) {
         debugPrint('[GF_BG] SIMULATE_EXIT: forcing exit for ${nearest.name} dist=$nearestDist');
         _isInsideGeofence = false;
-        _pendingOfficeId = nearest.id;
-        _pendingLat = nearest.latitude!;
-        _pendingLng = nearest.longitude!;
-        _pendingRadius = nearest.geofenceRadius!.toDouble();
+        _pendingZone = nearest;
+        _pendingLat = nearest.latitude;
+        _pendingLng = nearest.longitude;
+        _pendingRadius = nearest.radius;
         _exitAnalyzer.reset();
         _consecutiveInsideFixes = 3;
       }
@@ -269,7 +327,7 @@ class GeofenceBackgroundWorker {
     }
 
     // ── Exit check ───────────────────────────────────────────────────────
-    if (_pendingOfficeId != null) {
+    if (_pendingZone != null) {
       await _processExitTrend(filtered, confidence);
     } else {
       await _checkExit(filtered, confidence);
@@ -373,76 +431,79 @@ class GeofenceBackgroundWorker {
     // still prevents immediate re-punch after shift-end OUT.
     await _clearShiftEndedFlag();
     final now = DateTime.now();
-    for (final o in _offices) {
-      if (!o.hasCoordinates || o.geofenceRadius == null) {
-        debugPrint('[GF_BG] ENTRY: ${o.name} skipped (no coords/radius)');
-        continue;
-      }
+    final margin = _gpsMargin(filtered.accuracy);
+
+    // Nearest-wins: pick the closest zone (office OR client site) the user is
+    // inside of.  Prevents double-punch when office & client-site circles
+    // overlap.
+    _Zone? best;
+    double bestDist = double.infinity;
+    for (final z in _zones) {
       final dist = geo.Geolocator.distanceBetween(
         filtered.latitude, filtered.longitude,
-        o.latitude!, o.longitude!,
+        z.latitude, z.longitude,
       );
-      final margin = _gpsMargin(filtered.accuracy);
-      final zone = o.geofenceRadius! + margin;
-      debugPrint('[GF_BG] ENTRY: ${o.name} dist=${dist.toStringAsFixed(1)}m r=${o.geofenceRadius}m margin=${margin.toStringAsFixed(1)}m (acc=${filtered.accuracy.toStringAsFixed(1)}m × 2.0) zone=${zone.toStringAsFixed(1)}m');
-      if (dist <= o.geofenceRadius! + margin) {
-        debugPrint('[GF_BG] ENTRY: INSIDE ${o.name} — clearing exit state');
-        _pendingOfficeId = null;
-        _pendingRadius = null;
-        _pendingOutConfirm = false;
-        _exitAnalyzer.reset();
-        _isInsideGeofence = true;
-
-        if (_lastPunchTime != null &&
-            _lastPunchType == 'Out' &&
-            now.difference(_lastPunchTime!).inMinutes < 2) {
-          debugPrint('[GF_BG] ENTRY: IN debounced — ${now.difference(_lastPunchTime!).inSeconds}s since OUT');
-          return;
-        }
-        if (_lastPunchType == 'In') {
-          debugPrint('[GF_BG] ENTRY: already IN — skip auto-punch');
-          return;
-        }
-        await _handleAutoPunch('In', filtered, o, dist, confidence, now);
-        return;
+      debugPrint('[GF_BG] ENTRY: ${z.name} dist=${dist.toStringAsFixed(1)}m r=${z.radius.toStringAsFixed(0)}m margin=${margin.toStringAsFixed(1)}m (acc=${filtered.accuracy.toStringAsFixed(1)}m × 2.0) zone=${(z.radius + margin).toStringAsFixed(1)}m');
+      if (dist <= z.radius + margin && dist < bestDist) {
+        best = z;
+        bestDist = dist;
       }
     }
+    if (best == null) return;
+
+    debugPrint('[GF_BG] ENTRY: INSIDE ${best.name} — clearing exit state');
+    _pendingZone = null;
+    _pendingRadius = null;
+    _pendingOutConfirm = false;
+    _exitAnalyzer.reset();
+    _isInsideGeofence = true;
+
+    if (_lastPunchTime != null &&
+        _lastPunchType == 'Out' &&
+        now.difference(_lastPunchTime!).inMinutes < 2) {
+      debugPrint('[GF_BG] ENTRY: IN debounced — ${now.difference(_lastPunchTime!).inSeconds}s since OUT');
+      return;
+    }
+    if (_lastPunchType == 'In') {
+      debugPrint('[GF_BG] ENTRY: already IN — skip auto-punch');
+      return;
+    }
+    await _handleAutoPunch('In', filtered, best, bestDist, confidence, now);
   }
 
   Future<void> _checkExit(LocationResult filtered, double confidence) async {
-    if (!_isInsideGeofence && _pendingOfficeId == null) {
+    if (!_isInsideGeofence && _pendingZone == null) {
       debugPrint('[GF_BG] EXIT: skip — not inside, no pending');
       return;
     }
-    debugPrint('[GF_BG] EXIT: scanning offices — inside=$_isInsideGeofence pending=$_pendingOfficeId insideFixes=$_consecutiveInsideFixes');
+    debugPrint('[GF_BG] EXIT: scanning zones — inside=$_isInsideGeofence pending=${_pendingZone?.id} insideFixes=$_consecutiveInsideFixes');
 
-    Office? nearest;
+    _Zone? nearest;
     double nearestDist = double.infinity;
-    for (final o in _offices) {
-      if (!o.hasCoordinates || o.geofenceRadius == null) continue;
+    for (final z in _zones) {
       final d = geo.Geolocator.distanceBetween(
         filtered.latitude, filtered.longitude,
-        o.latitude!, o.longitude!,
+        z.latitude, z.longitude,
       );
       if (d < nearestDist) {
         nearestDist = d;
-        nearest = o;
+        nearest = z;
       }
     }
     if (nearest == null) {
-      debugPrint('[GF_BG] EXIT: no nearest office found');
+      debugPrint('[GF_BG] EXIT: no nearest zone found');
       return;
     }
 
     final margin = _gpsMargin(filtered.accuracy);
-    final zone = nearest.geofenceRadius! + margin;
-    debugPrint('[GF_BG] EXIT: ${nearest.name} dist=${nearestDist.toStringAsFixed(1)}m r=${nearest.geofenceRadius}m margin=${margin.toStringAsFixed(1)}m (acc=${filtered.accuracy.toStringAsFixed(1)}m × 2.0) zone=${zone.toStringAsFixed(1)}m');
+    final zone = nearest.radius + margin;
+    debugPrint('[GF_BG] EXIT: ${nearest.name} dist=${nearestDist.toStringAsFixed(1)}m r=${nearest.radius.toStringAsFixed(0)}m margin=${margin.toStringAsFixed(1)}m (acc=${filtered.accuracy.toStringAsFixed(1)}m × 2.0) zone=${zone.toStringAsFixed(1)}m');
 
-    if (nearestDist <= nearest.geofenceRadius!) {
+    if (nearestDist <= nearest.radius) {
       debugPrint('[GF_BG] EXIT: ${nearest.name} inside radius — no exit');
       return;
     }
-    if (nearestDist <= nearest.geofenceRadius! + margin) {
+    if (nearestDist <= nearest.radius + margin) {
       debugPrint('[GF_BG] EXIT: ${nearest.name} within margin zone — no exit');
       return;
     }
@@ -453,10 +514,10 @@ class GeofenceBackgroundWorker {
     }
 
     // Past margin → start exit tracking
-    _pendingOfficeId = nearest.id;
-    _pendingRadius = nearest.geofenceRadius!.toDouble();
-    _pendingLat = nearest.latitude!;
-    _pendingLng = nearest.longitude!;
+    _pendingZone = nearest;
+    _pendingRadius = nearest.radius;
+    _pendingLat = nearest.latitude;
+    _pendingLng = nearest.longitude;
     debugPrint('[GF_BG] EXIT_TRACKING_START: ${nearest.name} — ${nearestDist.toStringAsFixed(1)}m > zone ${zone.toStringAsFixed(1)}m');
 
     _exitAnalyzer.reset();
@@ -467,7 +528,7 @@ class GeofenceBackgroundWorker {
     LocationResult filtered,
     double confidence,
   ) async {
-    if (_pendingOfficeId == null || _pendingRadius == null) return;
+    if (_pendingZone == null || _pendingRadius == null) return;
 
     final distToCenter = geo.Geolocator.distanceBetween(
       filtered.latitude, filtered.longitude,
@@ -480,7 +541,7 @@ class GeofenceBackgroundWorker {
       _exitAnalyzer.reset(force: false);
       debugPrint('[GF_BG] EXIT_TREND: back within radius (${distToCenter.toStringAsFixed(1)}m ≤ ${_pendingRadius}m) score=${_exitAnalyzer.score.toStringAsFixed(2)}');
       if (_exitAnalyzer.score <= 0) {
-        _pendingOfficeId = null;
+        _pendingZone = null;
         _pendingRadius = null;
         _pendingOutConfirm = false;
         _isInsideGeofence = true;
@@ -495,13 +556,13 @@ class GeofenceBackgroundWorker {
     if (_exitAnalyzer.isConfirmed) {
       if (_pendingOutConfirm) {
         // Second consecutive fix confirming exit → punch OUT
-        final office = _offices.where((o) => o.id == _pendingOfficeId).firstOrNull;
-        if (office != null) {
+        final zone = _pendingZone;
+        if (zone != null) {
           debugPrint('[GF_BG] EXIT: CONFIRMED (2nd fix) — punching OUT');
-          await _handleAutoPunch('Out', filtered, office, distToCenter, confidence, DateTime.now());
+          await _handleAutoPunch('Out', filtered, zone, distToCenter, confidence, DateTime.now());
         }
         _exitAnalyzer.reset();
-        _pendingOfficeId = null;
+        _pendingZone = null;
         _pendingRadius = null;
         _pendingOutConfirm = false;
       } else {
@@ -517,7 +578,7 @@ class GeofenceBackgroundWorker {
   Future<void> _handleAutoPunch(
     String direction,
     LocationResult location,
-    Office office,
+    _Zone zone,
     double dist,
     double confidence,
     DateTime now,
@@ -594,7 +655,7 @@ class GeofenceBackgroundWorker {
 
       // ── All gates passed → call punch API ──────────────────────────────
       final margin = _gpsMargin(location.accuracy);
-      debugPrint('[GF_BG] PUNCH_API: $direction — ${office.name} dist=${dist.toStringAsFixed(1)}m margin=${margin.toStringAsFixed(1)}m (acc=${location.accuracy.toStringAsFixed(1)}m × 2.0)');
+      debugPrint('[GF_BG] PUNCH_API: $direction — ${zone.name} dist=${dist.toStringAsFixed(1)}m margin=${margin.toStringAsFixed(1)}m (acc=${location.accuracy.toStringAsFixed(1)}m × 2.0)');
 
       bool punchAccepted = false;
       try {
@@ -603,7 +664,8 @@ class GeofenceBackgroundWorker {
           'Direction': direction,
           'Latitude': location.latitude.toString(),
           'Longitude': location.longitude.toString(),
-          'Address': office.name,
+          'Address': zone.name,
+          if (zone.isClientSite) 'ClientSiteId': zone.clientSiteId,
           'IPAddress': 'Background-Service',
         });
         if (punchResp.statusCode == 200 || punchResp.statusCode == 201) {
@@ -626,13 +688,13 @@ class GeofenceBackgroundWorker {
               debugPrint('[GF_BG] PUNCH_API: server rejected (duplicate) — $msg');
             }
           }
-        } else if (await _queueOfflinePunch(direction, location)) {
+        } else if (await _queueOfflinePunch(direction, location, zone)) {
           // Network failure or 5xx — queue for offline sync.
           punchAccepted = true;
         }
       } catch (e) {
         debugPrint('[GF_BG] PUNCH_API error: $e');
-        if (await _queueOfflinePunch(direction, location)) {
+        if (await _queueOfflinePunch(direction, location, zone)) {
           punchAccepted = true;
         }
       }
@@ -642,9 +704,9 @@ class GeofenceBackgroundWorker {
         _lastPunchType = direction;
         _isInsideGeofence = direction == 'In';
         debugPrint('[GF_BG] $direction SUCCESS via background');
-        await _showPunchNotification(direction, office.name);
+        await _showPunchNotification(direction, zone.name);
 
-        await _persistPunchState(direction, now, officeName: office.name);
+        await _persistPunchState(direction, now, officeName: zone.name);
 
         if (direction == 'In') {
           await _clearShiftEndedFlag();
@@ -653,7 +715,7 @@ class GeofenceBackgroundWorker {
         _service.invoke('gf_punch', {
           'direction': direction,
           'time': now.toIso8601String(),
-          'officeName': office.name,
+          'officeName': zone.name,
         });
 
         // On punch-out after shift end: schedule next-shift alarm and
@@ -686,6 +748,7 @@ class GeofenceBackgroundWorker {
   Future<bool> _queueOfflinePunch(
     String direction,
     LocationResult location,
+    _Zone zone,
   ) async {
     try {
       final punch = OfflinePunch()
@@ -694,6 +757,9 @@ class GeofenceBackgroundWorker {
         ..latitude = location.latitude
         ..longitude = location.longitude
         ..createdAt = DateTime.now();
+      if (zone.isClientSite) {
+        punch.clientSiteId = zone.clientSiteId;
+      }
       await OfflineQueueService().enqueue(punch);
       await OfflineSyncManager.scheduleNow();
       debugPrint('[GF_BG] queued $direction offline (no network)');
@@ -850,6 +916,20 @@ class GeofenceBackgroundWorker {
     }
   }
 
+  Future<List<ClientSite>> _fetchClientSites(Dio dio) async {
+    try {
+      final resp = await dio.get(ApiEndpoints.clientSitesActive);
+      final data = resp.data;
+      final list = (data is List ? data : data['data'] ?? []) as List;
+      return list
+          .map((e) => ClientSite.fromJson(e as Map<String, dynamic>))
+          .toList();
+    } catch (e) {
+      debugPrint('[GF_BG] Fetch client sites failed: $e');
+      return [];
+    }
+  }
+
   Future<List<Shift>> _fetchShifts(Dio dio) async {
     try {
       final resp = await dio.get(ApiEndpoints.shifts);
@@ -873,6 +953,20 @@ class GeofenceBackgroundWorker {
     final permitted = allow != false;
     debugPrint('[GF_BG] _isEnabled = $val, allowGeofenceAuto = ${allow == null ? 'unknown' : allow}');
     return val && permitted;
+  }
+
+  /// Client-site zones only join the auto-geofence when the user is granted
+  /// BOTH the geofence-auto AND the client-site permission.  `allowClientSite`
+  /// alone keeps the manual (selfie) client-site punch — the background worker
+  /// must not auto-punch client sites for a user without the geofence grant.
+  Future<bool> _clientSitesAllowed() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final geo = prefs.getBool('bg_allow_geofence_auto');
+    final site = prefs.getBool('bg_allow_client_site');
+    final allowed = geo == true && site == true;
+    debugPrint('[GF_BG] clientSitesAllowed = $allowed (geo=${geo == null ? 'unknown' : geo}, site=${site == null ? 'unknown' : site})');
+    return allowed;
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────
