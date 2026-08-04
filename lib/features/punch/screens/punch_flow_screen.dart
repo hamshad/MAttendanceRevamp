@@ -11,7 +11,6 @@ import '../widgets/wifi_verification_view.dart';
 import '../widgets/qr_verification_view.dart';
 import '../widgets/selfie_verification_view.dart';
 import '../widgets/client_site_verification_view.dart';
-import '../widgets/fingerprint_verification_view.dart';
 import '../services/camera_service.dart';
 import '../services/face_service.dart';
 
@@ -136,17 +135,6 @@ class _PunchFlowScreenState extends ConsumerState<PunchFlowScreen> {
           },
           isSubmitting: _isProcessing,
         );
-      case 'Fingerprint':
-        return FingerprintVerificationView(
-          isProcessing: _isProcessing,
-          onVerified: (data) {
-            _verificationData = data;
-            _handlePunch(
-              'Fingerprint',
-              ref.read(attendanceStatusProvider).value,
-            );
-          },
-        );
       default:
         return Center(
           child: Column(
@@ -233,11 +221,6 @@ class _PunchFlowScreenState extends ConsumerState<PunchFlowScreen> {
         extras['clientSiteId'] = data['clientSiteId'];
         extras['latitude'] = data['latitude'];
         extras['longitude'] = data['longitude'];
-      }
-    } else if (method == 'Fingerprint') {
-      if (_verificationData != null) {
-        final data = _verificationData as Map<String, dynamic>;
-        extras['deviceId'] = data['deviceId'];
       }
     }
 

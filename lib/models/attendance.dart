@@ -230,7 +230,6 @@ class AccessPermissions {
       if (allowWiFi) 'WiFi',
       if (allowQRCode) 'QRCode',
       if (allowSelfie) 'Selfie',
-      if (allowFingerprint) 'Fingerprint',
       if (allowBluetooth) 'Bluetooth',
       if (allowNFC) 'NFC',
       if (allowFaceRecog) 'FaceRecog',

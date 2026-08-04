@@ -8,7 +8,6 @@ import '../../punch/screens/gps_punch_screen.dart';
 import '../../punch/screens/wifi_punch_screen.dart';
 import '../../punch/screens/selfie_punch_screen.dart';
 import '../../punch/screens/qr_scan_screen.dart';
-import '../../punch/screens/fingerprint_punch_screen.dart';
 import '../../punch/screens/ble_scan_screen.dart';
 import '../../punch/screens/nfc_tap_screen.dart';
 import '../../punch/screens/face_recog_screen.dart';
@@ -149,14 +148,6 @@ class _PunchButtonState extends ConsumerState<PunchButton>
           context,
           MaterialPageRoute(
             builder: (_) => QRScanScreen(direction: direction),
-          ),
-        );
-        break;
-      case 'Fingerprint':
-        await Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => FingerprintPunchScreen(direction: direction),
           ),
         );
         break;
@@ -301,7 +292,6 @@ class MethodSelector extends ConsumerWidget {
     'WiFi': (label: 'WiFi', icon: Icons.wifi),
     'QRCode': (label: 'QR', icon: Icons.qr_code_scanner),
     'Selfie': (label: 'Selfie', icon: Icons.photo_camera),
-    'Fingerprint': (label: 'Print', icon: Icons.fingerprint),
     'Bluetooth': (label: 'BLE', icon: Icons.bluetooth),
     'NFC': (label: 'NFC', icon: Icons.nfc),
     'FaceRecog': (label: 'Face', icon: Icons.face),
