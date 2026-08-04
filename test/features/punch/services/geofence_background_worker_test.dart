@@ -1033,7 +1033,7 @@ void main() {
     });
   });
 
-  group('Client site auto-punch', () {
+  group('Client site prompting (selfie mandatory — no auto-punch)', () {
     const site = ClientSite(
       id: 17,
       siteName: 'Moksha Client',
@@ -1053,7 +1053,7 @@ void main() {
         );
 
     setUp(() {
-      // Grant BOTH permissions — client sites only join auto-geofence when
+      // Grant BOTH permissions — client sites only join the geofence scan when
       // geofence-auto AND client-site are both allowed.
       SharedPreferences.setMockInitialValues({
         'bg_access_token': 'test_token',
@@ -1063,7 +1063,8 @@ void main() {
       });
     });
 
-    test('punches IN with ClientSiteId when inside a client-site zone', () async {
+    test('does NOT auto-punch inside a client-site zone — fires prompt instead',
+        () async {
       final siteInterceptor = _MockInterceptor(clientSites: [site]);
       final siteDio = Dio(BaseOptions(baseUrl: 'http://test'));
       siteDio.interceptors.add(siteInterceptor);
@@ -1073,16 +1074,17 @@ void main() {
 
       await worker.onLocationFix(atSite(), TrackingState.STATIONARY, defaultConfidence);
 
-      expect(service.calls.didPunchIn, isTrue,
-          reason: 'Auto-IN should fire inside client-site geofence');
-      expect(siteInterceptor.lastPunchDirection, 'In');
-      expect(siteInterceptor.lastPunchPayload?['ClientSiteId'], 17,
-          reason: 'Punch payload must carry the client site id');
-      expect(siteInterceptor.lastPunchPayload?['Method'], 'GeofenceAuto');
+      // Selfie is mandatory for client-site punches — the worker must NOT call
+      // the punch API. It fires a tap-to-punch prompt notification instead
+      // (asserted here by the absence of any punch API call).
+      expect(siteInterceptor.punchCallCount, 0,
+          reason: 'Client-site punches require a selfie — no auto-punch API call');
+      expect(service.calls.didPunchIn, isFalse,
+          reason: 'No auto-IN — user must confirm with selfie on the prompt screen');
     });
 
-    test('does NOT auto-punch client site without the client-site permission', () async {
-      // Only geofence-auto granted — client sites stay manual (selfie) punches.
+    test('does NOT prompt client site without the client-site permission', () async {
+      // Only geofence-auto granted — client sites stay fully manual punches.
       SharedPreferences.setMockInitialValues({
         'bg_access_token': 'test_token',
         'geofence_auto_enabled': true,

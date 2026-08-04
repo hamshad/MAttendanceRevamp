@@ -16,7 +16,15 @@ import '../../dashboard/providers/dashboard_providers.dart';
 class ClientSiteScreen extends ConsumerStatefulWidget {
   final String direction;
 
-  const ClientSiteScreen({super.key, required this.direction});
+  /// Optional client site to preselect when opened from a geofence prompt
+  /// notification. When null, defaults to the first site in the list.
+  final int? initialSiteId;
+
+  const ClientSiteScreen({
+    super.key,
+    required this.direction,
+    this.initialSiteId,
+  });
 
   @override
   ConsumerState<ClientSiteScreen> createState() => _ClientSiteScreenState();
@@ -77,7 +85,15 @@ class _ClientSiteScreenState extends ConsumerState<ClientSiteScreen> {
               .map((e) => ClientSite.fromJson(e as Map<String, dynamic>))
               .toList();
           _sitesLoading = false;
-          if (_sites.isNotEmpty) _selectedSite = _sites.first;
+          if (_sites.isNotEmpty) {
+            // Preselect the requested site (geofence prompt), else the first.
+            _selectedSite = _sites.firstWhere(
+              (s) => s.id == widget.initialSiteId,
+              orElse: () => _sites.first,
+            );
+          } else {
+            _selectedSite = null;
+          }
           _recomputeDistance();
         });
       }

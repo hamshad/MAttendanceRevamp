@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -45,6 +46,7 @@ import '../tracking/services/field_tracking_service.dart';
 import '../tracking/widgets/accuracy_debug_overlay.dart';
 import '../punch/screens/punch_flow_screen.dart';
 import '../punch/screens/geofence_places_screen.dart';
+import '../punch/screens/client_site_screen.dart';
 
 // ── Shell ─────────────────────────────────────────────────────────────────────
 
@@ -102,6 +104,7 @@ class _MainShellState extends ConsumerState<MainShell>
       _initFCM();
       _syncOfflinePunches();
       _checkOfflineOnStart();
+      _initLocalNotificationTap();
     });
   }
 
@@ -592,6 +595,52 @@ class _MainShellState extends ConsumerState<MainShell>
         Navigator.push(context,
             MaterialPageRoute(builder: (_) => const HistoryHubScreen()));
     }
+  }
+
+  // ── Local notification tap routing ────────────────────────────────────────
+
+  /// Register the local-notification tap handler and replay any notification
+  /// tap that launched the app from a cold start.
+  Future<void> _initLocalNotificationTap() async {
+    localNotificationTapHandler = _handleLocalNotificationPayload;
+    try {
+      final launch = await localNotifications.getNotificationAppLaunchDetails();
+      if (launch?.didNotificationLaunchApp ?? false) {
+        _handleLocalNotificationPayload(launch?.notificationResponse?.payload);
+      }
+    } catch (_) {
+      // getNotificationAppLaunchDetails can throw on some platforms — ignore.
+    }
+  }
+
+  /// Route a local notification tap to the right screen. Currently handles the
+  /// client-site punch prompt (fired by the background geofence worker when the
+  /// user enters a client-site zone — selfie is mandatory, so we open the
+  /// selfie screen with the site preselected + live location shown).
+  void _handleLocalNotificationPayload(String? payload) {
+    if (!mounted || payload == null) return;
+    Map<String, dynamic>? data;
+    try {
+      final decoded = jsonDecode(payload);
+      if (decoded is Map<String, dynamic>) data = decoded;
+    } catch (_) {
+      return;
+    }
+    if (data == null || data['type'] != 'client_site_punch') return;
+
+    final direction = data['direction'] as String? ?? 'In';
+    final clientSiteId = (data['clientSiteId'] as num?)?.toInt();
+    debugPrint('SHELL_LocalNotif: client_site_punch direction=$direction site=$clientSiteId');
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ClientSiteScreen(
+          direction: direction,
+          initialSiteId: clientSiteId,
+        ),
+      ),
+    );
   }
 
   // ── Punch sheet ────────────────────────────────────────────────────────────

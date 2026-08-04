@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
@@ -123,6 +124,11 @@ class GeofenceBackgroundWorker {
   // Periodic punch-state restore guard — re-syncs with main isolate
   // SharedPreferences writes every 60s so the worker never goes stale.
   DateTime _lastRestoreCheck = DateTime(2000);
+
+  // Client-site prompt dedupe — remember the last site we prompted for and
+  // when. Prevents re-notifying every GPS fix while the user stays put.
+  int? _lastPromptedClientSiteId;
+  DateTime? _lastClientSitePromptAt;
 
   static const _kPersistPunchType = 'gf_last_punch_type';
   static const _kPersistPunchTime = 'gf_last_punch_time';
@@ -518,6 +524,10 @@ class GeofenceBackgroundWorker {
     _pendingRadius = nearest.radius;
     _pendingLat = nearest.latitude;
     _pendingLng = nearest.longitude;
+    // User left the zone — clear the client-site prompt dedupe so a future
+    // re-entry re-prompts.
+    _lastPromptedClientSiteId = null;
+    _lastClientSitePromptAt = null;
     debugPrint('[GF_BG] EXIT_TRACKING_START: ${nearest.name} — ${nearestDist.toStringAsFixed(1)}m > zone ${zone.toStringAsFixed(1)}m');
 
     _exitAnalyzer.reset();
@@ -586,6 +596,19 @@ class GeofenceBackgroundWorker {
     // ── GATE 3.5: Concurrency guard ─────────────────────────────────────
     if (_punchInProgress) {
       debugPrint('[GF_BG] Punch already in progress — skipping $direction');
+      return;
+    }
+
+    // ── CLIENT SITE: selfie is mandatory — never auto-punch ─────────────
+    // Instead of calling the punch API (which the server rejects without a
+    // selfie), fire a prompt notification. Tapping it opens the selfie
+    // ClientSiteScreen with the site preselected + live location shown.
+    // The user confirms with a selfie, producing a 'ClientSite' punch that
+    // the main isolate persists via PunchStateInterceptor — the worker picks
+    // that up on its next _restorePunchState cycle and stops re-prompting.
+    if (zone.isClientSite) {
+      await _promptClientSitePunch(direction, zone);
+      debugPrint('[GF_BG] CLIENT_SITE_PROMPT: $direction at ${zone.name} — awaiting user selfie');
       return;
     }
 
@@ -1005,6 +1028,52 @@ class GeofenceBackgroundWorker {
       );
     } catch (e) {
       debugPrint('[GF_BG] Notification failed: $e');
+    }
+  }
+
+  /// Fire a tap-to-punch prompt for a client-site zone. Client-site punches
+  /// require a selfie (server-mandated), so the worker never auto-punches them
+  /// — this is a notification the user taps to open the selfie screen with the
+  /// site preselected and the live location already shown.
+  ///
+  /// Dedupe: only prompt once per site until the user leaves the zone and
+  /// re-enters (reset in the entry path below), so we don't spam every GPS fix.
+  Future<void> _promptClientSitePunch(String direction, _Zone zone) async {
+    if (_lastPromptedClientSiteId == zone.id) {
+      debugPrint('[GF_BG] CLIENT_SITE_PROMPT: skipping re-prompt for ${zone.name}');
+      return;
+    }
+    _lastPromptedClientSiteId = zone.id;
+    _lastClientSitePromptAt = DateTime.now();
+
+    final isIn = direction == 'In';
+    final title = isIn ? 'Punch in at ${zone.name}' : 'Punch out from ${zone.name}';
+    final body = isIn
+        ? 'You are inside ${zone.name}. Tap to punch in with selfie.'
+        : 'You have left ${zone.name}. Tap to punch out with selfie.';
+    final payload = jsonEncode({
+      'type': 'client_site_punch',
+      'direction': direction,
+      'clientSiteId': zone.clientSiteId,
+      'siteName': zone.name,
+    });
+    try {
+      await _notifications.show(
+        zone.id + 1000,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'client_site_punch',
+            'Client Site Punch',
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+        ),
+        payload: payload,
+      );
+    } catch (e) {
+      debugPrint('[GF_BG] CLIENT_SITE_PROMPT notification failed: $e');
     }
   }
 }

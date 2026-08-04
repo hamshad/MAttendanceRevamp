@@ -136,6 +136,23 @@ void main() async {
         importance: Importance.high,
       ),
     );
+    await androidPlugin.createNotificationChannel(
+      const AndroidNotificationChannel(
+        'geofence_auto_punch',
+        'Geofence Auto-Punch',
+        description: 'Auto-punch and tap-to-punch alerts',
+        importance: Importance.high,
+      ),
+    );
+    await androidPlugin.createNotificationChannel(
+      const AndroidNotificationChannel(
+        'client_site_punch',
+        'Client Site Punch',
+        description:
+            'Prompt to punch in/out at a client site with selfie',
+        importance: Importance.high,
+      ),
+    );
   }
 
   // Background field tracking service — registers the entrypoint before runApp.
