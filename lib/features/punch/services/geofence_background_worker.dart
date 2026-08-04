@@ -439,12 +439,15 @@ class GeofenceBackgroundWorker {
     final now = DateTime.now();
     final margin = _gpsMargin(filtered.accuracy);
 
-    // Nearest-wins: pick the closest zone (office OR client site) the user is
-    // inside of.  Prevents double-punch when office & client-site circles
-    // overlap.
+    // Priority nearest-wins: OFFICE zones are evaluated first, client sites
+    // only when no office zone contains the user.  If a human error puts the
+    // same location in both an office and a client site, the office wins —
+    // the user gets the silent auto-punch (office) instead of the client-site
+    // selfie prompt.  Client-site circles only ever apply when the user is not
+    // inside any office geofence.
     _Zone? best;
     double bestDist = double.infinity;
-    for (final z in _zones) {
+    for (final z in _zones.where((z) => !z.isClientSite)) {
       final dist = geo.Geolocator.distanceBetween(
         filtered.latitude, filtered.longitude,
         z.latitude, z.longitude,
@@ -453,6 +456,19 @@ class GeofenceBackgroundWorker {
       if (dist <= z.radius + margin && dist < bestDist) {
         best = z;
         bestDist = dist;
+      }
+    }
+    if (best == null) {
+      for (final z in _zones.where((z) => z.isClientSite)) {
+        final dist = geo.Geolocator.distanceBetween(
+          filtered.latitude, filtered.longitude,
+          z.latitude, z.longitude,
+        );
+        debugPrint('[GF_BG] ENTRY: ${z.name} dist=${dist.toStringAsFixed(1)}m r=${z.radius.toStringAsFixed(0)}m margin=${margin.toStringAsFixed(1)}m (acc=${filtered.accuracy.toStringAsFixed(1)}m × 2.0) zone=${(z.radius + margin).toStringAsFixed(1)}m');
+        if (dist <= z.radius + margin && dist < bestDist) {
+          best = z;
+          bestDist = dist;
+        }
       }
     }
     if (best == null) return;
@@ -484,24 +500,53 @@ class GeofenceBackgroundWorker {
     }
     debugPrint('[GF_BG] EXIT: scanning zones — inside=$_isInsideGeofence pending=${_pendingZone?.id} insideFixes=$_consecutiveInsideFixes');
 
-    _Zone? nearest;
-    double nearestDist = double.infinity;
+    // Priority nearest-zone: track the nearest OFFICE and nearest CLIENT SITE
+    // separately.  The office wins when the user is still within (or genuinely
+    // nearest to) an office zone — mirrors the entry priority so overlapping
+    // office/client-site circles always resolve to the silent office OUT instead
+    // of a client-site selfie prompt.  Client sites only drive exit when no
+    // office is relevant.
+    final margin = _gpsMargin(filtered.accuracy);
+    _Zone? nearestOffice;
+    double officeDist = double.infinity;
+    _Zone? nearestClient;
+    double clientDist = double.infinity;
     for (final z in _zones) {
       final d = geo.Geolocator.distanceBetween(
         filtered.latitude, filtered.longitude,
         z.latitude, z.longitude,
       );
-      if (d < nearestDist) {
-        nearestDist = d;
-        nearest = z;
+      if (z.isClientSite) {
+        if (d < clientDist) {
+          clientDist = d;
+          nearestClient = z;
+        }
+      } else {
+        if (d < officeDist) {
+          officeDist = d;
+          nearestOffice = z;
+        }
       }
+    }
+
+    _Zone? nearest;
+    double nearestDist;
+    if (nearestOffice != null &&
+        (officeDist <= nearestOffice.radius + margin || officeDist <= clientDist)) {
+      nearest = nearestOffice;
+      nearestDist = officeDist;
+    } else if (nearestClient != null) {
+      nearest = nearestClient;
+      nearestDist = clientDist;
+    } else {
+      nearest = nearestOffice;
+      nearestDist = officeDist;
     }
     if (nearest == null) {
       debugPrint('[GF_BG] EXIT: no nearest zone found');
       return;
     }
 
-    final margin = _gpsMargin(filtered.accuracy);
     final zone = nearest.radius + margin;
     debugPrint('[GF_BG] EXIT: ${nearest.name} dist=${nearestDist.toStringAsFixed(1)}m r=${nearest.radius.toStringAsFixed(0)}m margin=${margin.toStringAsFixed(1)}m (acc=${filtered.accuracy.toStringAsFixed(1)}m × 2.0) zone=${zone.toStringAsFixed(1)}m');
 

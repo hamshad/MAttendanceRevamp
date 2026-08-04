@@ -1104,5 +1104,38 @@ void main() {
       expect(service.calls.didPunchIn, isFalse,
           reason: 'Client-site zones excluded when allowClientSite is false');
     });
+
+    test('office zone wins over overlapping client site — silent auto-punch, no prompt',
+        () async {
+      // Human error scenario: a client site was added at the SAME coordinates
+      // as the office (id 1, r=150m). The office must take priority — the user
+      // gets the silent auto-punch, NOT the client-site selfie prompt.
+      const overlappingSite = ClientSite(
+        id: 99,
+        siteName: 'Overlapping Site',
+        latitude: 19.8761,
+        longitude: 75.3153,
+        radiusMeters: 150,
+      );
+      final siteInterceptor =
+          _MockInterceptor(clientSites: [overlappingSite]);
+      final siteDio = Dio(BaseOptions(baseUrl: 'http://test'));
+      siteDio.interceptors.add(siteInterceptor);
+
+      final worker = GeofenceBackgroundWorker(service, dio: siteDio);
+      await worker.loadData();
+
+      await worker.onLocationFix(
+          insideLocation(), TrackingState.STATIONARY, defaultConfidence);
+
+      expect(siteInterceptor.punchCallCount, 1,
+          reason: 'Office zone wins — silent auto-punch fires');
+      expect(service.calls.didPunchIn, isTrue,
+          reason: 'User auto-punched IN at the office');
+      expect(siteInterceptor.lastPunchPayload?['Method'], 'GeofenceAuto',
+          reason: 'Punch is the office GeofenceAuto flow, not client-site');
+      expect(siteInterceptor.lastPunchPayload?['ClientSiteId'], isNull,
+          reason: 'No client-site punch — office priority wins');
+    });
   });
 }
