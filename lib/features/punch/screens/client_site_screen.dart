@@ -281,7 +281,7 @@ class _ClientSiteScreenState extends ConsumerState<ClientSiteScreen> {
     }
 
     return DropdownButtonFormField<ClientSite>(
-      value: _selectedSite,
+      initialValue: _selectedSite,
       isExpanded: true,
       decoration: const InputDecoration(
         prefixIcon: Icon(Icons.business_outlined),
@@ -309,22 +309,26 @@ class _ClientSiteScreenState extends ConsumerState<ClientSiteScreen> {
       return _ErrorCard(message: _locationError!, onRetry: _loadLocation);
     }
 
+    final isDark = theme.brightness == Brightness.dark;
     final loc = _location!;
     final withinGeofence = _isWithinGeofence;
     final dist = _distance;
+    final statusColor = withinGeofence
+        ? AppColors.getSuccess(isDark)
+        : AppColors.getError(isDark);
+    final textSecondary = isDark
+        ? AppColors.darkTextSecondary
+        : AppColors.textSecondary;
+    final borderColor = dist == null
+        ? (isDark ? AppColors.darkBorder : AppColors.border)
+        : statusColor.withAlpha(isDark ? 60 : 30);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
         color: theme.colorScheme.surface,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: dist == null
-              ? AppColors.border
-              : withinGeofence
-                  ? AppColors.successSubtle
-                  : AppColors.errorSubtle,
-        ),
+        border: Border.all(color: borderColor),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -332,7 +336,7 @@ class _ClientSiteScreenState extends ConsumerState<ClientSiteScreen> {
           // Coordinates
           Row(
             children: [
-              const Icon(Icons.location_on, size: 16, color: AppColors.textSecondary),
+              Icon(Icons.location_on, size: 16, color: textSecondary),
               const SizedBox(width: 6),
               Text(
                 '${loc.latitude.toStringAsFixed(5)}°, '
@@ -346,8 +350,7 @@ class _ClientSiteScreenState extends ConsumerState<ClientSiteScreen> {
                   _distance = null;
                   _loadLocation();
                 }),
-                child: Icon(Icons.refresh,
-                    size: 16, color: AppColors.textSecondary),
+                child: Icon(Icons.refresh, size: 16, color: textSecondary),
               ),
             ],
           ),
@@ -357,13 +360,9 @@ class _ClientSiteScreenState extends ConsumerState<ClientSiteScreen> {
             Row(
               children: [
                 Icon(
-                  withinGeofence
-                      ? Icons.check_circle
-                      : Icons.cancel,
+                  withinGeofence ? Icons.check_circle : Icons.cancel,
                   size: 16,
-                  color: withinGeofence
-                      ? AppColors.success
-                      : AppColors.error,
+                  color: statusColor,
                 ),
                 const SizedBox(width: 6),
                 Expanded(
@@ -374,9 +373,7 @@ class _ClientSiteScreenState extends ConsumerState<ClientSiteScreen> {
                             '${_selectedSite!.radiusMeters}m',
                     style: TextStyle(
                       fontSize: 12,
-                      color: withinGeofence
-                          ? AppColors.success
-                          : AppColors.error,
+                      color: statusColor,
                     ),
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -410,7 +407,17 @@ class _ClientSiteScreenState extends ConsumerState<ClientSiteScreen> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            CameraPreview(_cameraService.controller!),
+            // Camera preview — preserves the sensor aspect ratio and cover-crops
+            // (never stretches) to fill the fixed-height box.
+            FittedBox(
+              fit: BoxFit.cover,
+              clipBehavior: Clip.hardEdge,
+              child: SizedBox(
+                width: previewHeight * _cameraService.controller!.value.aspectRatio,
+                height: previewHeight,
+                child: CameraPreview(_cameraService.controller!),
+              ),
+            ),
             // Oval face guide overlay
             CustomPaint(painter: _OvalHint()),
           ],
@@ -420,6 +427,7 @@ class _ClientSiteScreenState extends ConsumerState<ClientSiteScreen> {
   }
 
   Widget _buildSubmitButton(ThemeData theme) {
+    final isDark = theme.brightness == Brightness.dark;
     final canSubmit = _selectedSite != null &&
         _location != null &&
         _isWithinGeofence &&
@@ -444,10 +452,11 @@ class _ClientSiteScreenState extends ConsumerState<ClientSiteScreen> {
             fontSize: 15, fontWeight: FontWeight.w600),
       ),
       style: ElevatedButton.styleFrom(
-        backgroundColor: _buttonColor,
+        backgroundColor: _buttonColor(isDark),
         foregroundColor: Colors.white,
         minimumSize: const Size(double.infinity, 52),
-        disabledBackgroundColor: AppColors.border,
+        disabledBackgroundColor:
+            isDark ? AppColors.darkBorder : AppColors.border,
       ),
     );
   }
@@ -458,9 +467,9 @@ class _ClientSiteScreenState extends ConsumerState<ClientSiteScreen> {
         _ => 'CONFIRM AT CLIENT SITE',
       };
 
-  Color get _buttonColor => switch (widget.direction) {
-        'Out' => AppColors.error,
-        _ => AppColors.success,
+  Color _buttonColor(bool isDark) => switch (widget.direction) {
+        'Out' => AppColors.getError(isDark),
+        _ => AppColors.getSuccess(isDark),
       };
 }
 
@@ -495,13 +504,16 @@ class _SectionLabel extends StatelessWidget {
   const _SectionLabel(this.text);
 
   @override
-  Widget build(BuildContext context) => Text(
-        text,
-        style: Theme.of(context)
-            .textTheme
-            .labelMedium
-            ?.copyWith(color: AppColors.textSecondary),
-      );
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Text(
+      text,
+      style: Theme.of(context)
+          .textTheme
+          .labelMedium
+          ?.copyWith(color: isDark ? AppColors.darkTextSecondary : AppColors.textSecondary),
+    );
+  }
 }
 
 class _CardSkeleton extends StatelessWidget {
@@ -509,13 +521,16 @@ class _CardSkeleton extends StatelessWidget {
   const _CardSkeleton({required this.height});
 
   @override
-  Widget build(BuildContext context) => Container(
-        height: height,
-        decoration: BoxDecoration(
-          color: AppColors.graySubtle,
-          borderRadius: BorderRadius.circular(10),
-        ),
-      );
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      height: height,
+      decoration: BoxDecoration(
+        color: isDark ? AppColors.darkSurface : AppColors.graySubtle,
+        borderRadius: BorderRadius.circular(10),
+      ),
+    );
+  }
 }
 
 class _InfoCard extends StatelessWidget {
@@ -528,11 +543,16 @@ class _InfoCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = isError ? AppColors.error : AppColors.textSecondary;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final color = isError
+        ? AppColors.getError(isDark)
+        : isDark
+            ? AppColors.darkTextSecondary
+            : AppColors.textSecondary;
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: color.withAlpha(20),
+        color: color.withAlpha(isDark ? 25 : 20),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Row(
@@ -556,25 +576,29 @@ class _ErrorCard extends StatelessWidget {
   const _ErrorCard({required this.message, required this.onRetry});
 
   @override
-  Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-        decoration: BoxDecoration(
-          color: AppColors.errorSubtle,
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Row(
-          children: [
-            Icon(Icons.error_outline, color: AppColors.error, size: 18),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(message,
-                  style: TextStyle(color: AppColors.error, fontSize: 12)),
-            ),
-            TextButton(
-              onPressed: onRetry,
-              child: const Text('Retry'),
-            ),
-          ],
-        ),
-      );
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final error = AppColors.getError(isDark);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: error.withAlpha(isDark ? 25 : 20),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.error_outline, color: error, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(message,
+                style: TextStyle(color: error, fontSize: 12)),
+          ),
+          TextButton(
+            onPressed: onRetry,
+            child: const Text('Retry'),
+          ),
+        ],
+      ),
+    );
+  }
 }
