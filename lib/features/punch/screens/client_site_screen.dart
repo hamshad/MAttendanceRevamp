@@ -400,22 +400,37 @@ class _ClientSiteScreenState extends ConsumerState<ClientSiteScreen> {
       return const _CardSkeleton(height: previewHeight);
     }
 
+    final controller = _cameraService.controller!;
+    final previewSize = controller.value.previewSize!;
+    final isPortrait =
+        MediaQuery.of(context).orientation == Orientation.portrait;
+
+    // The camera sensor reports LANDSCAPE dimensions (width > height).
+    // CameraPreview is itself an AspectRatio widget that, in portrait,
+    // displays the flipped ratio (1/aspectRatio) and rotates the texture on
+    // Android. Sizing this container to the camera's natural display dims
+    // keeps that internal AspectRatio from fighting us, so the FittedBox can
+    // cover-crop uniformly — no stretching, no blank bars.
+    final cameraWidth = isPortrait ? previewSize.height : previewSize.width;
+    final cameraHeight = isPortrait ? previewSize.width : previewSize.height;
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(10),
       child: SizedBox(
+        width: double.infinity,
         height: previewHeight,
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Camera preview — preserves the sensor aspect ratio and cover-crops
-            // (never stretches) to fill the fixed-height box.
+            // Camera preview — child box matches the camera's native display
+            // aspect; FittedBox cover-crops it to fill the fixed-height box.
             FittedBox(
               fit: BoxFit.cover,
               clipBehavior: Clip.hardEdge,
               child: SizedBox(
-                width: previewHeight * _cameraService.controller!.value.aspectRatio,
-                height: previewHeight,
-                child: CameraPreview(_cameraService.controller!),
+                width: cameraWidth,
+                height: cameraHeight,
+                child: CameraPreview(controller),
               ),
             ),
             // Oval face guide overlay
