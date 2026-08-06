@@ -12,7 +12,20 @@
           "package_name": "com.mattendance.mattendance_mobile"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "615219020722-afhsdq11ucihco4kpbc7ou4kghlg8vai.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.mattendance.mattendance_mobile",
+            "certificate_hash": "98372958b12fa762264f2fa4ce9179423a44ef13"
+          }
+        },
+        {
+          "client_id": "615219020722-328p6rose15gud0s594nao396rhioh9a.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyAwvWtgEGvHih_tDI3Q_x13lLZ_jFi_xQA"
@@ -20,7 +33,19 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "615219020722-328p6rose15gud0s594nao396rhioh9a.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "615219020722-rc8t4pmr0gvlkkfrq49qoigskrcgbqhh.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.mattendance.mattendanceMobile"
+              }
+            }
+          ]
         }
       }
     }
