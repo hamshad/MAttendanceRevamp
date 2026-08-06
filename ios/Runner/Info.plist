@@ -38,6 +38,8 @@
 	<string>mAttendance accesses your photo library to set your profile photo.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>mAttendance uses your location to record field attendance punches.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>mAttendance needs access to the local network to detect the office WiFi network for automatic attendance punching.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
