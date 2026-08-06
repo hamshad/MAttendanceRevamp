@@ -44,18 +44,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     );
   }
 
-  Future<void> _loginWithGoogle() async {
-    setState(() => _isLoading = true);
-    await ref.read(authNotifierProvider.notifier).loginWithGoogle();
-    if (!mounted) return;
-    setState(() => _isLoading = false);
-
-    final authState = ref.read(authNotifierProvider);
-    authState.whenOrNull(
-      error: (e, _) => _showError(e.toString()),
-    );
-  }
-
   void _showError(String message) {
     // Strip leading 'Exception: ' if present
     final msg = message.replaceFirst('Exception: ', '');
@@ -172,52 +160,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       : const Text('Sign In', style: TextStyle(fontSize: 16)),
                 ),
                 const SizedBox(height: 16),
-
-                // Divider
-                Row(
-                  children: [
-                    const Expanded(child: Divider()),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      child: Text('or', style: TextStyle(color: AppColors.textSecondary)),
-                    ),
-                    const Expanded(child: Divider()),
-                  ],
-                ),
-                const SizedBox(height: 16),
-
-                // Google Sign-In
-                OutlinedButton.icon(
-                  onPressed: _isLoading ? null : _loginWithGoogle,
-                  icon: const _GoogleIcon(),
-                  label: const Text('Continue with Google'),
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size(double.infinity, 52),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                ),
               ],
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-// ── Google icon ───────────────────────────────────────────────────────────────
-
-class _GoogleIcon extends StatelessWidget {
-  const _GoogleIcon();
-
-  @override
-  Widget build(BuildContext context) {
-    return const SizedBox(
-      width: 20,
-      height: 20,
-      child: Stack(
-        children: [
-          Icon(Icons.g_mobiledata, size: 24, color: Colors.red),
-        ],
       ),
     );
   }

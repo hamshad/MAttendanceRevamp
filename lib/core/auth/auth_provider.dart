@@ -1,14 +1,12 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:google_sign_in/google_sign_in.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../models/auth_response.dart';
 import '../../models/user.dart';
 import '../api/api_endpoints.dart';
 import '../api/dio_client.dart';
-import '../utils/constants.dart';
 import 'auth_api.dart';
 import 'token_storage.dart';
 import 'biometric_service.dart';
@@ -150,29 +148,6 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
     if (state.hasError) {
       AppLogger.e('AUTH: Login failed for $email', state.error);
     }
-  }
-
-  Future<void> loginWithGoogle() async {
-    AppLogger.i('AUTH: Google login attempt');
-    state = await AsyncValue.guard(() async {
-      final googleSignIn = GoogleSignIn(
-        serverClientId: AppConstants.googleClientId,
-        scopes: ['email', 'profile'],
-      );
-      final googleUser = await googleSignIn.signIn();
-      if (googleUser == null) {
-        AppLogger.w('AUTH: Google login cancelled by user');
-        throw Exception('Google sign-in was cancelled');
-      }
-
-      final googleAuth = await googleUser.authentication;
-      if (googleAuth.idToken == null) throw Exception('Failed to get Google ID token');
-
-      AppLogger.d('AUTH: Exchanging Google ID Token for session');
-      final response = await _authApi.loginWithGoogle(googleAuth.idToken!);
-      AppLogger.i('AUTH: Google login successful');
-      return _saveSession(response);
-    });
   }
 
   Future<AppUser> _saveSession(AuthResponse response) async {

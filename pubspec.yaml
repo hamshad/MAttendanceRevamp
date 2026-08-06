@@ -51,9 +51,6 @@ dependencies:
   fl_chart: ^0.70.0
   intl: ^0.20.1
 
-  # Google Sign-In
-  google_sign_in: ^6.2.2
-
   # Map
   flutter_map: ^7.0.2
   latlong2: ^0.9.1

@@ -7,7 +7,6 @@ class ApiEndpoints {
   static const String refreshToken = '/api/v1/auth/refresh';
   static const String forgotPassword = '/api/v1/auth/forgot-password';
   static const String resetPassword = '/api/v1/auth/reset-password';
-  static const String googleAuth = '/api/v1/auth/google';
   static const String logout = '/api/v1/auth/revoke';
   static const String me = '/api/v1/auth/me';
 

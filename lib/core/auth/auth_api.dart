@@ -22,19 +22,6 @@ class AuthApi {
     }
   }
 
-  Future<AuthResponse> loginWithGoogle(String idToken) async {
-    try {
-      final response = await _dio.post(ApiEndpoints.googleAuth, data: {
-        'idToken': idToken,
-      });
-      return AuthResponse.fromJson(response.data as Map<String, dynamic>);
-    } on DioException catch (e) {
-      final err = e.error;
-      if (err is ApiException) throw Exception(err.message);
-      throw Exception(e.message ?? 'Google login failed');
-    }
-  }
-
   Future<void> forgotPassword(String email) async {
     await _dio.post(ApiEndpoints.forgotPassword, data: {'email': email});
   }
