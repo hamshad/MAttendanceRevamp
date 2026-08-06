@@ -108,6 +108,13 @@ class _WFHScreenState extends ConsumerState<WFHScreen> {
           _locationLoading = false;
         });
       }
+    } on LocationPrecisionRequiredException catch (e) {
+      if (mounted) {
+        setState(() {
+          _locationError = e.message;
+          _locationLoading = false;
+        });
+      }
     } catch (_) {
       if (mounted) {
         setState(() {

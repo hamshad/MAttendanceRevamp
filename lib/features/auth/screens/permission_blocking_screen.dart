@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/location_precision.dart';
 import '../../../core/utils/permission_service.dart';
 import '../../dashboard/providers/dashboard_providers.dart';
 
@@ -15,6 +17,7 @@ class PermissionBlockingScreen extends ConsumerStatefulWidget {
 
 class _PermissionBlockingScreenState extends ConsumerState<PermissionBlockingScreen> {
   bool _hasPermission = false;
+  bool _hasPrecision = false;
   bool _isRequesting = false;
   bool? _needsBackground;
   bool _checkTriggered = false;
@@ -27,9 +30,14 @@ class _PermissionBlockingScreenState extends ConsumerState<PermissionBlockingScr
         ? await PermissionService.instance.hasBackgroundLocation()
         : await PermissionService.instance.hasForegroundLocation();
 
+    // Precise (fine) location is mandatory — approximate breaks GPS punch,
+    // geofence, WiFi alignment and client-site verification.
+    final hasPrecision = hasPerm && await LocationPrecision.isPreciseGranted();
+
     if (mounted) {
       setState(() {
         _hasPermission = hasPerm;
+        _hasPrecision = hasPrecision;
         _isRequesting = false;
       });
     }
@@ -43,12 +51,35 @@ class _PermissionBlockingScreenState extends ConsumerState<PermissionBlockingScr
         ? await PermissionService.instance.requestBackgroundLocation()
         : await PermissionService.instance.requestForegroundLocation();
 
+    if (success && mounted) {
+      // Re-check precision after granting — some OEM dialogs (Xiaomi MIUI)
+      // let the user pick "Approximate" directly, and requestPermission cannot
+      // tell the difference.
+      final hasPrecision = await LocationPrecision.isPreciseGranted();
+      if (mounted) {
+        setState(() {
+          _hasPermission = true;
+          _hasPrecision = hasPrecision;
+          _isRequesting = false;
+        });
+      }
+      return;
+    }
+
     if (mounted) {
       setState(() {
         _hasPermission = success;
+        _hasPrecision = false;
         _isRequesting = false;
       });
     }
+  }
+
+  Future<void> _openSettings() async {
+    setState(() => _isRequesting = true);
+    await openAppSettings();
+    if (mounted) setState(() => _isRequesting = false);
+    await _checkPermission();
   }
 
   @override
@@ -73,12 +104,16 @@ class _PermissionBlockingScreenState extends ConsumerState<PermissionBlockingScr
       });
     }
 
-    if (_hasPermission) {
+    if (_hasPermission && _hasPrecision) {
       return widget.child;
     }
 
     final theme = Theme.of(context);
     final isBg = needsBackground;
+
+    // Location granted but only approximate — cannot be fixed via the runtime
+    // request dialog; user must flip "Precise" in app settings.
+    final precisionMissing = _hasPermission && !_hasPrecision;
 
     return Scaffold(
       body: SafeArea(
@@ -93,7 +128,7 @@ class _PermissionBlockingScreenState extends ConsumerState<PermissionBlockingScr
               const SizedBox(height: 16),
 
               Text(
-                'Location Required',
+                precisionMissing ? 'Precise Location Required' : 'Location Required',
                 style: theme.textTheme.headlineMedium?.copyWith(
                   fontWeight: FontWeight.bold,
                   color: theme.colorScheme.primary,
@@ -114,16 +149,18 @@ class _PermissionBlockingScreenState extends ConsumerState<PermissionBlockingScr
                   padding: const EdgeInsets.all(20),
                   child: Column(
                     children: [
-                      const Icon(
-                        Icons.location_on,
+                      Icon(
+                        precisionMissing ? Icons.gps_not_fixed : Icons.location_on,
                         size: 48,
                         color: AppColors.primary,
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        isBg
-                            ? 'To enable automatic attendance tracking and office geofencing, this app requires location access set to "Allow all the time".'
-                            : 'To enable attendance tracking, this app requires location access.',
+                        precisionMissing
+                            ? 'Approximate location is not enough. It reports your position up to 1 km away, which breaks GPS punch, geofence, WiFi alignment and client-site verification. Set location to "Precise".'
+                            : isBg
+                                ? 'To enable automatic attendance tracking and office geofencing, this app requires location access set to "Allow all the time".'
+                                : 'To enable attendance tracking, this app requires location access.',
                         textAlign: TextAlign.center,
                         style: theme.textTheme.bodyMedium?.copyWith(
                           color: AppColors.textPrimary,
@@ -140,27 +177,44 @@ class _PermissionBlockingScreenState extends ConsumerState<PermissionBlockingScr
                 children: [
                   _InstructionRow(
                     number: '1',
-                    text: 'Tap the button below',
+                    text: precisionMissing
+                        ? 'Tap the button below to open Settings'
+                        : 'Tap the button below',
                   ),
                   const SizedBox(height: 16),
                   _InstructionRow(
                     number: '2',
-                    text: isBg ? 'Select "Allow all the time"' : 'Select "Allow while using the app"',
+                    text: precisionMissing
+                        ? 'Set Location to "Precise" and "Allow all the time"'
+                        : isBg ? 'Select "Allow all the time"' : 'Select "Allow while using the app"',
                   ),
                 ],
               ),
               const SizedBox(height: 48),
 
-              ElevatedButton(
-                onPressed: _isRequesting ? null : _handleRequest,
-                child: _isRequesting
-                    ? const SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                      )
-                    : Text(isBg ? 'Allow All The Time' : 'Allow Location Access'),
-              ),
+              if (precisionMissing)
+                ElevatedButton.icon(
+                  onPressed: _isRequesting ? null : _openSettings,
+                  icon: _isRequesting
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Icon(Icons.settings),
+                  label: Text(_isRequesting ? 'Opening Settings...' : 'Open Settings'),
+                )
+              else
+                ElevatedButton(
+                  onPressed: _isRequesting ? null : _handleRequest,
+                  child: _isRequesting
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : Text(isBg ? 'Allow All The Time' : 'Allow Location Access'),
+                ),
               const SizedBox(height: 16),
 
               TextButton(

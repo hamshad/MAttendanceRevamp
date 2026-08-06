@@ -139,7 +139,9 @@ class _GPSPunchScreenState extends ConsumerState<GPSPunchScreen> {
         error: (e, _) => _ErrorView(
           message: e is LocationPermissionDeniedException
               ? e.message
-              : 'Failed to get location. Please try again.',
+              : e is LocationPrecisionRequiredException
+                  ? e.message
+                  : 'Failed to get location. Please try again.',
           onRetry: () => ref.invalidate(_gpsLocationProvider),
         ),
         data: (location) => _buildContent(context, theme, location, dirLabel, offices),

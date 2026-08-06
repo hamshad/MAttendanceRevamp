@@ -16,6 +16,7 @@ import 'package:intl/intl.dart';
 
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/utils/constants.dart';
+import '../../../core/utils/location_precision.dart';
 import '../../../models/offline_punch.dart';
 import '../../punch/services/geofence_background_worker.dart';
 import '../../punch/services/wifi_background_worker.dart';
@@ -185,6 +186,38 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
       service.stopSelf();
     }
     return;
+  }
+
+  // Mandatory PRECISE location. Approximate (coarse) fixes are 500m–2km off —
+  // silently breaking geofence auto-punch and field tracking. If the user
+  // downgraded to approximate while the service was running, stop immediately
+  // instead of pinging wrong positions.
+  try {
+    if (!await LocationPrecision.isPreciseGranted()) {
+      debugPrint('[GF_BG_ENTRY] Approximate location — precise required, stopping service');
+      try {
+        await FlutterLocalNotificationsPlugin().show(
+          997,
+          'Precise location required',
+          'Approximate location breaks GPS punch and geofence. Open Settings '
+              '\u2192 Apps \u2192 mAttendance \u2192 Location \u2192 Precise.',
+          const NotificationDetails(
+            android: AndroidNotificationDetails(
+              'user_alignment',
+              'Attendance Alerts',
+              importance: Importance.high,
+              priority: Priority.high,
+            ),
+          ),
+        );
+      } catch (_) {}
+      if (service is AndroidServiceInstance) {
+        service.stopSelf();
+      }
+      return;
+    }
+  } catch (_) {
+    // Fail-open: if precision can't be determined, keep current behavior.
   }
 
   final locationFilter = LocationFilter();
