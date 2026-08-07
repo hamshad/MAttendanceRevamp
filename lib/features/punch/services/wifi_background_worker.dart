@@ -210,8 +210,7 @@ class WifiBackgroundWorker {
 
     // WiFi disconnect clears the manual-out-on-wifi guard
     if (await _isManualOutOnWifi()) {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(manualOutOnWifiKey, false);
+      await _clearManualOutOnWifi();
       debugPrint('[WIFI_BG] WiFi disconnected — manual-out-on-wifi guard CLEARED');
     }
 
@@ -652,11 +651,42 @@ class WifiBackgroundWorker {
   // ── Manual-out-on-wifi guard ────────────────────────────────────────────────
 
   static const manualOutOnWifiKey = 'wifi_manual_out_on_wifi';
+  static const manualOutOnWifiTimeKey = 'wifi_manual_out_on_wifi_time';
   static const manualInKey = 'wifi_manual_in';
 
   Future<bool> _isManualOutOnWifi() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(manualOutOnWifiKey) ?? false;
+    final flag = prefs.getBool(manualOutOnWifiKey) ?? false;
+    if (!flag) return false;
+
+    // Day-boundary expiry mirrors wifi_auto_punch_service.dart: a manual OUT
+    // is a same-day trigger-edge guard. Expire it on the next calendar day
+    // (or when legacy/missing timestamp) so auto IN can fire again even if
+    // iOS never delivered a WiFi disconnect event overnight.
+    final setTime = prefs.getInt(manualOutOnWifiTimeKey) ?? 0;
+    if (setTime <= 0) {
+      debugPrint('[WIFI_BG] manual-out-on-wifi no timestamp (legacy) — clearing');
+      await _clearManualOutOnWifi();
+      return false;
+    }
+    final setDay = DateTime.fromMillisecondsSinceEpoch(setTime);
+    final now = DateTime.now();
+    final isSameDay = setDay.year == now.year &&
+        setDay.month == now.month &&
+        setDay.day == now.day;
+    if (!isSameDay) {
+      debugPrint('[WIFI_BG] manual-out-on-wifi expired — clearing');
+      await _clearManualOutOnWifi();
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _clearManualOutOnWifi() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(manualOutOnWifiKey, false);
+    await prefs.setInt(manualOutOnWifiTimeKey, 0);
+    debugPrint('[WIFI_BG] manual-out-on-wifi guard CLEARED');
   }
 
   Future<bool> _isManualIn() async {

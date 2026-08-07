@@ -23,7 +23,11 @@ class WifiAutoPunchService {
 
   // Manual-out-on-wifi flag: when user manually punches OUT while connected
   // to office WiFi, suppress auto re-IN until WiFi disconnects (trigger edge).
+  // Day-boundary expiry: set-time is stored alongside so a manual OUT on one
+  // day can't silently block next-day auto IN when iOS never delivers a WiFi
+  // disconnect event (phone stays connected overnight / auto-rejoins).
   static const _manualOutOnWifiKey = 'wifiManualOutOnWifi';
+  static const _manualOutOnWifiTimeKey = 'wifiManualOutOnWifiTime';
 
   // Manual IN flag: when user manually punches IN (GPS, NFC, etc.), suppress
   // auto WiFi OUT — don't let WiFi undo a manual punch.
@@ -101,27 +105,61 @@ class WifiAutoPunchService {
 
   static Future<void> setLastPunchStatus(String status) async {
     await Hive.box(AppConstants.cacheBox).put(_lastPunchStatusKey, status);
-    // Write shared timestamp so background worker rate limiter sees this punch
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('gf_last_punch_time', DateTime.now().toIso8601String());
+    // NOTE: do NOT stamp gf_last_punch_time here — PunchStateInterceptor
+    // (dio) is the single source of truth and stamps it on real punch API
+    // responses. Writing it here on every status sync (app open/resume)
+    // makes the 30s rate limiter in _isRateLimited() self-block the
+    // auto-punch check that runs right after the sync.
   }
 
   static bool get manualOutOnWifi {
     final box = Hive.box(AppConstants.cacheBox);
-    return box.get(_manualOutOnWifiKey, defaultValue: false) as bool;
+    final flag = box.get(_manualOutOnWifiKey, defaultValue: false) as bool;
+    if (!flag) return false;
+
+    // Day-boundary expiry: a manual OUT is a same-day trigger-edge guard.
+    // If it was set on a previous calendar day — OR was written by an older
+    // build that didn't record a timestamp (time == 0) — treat as expired:
+    // the user is back for a new shift and the disconnect event may never
+    // have fired (iOS keeps the phone on office WiFi). Clearing lazily also
+    // unblocks devices carrying a legacy stuck flag from before this change.
+    final setTime =
+        box.get(_manualOutOnWifiTimeKey, defaultValue: 0) as int;
+    if (setTime <= 0) {
+      AppLogger.i('WIFI_AUTO: manual-out-on-wifi has no timestamp (legacy) — clearing');
+      clearManualOutOnWifi(); // fire-and-forget, getter stays sync
+      return false;
+    }
+    final setDay = DateTime.fromMillisecondsSinceEpoch(setTime);
+    final now = DateTime.now();
+    final isSameDay = setDay.year == now.year &&
+        setDay.month == now.month &&
+        setDay.day == now.day;
+    if (!isSameDay) {
+      AppLogger.i('WIFI_AUTO: manual-out-on-wifi expired (set ${setDay.toIso8601String()}) — clearing');
+      clearManualOutOnWifi(); // fire-and-forget, getter stays sync
+      return false;
+    }
+    return true;
   }
 
   static Future<void> setManualOutOnWifi() async {
     await Hive.box(AppConstants.cacheBox).put(_manualOutOnWifiKey, true);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await Hive.box(AppConstants.cacheBox).put(_manualOutOnWifiTimeKey, now);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('wifi_manual_out_on_wifi', true);
+    // Prefs mirror keeps the background worker on the same expiry schedule.
+    await prefs.setInt('wifi_manual_out_on_wifi_time', now);
     AppLogger.i('WIFI_AUTO: Manual-out-on-wifi flag SET');
   }
 
   static Future<void> clearManualOutOnWifi() async {
     await Hive.box(AppConstants.cacheBox).put(_manualOutOnWifiKey, false);
+    await Hive.box(AppConstants.cacheBox).put(_manualOutOnWifiTimeKey, 0);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('wifi_manual_out_on_wifi', false);
+    await prefs.setInt('wifi_manual_out_on_wifi_time', 0);
     AppLogger.d('WIFI_AUTO: Manual-out-on-wifi flag CLEARED');
   }
 

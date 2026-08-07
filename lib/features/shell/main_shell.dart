@@ -341,10 +341,14 @@ class _MainShellState extends ConsumerState<MainShell>
       );
       debugPrint('UI: Attendance status updated. Punched In: $nextPunched');
 
-      // Persist punch state for the background service notification
+      // Persist punch state for the background service notification.
+      // NOTE: do NOT write gf_last_punch_time here — it feeds the WiFi/
+      // geofence rate limiter (30s window). Writing NOW on every status
+      // sync self-blocks the foreground auto-punch check that runs right
+      // after (app open/resume). PunchStateInterceptor stamps the real
+      // timestamp on actual punch API responses.
       SharedPreferences.getInstance().then((prefs) {
         prefs.setString('gf_last_punch_type', statusStr);
-        prefs.setString('gf_last_punch_time', DateTime.now().toIso8601String());
         if (nextPunched && next.value?.officeName != null) {
           prefs.setString('gf_last_punch_office', next.value!.officeName!);
         }
