@@ -15,12 +15,35 @@ class PermissionBlockingScreen extends ConsumerStatefulWidget {
   ConsumerState<PermissionBlockingScreen> createState() => _PermissionBlockingScreenState();
 }
 
-class _PermissionBlockingScreenState extends ConsumerState<PermissionBlockingScreen> {
+class _PermissionBlockingScreenState extends ConsumerState<PermissionBlockingScreen>
+    with WidgetsBindingObserver {
   bool _hasPermission = false;
   bool _hasPrecision = false;
   bool _isRequesting = false;
   bool? _needsBackground;
   bool _checkTriggered = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// Auto re-check when the app returns to the foreground. MIUI is known to
+  /// apply permission/precision changes from Settings asynchronously — without
+  /// this, the blocking screen stays stuck until the user taps a button.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _checkTriggered) {
+      _checkPermission();
+    }
+  }
 
   Future<void> _checkPermission() async {
     final needsBg = _needsBackground!;

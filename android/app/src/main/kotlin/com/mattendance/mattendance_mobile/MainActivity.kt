@@ -23,31 +23,35 @@ class MainActivity : FlutterFragmentActivity() {
     /**
      * True only when the OS location permission is PRECISE (fine granularity).
      *
-     * On Android 12+ (API 31+), granting "approximate location" revokes
-     * ACCESS_FINE_LOCATION while keeping ACCESS_COARSE_LOCATION — so a direct
-     * FINE permission check is the authoritative signal (the documented
-     * approach). The API-31 `LocationManager#getLocationGranularity()` API is
-     * @SystemApi and not available to apps.
+     * Android 12+ (API 31+): the permission level is the documented
+     * authoritative signal — granting "approximate location" revokes
+     * ACCESS_FINE_LOCATION while keeping ACCESS_COARSE_LOCATION. This applies
+     * to MIUI/HyperOS too (the MIUI "approximate location" toggle is the same
+     * Android 12 feature). Never consult AppOps here: MIUI is known to report
+     * stale MODE_IGNORED op state even after the user enabled precise location
+     * (permission changed in Settings, op not synced) — blocking on it would
+     * permanently stick the "Precise location required" screen on MI devices.
      *
-     * Additional AppOps check on API 29+ catches OEM-specific toggles (e.g.
-     * MIUI 12/13 "Approximate location" on Android 10/11) that revoke the fine
-     * location op independently of the runtime permission.
+     * Pre-12 (API 29-30): stock Android grants FINE together with COARSE, so
+     * the permission check would always pass. MIUI backported the approximate
+     * toggle to Android 10/11 devices at the app-op level (permission stays
+     * granted, OP_FINE_LOCATION = MODE_IGNORED) — the app-op is the only
+     * signal there. MODE_ERRORED (op not readable) fails open.
      */
     private fun isPreciseLocationGranted(): Boolean {
-        val fineGranted = ContextCompat.checkSelfPermission(
-            this, Manifest.permission.ACCESS_FINE_LOCATION,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (!fineGranted) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            return ContextCompat.checkSelfPermission(
+                this, Manifest.permission.ACCESS_FINE_LOCATION,
+            ) == PackageManager.PERMISSION_GRANTED
+        }
 
-        // Belt-and-suspenders: fine-location app-op revoked by OEM toggles.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val appOps = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
             val mode = appOps.unsafeCheckOpNoThrow(
                 AppOpsManager.OPSTR_FINE_LOCATION, Process.myUid(), packageName,
             )
-            // MODE_IGNORED = fine fixes blocked (approximate). MODE_ERRORED means
-            // the op isn't readable → trust the permission check (fail-open).
-            if (mode == AppOpsManager.MODE_IGNORED) return false
+            return mode != AppOpsManager.MODE_IGNORED &&
+                mode != AppOpsManager.MODE_ERRORED
         }
         return true
     }
