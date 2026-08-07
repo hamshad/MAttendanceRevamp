@@ -68,6 +68,14 @@ class _MainShellState extends ConsumerState<MainShell>
   StreamSubscription<Map<String, dynamic>>? _wifiPunchSub;
   bool _offlineScreenPushed = false;
 
+  // Guards against stacking the battery-exemption dialog when several paths
+  // trigger it near-simultaneously (geofence toggle + field-tracking start).
+  static bool _batteryDialogVisible = false;
+
+  // Set when the user taps "Not Now" — don't nag again this session.  The
+  // prompt only returns on a later app launch + explicit user action.
+  static bool _batteryPromptDismissed = false;
+
   static const _tabs = [
     HomeScreen(),
     HistoryHubScreen(),
@@ -209,9 +217,6 @@ class _MainShellState extends ConsumerState<MainShell>
     _geofenceService = null;
 
     if (isEnabled) {
-      if (Platform.isAndroid) {
-        await _ensureBatteryOptimizationExempt();
-      }
       if (!mounted) return;
       if (!await FieldTrackingService.isRunning) {
         debugPrint('SHELL: Starting combined service (geofence enabled)');
@@ -433,58 +438,41 @@ class _MainShellState extends ConsumerState<MainShell>
 
   /// Checks whether the app is excluded from battery optimisation.
   ///
-  /// Scenarios handled:
-  /// 1. Already excluded  → returns immediately, no UI shown.
-  /// 2. Not excluded + user taps "Allow"  → opens system dialog, waits, then
-  ///    returns (tracking starts regardless of what the user chose there).
-  /// 3. Not excluded + user taps "Not Now" → returns without opening the
-  ///    system dialog (tracking still starts but may be unreliable).
-  /// 4. Widget unmounted during any await  → returns early, no dialog shown.
+  /// Only called on EXPLICIT user intent (geofence toggled ON, field tracking
+  /// started) — never on silent first-launch auto-enable.  Scenarios:
+  /// 1. Already exempt → returns immediately, no UI shown.
+  /// 2. Dialog already visible → returns immediately (no stacking).
+  /// 3. User dismissed "Not Now" this session → returns immediately.
+  /// 4. Not exempt + user taps "Allow" → opens system dialog, then returns
+  ///    (tracking starts regardless of what the user chose there).
+  /// 5. Not exempt + user taps "Not Now" → returns without the system dialog.
   Future<void> _ensureBatteryOptimizationExempt() async {
-    // Scenario 1: already exempt — nothing to do.
+    if (_batteryDialogVisible || _batteryPromptDismissed) return;
     final alreadyExempt =
         await Permission.ignoreBatteryOptimizations.isGranted;
     if (alreadyExempt) return;
 
-    if (!mounted) return; // Scenario 4
+    if (!mounted) return;
 
-    // Scenarios 2 & 3: show an explanation dialog first so the user
-    // understands *why* this system prompt is appearing.
-    final proceed = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        title: const Text('Allow Background Tracking'),
-        content: const Text(
-          'To keep tracking your location when the app is minimized or the '
-          'screen is off, please disable battery optimization for this app.\n\n'
-          'On the next screen choose "Don\'t optimize" to ensure uninterrupted '
-          'field tracking.',
-        ),
-        actions: [
-          TextButton(
-            // Scenario 3: user declines — tracking still starts.
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Not Now'),
-          ),
-          FilledButton(
-            // Scenario 2: user agrees — open system dialog.
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Allow'),
-          ),
-        ],
-      ),
-    );
+    _batteryDialogVisible = true;
+    try {
+      final proceed = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const _BatteryExemptionDialog(),
+      );
+      if (!mounted) return;
 
-    if (!mounted) return; // Scenario 4 — widget disposed while dialog was open
-
-    if (proceed == true) {
-      // Scenario 2: request opens the system "Ignore battery optimizations"
-      // dialog.  We await it but don't gate tracking on the result — the
-      // user may deny it and tracking should still start.
-      await Permission.ignoreBatteryOptimizations.request();
+      if (proceed == true) {
+        // Opens the system "Ignore battery optimizations" dialog.  Tracking
+        // starts regardless of what the user chooses there.
+        await Permission.ignoreBatteryOptimizations.request();
+      } else {
+        _batteryPromptDismissed = true;
+      }
+    } finally {
+      _batteryDialogVisible = false;
     }
-    // Scenario 3: proceed == false → fall through, tracking starts normally.
   }
 
   void _stopFieldTracking() {
@@ -1373,6 +1361,107 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ── Battery-exemption dialog ─────────────────────────────────────────────────
+
+/// Benefit-first explanation dialog shown before the system "Ignore battery
+/// optimizations" prompt.  Sells the outcome ("auto punch keeps working"),
+/// not the permission ("we need background access").  The full technical
+/// explanation is collapsed behind "Why this is needed?" so it never blocks
+/// the primary message.
+class _BatteryExemptionDialog extends StatefulWidget {
+  const _BatteryExemptionDialog();
+
+  @override
+  State<_BatteryExemptionDialog> createState() => _BatteryExemptionDialogState();
+}
+
+class _BatteryExemptionDialogState extends State<_BatteryExemptionDialog> {
+  bool _showDetails = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      title: Row(
+        children: [
+          Icon(Icons.bolt, color: theme.colorScheme.primary),
+          const SizedBox(width: 8),
+          const Expanded(child: Text('Never Miss a Punch')),
+        ],
+      ),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Primary pitch — benefit only, two short lines.
+            const Text(
+              'Your attendance records itself — automatically.',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Auto punch-in and punch-out keep working even when your phone '
+              'is locked or the app is closed.',
+              style: TextStyle(
+                fontSize: 14,
+                color: theme.colorScheme.onSurface.withValues(alpha: 0.75),
+              ),
+            ),
+            const SizedBox(height: 12),
+            if (_showDetails) ...[
+              const Divider(height: 1),
+              const SizedBox(height: 12),
+              // Full explanation — hidden unless the user asks.
+              Text(
+                'MAttendance continuously checks your location to detect when '
+                'you arrive at or leave your office. Some phones pause such '
+                'background apps to save battery, which can delay or skip a '
+                'punch.\n\n'
+                'Allowing background running (choose "Don\'t optimize" on the '
+                'next screen) keeps this monitoring active so every punch is '
+                'recorded on time.',
+                style: TextStyle(
+                  fontSize: 13,
+                  height: 1.4,
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.7),
+                ),
+              ),
+            ],
+            const SizedBox(height: 4),
+            // Expandable rationale — small, out of the way.
+            TextButton.icon(
+              onPressed: () =>
+                  setState(() => _showDetails = !_showDetails),
+              icon: Icon(
+                _showDetails ? Icons.expand_less : Icons.expand_more,
+                size: 18,
+              ),
+              label: Text(_showDetails ? 'Hide details' : 'Why this is needed'),
+              style: TextButton.styleFrom(
+                padding: EdgeInsets.zero,
+                minimumSize: const Size(0, 36),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Not Now'),
+        ),
+        FilledButton.icon(
+          onPressed: () => Navigator.pop(context, true),
+          icon: const Icon(Icons.verified_user_outlined, size: 18),
+          label: const Text('Keep It Working'),
+        ),
+      ],
     );
   }
 }
