@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import '../../models/auth_response.dart';
 import '../../models/user.dart';
 import '../api/api_endpoints.dart';
+import '../api/api_exceptions.dart';
 import '../api/dio_client.dart';
 import '../utils/constants.dart';
 import 'auth_api.dart';
@@ -115,8 +116,13 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
             return newUser;
           }
         } catch (e) {
-          // Token definitively rejected — clear stale session
-          if (e is DioException && e.response?.statusCode == 401) {
+          // Only clear the session on DEFINITIVE token rejection — a genuine
+          // 401 that survived the interceptor's refresh attempt. The
+          // interceptor tags transient refresh failures (429 rate limit,
+          // 5xx, network) with SessionRefreshFailedException; those must NOT
+          // flush tokens, even though the request's raw statusCode is 401.
+          final apiErr = e is DioException ? e.error : null;
+          if (apiErr is ApiException && apiErr.statusCode == 401) {
             AppLogger.w('AUTH: Token rejected (401) — clearing stale session');
             await _tokenStorage.clearTokens();
             await AppUser.clear();

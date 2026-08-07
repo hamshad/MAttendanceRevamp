@@ -197,8 +197,8 @@ class DioClient {
           AppLogger.w('[AUTH] No refresh token but access token exists — retaining session');
           _isRefreshing = false;
           await _tokenStorage.releaseRefreshLock();
-          _rejectPendingRequests(error);
-          return handler.next(_mapError(error));
+          _rejectPendingRequests(error, transient: true);
+          return handler.next(_asTransient(error));
         }
         AppLogger.w('[AUTH] No refresh token — clearing session');
         await _handleRefreshFailure(error, handler);
@@ -310,8 +310,8 @@ class DioClient {
       // Never force-logout on errors we can't positively identify as
       // token-revocation — the next request may succeed.
       AppLogger.w('[AUTH] Refresh failed (non-fatal) — retaining session', e);
-      _rejectPendingRequests(error);
-      return handler.next(_mapError(error));
+      _rejectPendingRequests(error, transient: true);
+      return handler.next(_asTransient(error));
     }
   }
 
@@ -441,14 +441,29 @@ class DioClient {
   }
 
   /// Reject all queued requests when refresh fails.
-  void _rejectPendingRequests(DioException originalError) {
+  ///
+  /// [transient] marks the failure as "session retained" — queued requests
+  /// receive a [SessionRefreshFailedException] instead of an ApiException(401)
+  /// so callers never mistake a transient refresh failure (429/5xx/network)
+  /// for definitive token rejection.
+  void _rejectPendingRequests(DioException originalError, {bool transient = false}) {
     final pending = List.of(_pendingRequests);
     _pendingRequests.clear();
     for (final req in pending) {
       req.handler.next(
-        _mapError(originalError.copyWith(requestOptions: req.options)),
+        transient
+            ? _asTransient(originalError.copyWith(requestOptions: req.options))
+            : _mapError(originalError.copyWith(requestOptions: req.options)),
       );
     }
+  }
+
+  /// Marks a refresh-failed request as transient: keeps the original
+  /// response/status intact for logging, but replaces `error` with
+  /// [SessionRefreshFailedException] so callers checking for a genuine 401
+  /// (`e.error is ApiException && statusCode == 401`) will NOT clear tokens.
+  DioException _asTransient(DioException error) {
+    return error.copyWith(error: const SessionRefreshFailedException());
   }
 
   void _notifySessionExpired() {
@@ -470,6 +485,33 @@ class DioClient {
         error: ApiException(
           message.isNotEmpty ? message : 'Session expired. Please log in again.',
           statusCode: 401,
+        ),
+      );
+    }
+    if (status == 429) {
+      // Rate-limited by the server (login brute-force protection, per-IP or
+      // per-account window). Surface a friendly message instead of raw Dio
+      // "validateStatus" boilerplate. Honor Retry-After when provided.
+      int? retryAfter;
+      final headers = error.response?.headers;
+      if (headers != null) {
+        final raw = headers.value('retry-after');
+        retryAfter = int.tryParse(raw ?? '');
+        if (retryAfter == null && raw != null) {
+          final parsed = DateTime.tryParse(raw);
+          if (parsed != null) {
+            retryAfter = parsed.difference(DateTime.now()).inSeconds.clamp(0, 1 << 31);
+          }
+        }
+      }
+      final base = 'Too many requests. Please wait and try again.';
+      final waitHint = retryAfter != null && retryAfter > 0
+          ? ' Try again in ${retryAfter}s.'
+          : ' Please wait a few minutes.';
+      return error.copyWith(
+        error: TooManyRequestsException(
+          '$base$waitHint',
+          retryAfter,
         ),
       );
     }
