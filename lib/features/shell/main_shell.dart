@@ -1040,6 +1040,8 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
         ref.watch(accessPermissionsProvider).value?.allowFieldTracking ?? false;
     final allowGeofenceAuto =
         ref.watch(accessPermissionsProvider).value?.allowGeofenceAuto ?? false;
+    final allowWiFi =
+        ref.watch(accessPermissionsProvider).value?.allowWiFi ?? false;
     final fieldTrackingRunning = ref.watch(fieldTrackingRunningProvider);
     final unreadCount = ref.watch(unreadNotificationsCountProvider);
     final themeMode = ref.watch(themeModeProvider);
@@ -1243,34 +1245,35 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
           if (allowGeofenceAuto) const Divider(height: 1),
 
           // ── WiFi Auto-Punch ──────────────────────────────────────────────
-          ListTile(
-            leading: Consumer(builder: (context, ref, _) {
-              final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
-              return Icon(
-                Icons.wifi_sharp,
-                color: wifiEnabled
-                    ? theme.colorScheme.primary
-                    : AppColors.gray,
-              );
-            }),
-            title: const Text('WiFi Auto-Punch'),
-            subtitle: Consumer(builder: (context, ref, _) {
-              final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
-              return Text(
-                wifiEnabled ? 'On' : 'Off',
-                style: TextStyle(
-                  color: wifiEnabled ? AppColors.success : AppColors.gray,
-                  fontSize: 12,
-                ),
-              );
-            }),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                  builder: (_) => const WifiSettingsScreen()),
+          if (allowWiFi)
+            ListTile(
+              leading: Consumer(builder: (context, ref, _) {
+                final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
+                return Icon(
+                  Icons.wifi_sharp,
+                  color: wifiEnabled
+                      ? theme.colorScheme.primary
+                      : AppColors.gray,
+                );
+              }),
+              title: const Text('WiFi Auto-Punch'),
+              subtitle: Consumer(builder: (context, ref, _) {
+                final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
+                return Text(
+                  wifiEnabled ? 'On' : 'Off',
+                  style: TextStyle(
+                    color: wifiEnabled ? AppColors.success : AppColors.gray,
+                    fontSize: 12,
+                  ),
+                );
+              }),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => const WifiSettingsScreen()),
+              ),
             ),
-          ),
 
           const Divider(height: 1),
 
