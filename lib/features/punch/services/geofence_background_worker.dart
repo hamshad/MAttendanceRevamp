@@ -495,8 +495,38 @@ class GeofenceBackgroundWorker {
 
   Future<void> _checkExit(LocationResult filtered, double confidence) async {
     if (!_isInsideGeofence && _pendingZone == null) {
-      debugPrint('[GF_BG] EXIT: skip — not inside, no pending');
-      return;
+      // ── Self-arm ─────────────────────────────────────────────────────────
+      // Exit tracking arms inside _checkEntry (line 481) — but that scan is
+      // confidence-gated and can be skipped on blurry-GPS devices (Samsung
+      // indoor/urban 20–60m), leaving _isInsideGeofence false forever and
+      // exit permanently disarmed even though the user IS punched in and near
+      // a zone.  If the user is punched IN, arm exit monitoring directly from
+      // the punch state instead of requiring the entry scan to have run.
+      //
+      // No-op on healthy-GPS devices (Nothing): their entry scan always runs
+      // and arms first, so _isInsideGeofence is already true here and the
+      // condition below is skipped — behavior unchanged.
+      if (_lastPunchType == 'In') {
+        final margin = _gpsMargin(filtered.accuracy);
+        for (final z in _zones) {
+          final d = geo.Geolocator.distanceBetween(
+            filtered.latitude, filtered.longitude,
+            z.latitude, z.longitude,
+          );
+          if (d <= z.radius + margin) {
+            debugPrint('[GF_BG] EXIT: SELF-ARM — punched IN near ${z.name} (dist=${d.toStringAsFixed(1)}m ≤ ${(z.radius + margin).toStringAsFixed(1)}m) — arming exit monitoring');
+            _isInsideGeofence = true;
+            _consecutiveInsideFixes = 0;
+            _pendingOutConfirm = false;
+            _exitAnalyzer.reset();
+            break;
+          }
+        }
+      }
+      if (!_isInsideGeofence && _pendingZone == null) {
+        debugPrint('[GF_BG] EXIT: skip — not inside, no pending');
+        return;
+      }
     }
     debugPrint('[GF_BG] EXIT: scanning zones — inside=$_isInsideGeofence pending=${_pendingZone?.id} insideFixes=$_consecutiveInsideFixes');
 

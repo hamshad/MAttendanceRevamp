@@ -277,6 +277,25 @@ void main() {
 
       expect(service.calls.didPunchIn, isFalse);
     });
+
+    test('punches IN with typical indoor GPS accuracy (poor GPS devices, e.g. Samsung)', () async {
+      // Regression: the confidence gate used to demand ≤16m accuracy for a
+      // stationary fix (0.8 threshold over 40m max). Real indoor/urban GPS on
+      // devices like Samsung delivers 20–60m accuracy, so entry was silently
+      // blocked despite the worker's radius+margin check accepting the fix.
+      // The accuracy margin already tolerates the position uncertainty — the
+      // confidence gate must not re-punish it.
+      final worker = GeofenceBackgroundWorker(service, dio: dio);
+      await worker.loadData();
+
+      // 45m accuracy stationary fix — confidence ≈ 1-(45/80)*0.5 = 0.72 ≥ 0.6.
+      await worker.onLocationFix(
+          insideLocation(accuracy: 45), TrackingState.STATIONARY, 0.72);
+
+      expect(service.calls.didPunchIn, isTrue,
+          reason: 'Indoor-accuracy fix (45m) must still trigger auto-punch IN');
+      expect(mockInterceptor.lastPunchDirection, 'In');
+    });
   });
 
   group('Exit detection', () {
@@ -306,6 +325,53 @@ void main() {
 
       expect(service.calls.didPunchOut, isTrue,
           reason: 'Expected exit trend analyzer to confirm OUT after progressively farther points');
+      expect(mockInterceptor.lastPunchDirection, 'Out');
+    });
+
+    test('punches OUT via self-arm when punched IN but entry scan was skipped (poor GPS)', () async {
+      // Regression: exit tracking only armed inside _checkEntry, which is
+      // confidence-gated. On blurry-GPS devices (Samsung indoor/urban
+      // 20–60m) entry can be skipped → _isInsideGeofence stays false →
+      // exit permanently disarmed → no punch OUT. Self-arm arms exit
+      // directly from the punched-IN state when the user is near a zone.
+      SharedPreferences.setMockInitialValues({
+        'bg_access_token': 'test_token',
+        'geofence_auto_enabled': true,
+        'gf_last_punch_type': 'In',
+        'gf_last_punch_time': DateTime.now().toIso8601String(),
+      });
+      final worker = GeofenceBackgroundWorker(service, dio: dio);
+      await worker.loadData();
+      service.calls.clear();
+
+      // Low confidence (0.5 < 0.6 threshold) → entry scan skipped, exactly
+      // the Samsung scenario. Self-arm must kick in: user is punched IN and
+      // inside the zone.
+      for (var i = 0; i < 4; i++) {
+        await worker.onLocationFix(
+            insideLocation(accuracy: 45), TrackingState.STATIONARY, 0.5);
+      }
+      expect(service.calls.didPunchOut, isFalse,
+          reason: 'Still inside zone — must not punch OUT');
+
+      // Server knows the user is punched IN (manual/selfie punch) — without
+      // this the OUT server-status gate correctly refuses.
+      mockInterceptor.isPunchedIn = true;
+
+      // Now walk away (high confidence fixes, same as healthy-GPS exit flow).
+      final exitPoints = [
+        LocationResult(latitude: 19.8775, longitude: 75.3165, accuracy: 10, speed: 1.0, jumpScore: 0.0), // ~180m
+        LocationResult(latitude: 19.8780, longitude: 75.3170, accuracy: 10, speed: 1.1, jumpScore: 0.0), // ~230m
+        LocationResult(latitude: 19.8790, longitude: 75.3180, accuracy: 10, speed: 1.2, jumpScore: 0.0), // ~330m
+        LocationResult(latitude: 19.8800, longitude: 75.3190, accuracy: 10, speed: 1.3, jumpScore: 0.0), // ~430m
+      ];
+      for (final pt in exitPoints) {
+        await worker.onLocationFix(pt, TrackingState.MOVING, defaultConfidence);
+        if (service.calls.didPunchOut) break;
+      }
+
+      expect(service.calls.didPunchOut, isTrue,
+          reason: 'Self-arm must enable exit tracking → punch OUT when leaving');
       expect(mockInterceptor.lastPunchDirection, 'Out');
     });
 
@@ -990,7 +1056,7 @@ void main() {
       // ═══════════════════════════════════════════════════════════════
       await worker.onLocationFix(insideGps, TrackingState.STATIONARY, 0.3);
       expect(service.calls.didPunchIn, isFalse,
-          reason: 'Low confidence (0.3 < 0.8 threshold) skips entry check');
+          reason: 'Low confidence (0.3 < 0.6 threshold) skips entry check');
 
       // ── Final punch count: 1 IN + 1 OUT ────────────────────────────
       // A second IN→OUT cycle is blocked in test time by 2-min debounce

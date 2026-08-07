@@ -22,13 +22,21 @@ class ConfidenceScorer {
   }
 
   static double _accuracyFactor(double accuracy, TrackingState state) {
-    // Relaxed gates: 40m for stationary, 80m for moving
-    final maxAllowed = state == TrackingState.STATIONARY ? 40.0 : 80.0;
-    if (accuracy > maxAllowed) return 0.2; 
-    
+    // Relaxed gates — 80m for stationary, 80m for moving.
+    //
+    // The background worker already absorbs raw accuracy via its GPS margin
+    // (radius + 2×accuracy, clamped 10–250m), so the confidence gate must NOT
+    // re-punish the same accuracy with a tighter absolute limit.  Demanding
+    // ≤16m accuracy (old 40m stationary gate at 0.8 threshold) silently
+    // blocked real indoor/urban fixes on devices like Samsung (20–60m GPS),
+    // while margin logic would have accepted them. 80m stationary aligns the
+    // gate with the margin's tolerance; fixes above that are still rejected.
+    final maxAllowed = 80.0;
+    if (accuracy > maxAllowed) return 0.2;
+
     // Linear decay from 1.0 (at 0m accuracy) to 0.5 (at maxAllowed accuracy)
     return 1.0 - (accuracy / maxAllowed) * 0.5;
   }
 
-  static const double CONFIDENCE_THRESHOLD = 0.8; // User requirement: 80%
+  static const double CONFIDENCE_THRESHOLD = 0.6; // Was 0.8 — see _accuracyFactor
 }

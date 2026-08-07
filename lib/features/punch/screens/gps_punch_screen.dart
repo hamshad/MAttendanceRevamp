@@ -69,8 +69,12 @@ class _GPSPunchScreenState extends ConsumerState<GPSPunchScreen> {
     setState(() => _isPunching = true);
 
     // FEATURE 1: Manual Proximity Check
+    // Validate against the SAME fix shown on the map (the one being punched) —
+    // not a second GPS read, which on some devices (Samsung) returns a stale
+    // fused fix different from what the user sees and wrongly denies the punch.
     if (widget.method == 'GeofenceAuto') {
-      final office = await ref.read(manualGeoServiceProvider).validateProximity();
+      final office =
+          await ref.read(manualGeoServiceProvider).validateProximity(location);
       if (office == null) {
         if (!mounted) return;
         setState(() => _isPunching = false);
