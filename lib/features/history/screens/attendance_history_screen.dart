@@ -9,6 +9,15 @@ import '../../../models/attendance.dart';
 import '../../../widgets/attendance_calendar.dart';
 import '../../../widgets/empty_state.dart';
 
+/// Friendly label for a server attendance status.  Keeps the raw status key
+/// for logic, but presents the full name to users.
+String _statusLabel(String status) {
+  return switch (status.toLowerCase()) {
+    'wfh' => 'Work From Home',
+    _ => status,
+  };
+}
+
 class AttendanceHistoryScreen extends ConsumerStatefulWidget {
   const AttendanceHistoryScreen({super.key});
 
@@ -283,7 +292,7 @@ class _SummaryRow extends StatelessWidget {
         
         Color bg = isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9);
         Color fg = isDark ? Colors.white : AppColors.textPrimary;
-        String label = status;
+        String label = _statusLabel(status);
 
         final s = status.toLowerCase();
         if (s == 'present') {
@@ -511,7 +520,7 @@ class _StatusBadge extends StatelessWidget {
           Icon(Icons.circle, size: 8, color: fgColor),
           const SizedBox(width: 6),
           Text(
-            status,
+            _statusLabel(status),
             style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.bold,
