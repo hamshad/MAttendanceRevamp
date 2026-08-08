@@ -186,7 +186,32 @@ class _PunchButtonState extends ConsumerState<PunchButton>
       default:
         // For methods not yet implemented, punch directly
         setState(() => _isPunching = true);
-        final result = await ref.read(punchProvider.notifier).punch(method);
+        var result = await ref.read(punchProvider.notifier).punch(method);
+        // Server already has this punch (biometric/website) — short confirm
+        // before forcing, never a big message.
+        if (result.isDuplicate && mounted) {
+          final confirm = await showDialog<bool>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('Punch anyway?'),
+              content: Text(result.message ?? 'Already punched'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text('Yes'),
+                ),
+              ],
+            ),
+          );
+          if (confirm == true && mounted) {
+            result =
+                await ref.read(punchProvider.notifier).punch(method, force: true);
+          }
+        }
         if (!mounted) return;
         setState(() => _isPunching = false);
         if (!result.success) {

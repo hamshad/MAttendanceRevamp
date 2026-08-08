@@ -9,6 +9,7 @@ import '../../../core/auth/auth_provider.dart';
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/offline/offline_providers.dart';
 import '../../../core/offline/offline_sync_manager.dart';
+import '../../../core/punch/punch_coordinator.dart';
 import '../../../core/utils/constants.dart';
 import '../../punch/services/manual_geo_service.dart';
 import '../../punch/services/location_service.dart';
@@ -151,7 +152,11 @@ class PunchNotifier extends AsyncNotifier<void> {
   @override
   Future<void> build() async {}
 
-  Future<PunchResult> punch(String method, {Map<String, dynamic>? extras}) async {
+  Future<PunchResult> punch(
+    String method, {
+    Map<String, dynamic>? extras,
+    bool force = false,
+  }) async {
     state = const AsyncLoading();
 
     // Check connectivity before attempting the API call
@@ -195,6 +200,24 @@ class PunchNotifier extends AsyncNotifier<void> {
             // Keep other extras as-is (e.g. selfieBase64, qrCodeToken)
             body[entry.key] = value;
           }
+        }
+      }
+
+      // Server-truth gate — the server may already have this punch (biometric
+      // machine / website punched in while the app wasn't looking).  A forced
+      // punch skips the gate (user confirmed the duplicate).
+      if (!force) {
+        final direction = body['Direction'] as String? ?? 'In';
+        final verdict =
+            await PunchCoordinator.check(dio: dio, direction: direction);
+        if (verdict == PunchCheck.duplicate || verdict == PunchCheck.blocked) {
+          return PunchResult(
+            success: false,
+            isDuplicate: true,
+            message: direction == 'In'
+                ? 'Already punched in'
+                : 'Already punched out',
+          );
         }
       }
 

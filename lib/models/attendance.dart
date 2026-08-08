@@ -162,7 +162,16 @@ class PunchResult {
   final bool success;
   final String? message;
 
-  const PunchResult({required this.success, this.message});
+  /// True when the server already has this punch (biometric machine /
+  /// website) and the user must confirm before forcing it.  The UI shows a
+  /// short confirm dialog instead of a plain failure.
+  final bool isDuplicate;
+
+  const PunchResult({
+    required this.success,
+    this.message,
+    this.isDuplicate = false,
+  });
 
   factory PunchResult.fromJson(Map<String, dynamic> j) => PunchResult(
         success: j['success'] as bool? ?? false,

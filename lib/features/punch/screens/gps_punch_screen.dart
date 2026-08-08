@@ -88,7 +88,7 @@ class _GPSPunchScreenState extends ConsumerState<GPSPunchScreen> {
       }
     }
 
-    final result = await ref.read(punchProvider.notifier).punch(
+    var result = await ref.read(punchProvider.notifier).punch(
       widget.method,
       extras: {
         'latitude': location.latitude,
@@ -96,6 +96,39 @@ class _GPSPunchScreenState extends ConsumerState<GPSPunchScreen> {
         'direction': widget.direction,
       },
     );
+
+    // Server already has this punch (biometric/website) — short confirm
+    // before forcing.
+    if (result.isDuplicate && mounted) {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Punch anyway?'),
+          content: Text(result.message ?? 'Already punched'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Yes'),
+            ),
+          ],
+        ),
+      );
+      if (confirm == true && mounted) {
+        result = await ref.read(punchProvider.notifier).punch(
+          widget.method,
+          extras: {
+            'latitude': location.latitude,
+            'longitude': location.longitude,
+            'direction': widget.direction,
+          },
+          force: true,
+        );
+      }
+    }
 
     if (!mounted) return;
     setState(() => _isPunching = false);
