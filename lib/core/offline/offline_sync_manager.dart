@@ -5,6 +5,7 @@ import 'package:workmanager/workmanager.dart';
 
 import '../../models/offline_punch.dart';
 import '../api/api_endpoints.dart';
+import '../punch/punch_coordinator.dart';
 import '../utils/constants.dart';
 
 /// Background manager for the offline punch queue.
@@ -82,15 +83,22 @@ class OfflineSyncManager {
       var dio = _buildDio(token);
 
       for (final punch in pending) {
+        // ── Server-truth gate + freshness (PunchCoordinator) ─────────────
+        // Queued punches can be stale or already-covered by a punch we can't
+        // see (biometric machine / website).  Re-check before POSTing.
+        if (await _shouldDropPunch(punch, dio, box)) continue;
+
         try {
           final resp = await dio.post(ApiEndpoints.punch, data: _buildBody(punch));
           if (resp.statusCode == 200 || resp.statusCode == 201) {
             await box.delete(punch.key);
+            await _publishLocalState(punch);
             continue;
           }
           // Unexpected success status (e.g. 202 accepted) → treat as done.
           if (resp.statusCode != null && resp.statusCode! < 300) {
             await box.delete(punch.key);
+            await _publishLocalState(punch);
             continue;
           }
           // 4xx/5xx definitive → stop retrying this punch.
@@ -130,6 +138,58 @@ class OfflineSyncManager {
           'Content-Type': 'application/json',
         },
       ));
+
+  /// Returns true when the queued punch should be dropped (stale or already
+  /// covered by a punch the app can't see), false when it may be POSTed.
+  ///
+  /// Auto punches (geofence/WiFi) also expire after [AppConstants
+  /// .autoPunchQueueTtl] — an enter event + long outage is stale.  Manual
+  /// punches are user intent and never expire, but still pass the
+  /// server-truth gate so a manual IN can't toggle a biometric IN to OUT.
+  static Future<bool> _shouldDropPunch(
+    OfflinePunch punch,
+    Dio dio,
+    Box<OfflinePunch> box,
+  ) async {
+    final direction = punch.direction ?? 'In';
+    final isAuto = punch.method == 'GeofenceAuto' || punch.method == 'WiFi';
+
+    if (isAuto &&
+        DateTime.now().difference(punch.createdAt) >
+            AppConstants.autoPunchQueueTtl) {
+      await box.delete(punch.key);
+      return true;
+    }
+
+    final verdict =
+        await PunchCoordinator.check(dio: dio, direction: direction);
+    if (verdict == PunchCheck.duplicate || verdict == PunchCheck.blocked) {
+      // Server already has this state (biometric/website) → drop.
+      await box.delete(punch.key);
+      return true;
+    }
+    if (verdict == PunchCheck.undecided) {
+      // Status unreachable → keep queued; the periodic task (network
+      // constrained) retries it later.
+      punch.retryCount++;
+      punch.errorMessage = 'Server truth unreachable — will retry';
+      await punch.save();
+      return true;
+    }
+    return false;
+  }
+
+  /// Keep the local punch-state prefs coherent after a successful sync so the
+  /// handler gates (`gf_last_punch_type == direction → skip`) never act on a
+  /// stale value.  Mirrors PunchStateInterceptor for the foreground paths.
+  static Future<void> _publishLocalState(OfflinePunch punch) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('gf_last_punch_type', punch.direction ?? 'In');
+      await prefs.setString(
+          'gf_last_punch_time', punch.createdAt.toIso8601String());
+    } catch (_) {}
+  }
 
   /// Handles 401 (token refresh + retry) and duplicates.  Returns true when
   /// the punch was resolved (deleted / marked failed), false on transient.

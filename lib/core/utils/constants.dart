@@ -30,4 +30,8 @@ class AppConstants {
 
   // Punch
   static const int qrTokenExpiryMinutes = 5;
+
+  /// Auto punches (geofence/WiFi) queued offline expire after this window —
+  /// an enter event + long outage is stale; punching hours later is wrong.
+  static const Duration autoPunchQueueTtl = Duration(minutes: 15);
 }

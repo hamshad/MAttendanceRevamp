@@ -1,6 +1,10 @@
 import 'package:dio/dio.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../api/api_endpoints.dart';
 import '../api/dio_client.dart';
+import '../punch/punch_coordinator.dart';
+import '../utils/constants.dart';
 import '../../models/offline_punch.dart';
 import 'offline_queue.dart';
 
@@ -43,11 +47,21 @@ class SyncService {
         }
 
         try {
+          // Server-truth gate — a queued punch may already be covered by a
+          // punch the app can't see (biometric machine / website).
+          if (await _shouldDrop(punch)) {
+            punch.errorMessage = 'Dropped — already covered by another source';
+            await punch.delete();
+            failed++;
+            continue;
+          }
+
           await _dioClient.dio.post(
             ApiEndpoints.punch,
             data: _buildBody(punch),
           );
           await punch.delete();
+          await _publishLocalState(punch);
           synced++;
         } on DioException catch (e) {
           if (e.type == DioExceptionType.badResponse) {
@@ -83,6 +97,39 @@ class SyncService {
       return 'GPS punch needs location — enable GPS and retry';
     }
     return null;
+  }
+
+  /// True when the queued punch is stale or already covered by a punch the
+  /// app can't see.  Auto punches (geofence/WiFi) also expire after
+  /// [AppConstants.autoPunchQueueTtl]; manual punches never expire but still
+  /// pass the server-truth gate.  Server unreachable → not dropped (the POST
+  /// will fail and the punch is kept with a retry bump, as before).
+  Future<bool> _shouldDrop(OfflinePunch punch) async {
+    final direction = punch.direction ?? 'In';
+    final isAuto = punch.method == 'GeofenceAuto' || punch.method == 'WiFi';
+
+    if (isAuto &&
+        DateTime.now().difference(punch.createdAt) >
+            AppConstants.autoPunchQueueTtl) {
+      return true;
+    }
+
+    final verdict = await PunchCoordinator.check(
+      dio: _dioClient.dio,
+      direction: direction,
+    );
+    return verdict == PunchCheck.duplicate || verdict == PunchCheck.blocked;
+  }
+
+  /// Keep the local punch-state prefs coherent after a successful sync so the
+  /// handler gates never act on a stale value.
+  Future<void> _publishLocalState(OfflinePunch punch) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('gf_last_punch_type', punch.direction ?? 'In');
+      await prefs.setString(
+          'gf_last_punch_time', punch.createdAt.toIso8601String());
+    } catch (_) {}
   }
 
   Map<String, dynamic> _buildBody(OfflinePunch punch) {
