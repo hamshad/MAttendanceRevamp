@@ -378,6 +378,14 @@ final monthlyStatsProvider = FutureProvider<MonthlyStats>((ref) async {
 
     int present = 0, absent = 0, late = 0, leave = 0;
     for (final day in items) {
+      // Lateness is a flag on the day, not a status string — the backend
+      // marks late days as `isLateIn: true` with status like "HalfDay" or
+      // "Present".  Checking the flag first keeps every late day counted
+      // as late instead of leaking into leave.
+      if (day.isLateIn) {
+        late++;
+        continue;
+      }
       final s = day.status;
       if (s == 'Present' || s == 'OnDuty' || s == 'WFH') {
         present++;
