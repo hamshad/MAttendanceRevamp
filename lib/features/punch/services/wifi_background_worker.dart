@@ -171,6 +171,14 @@ class WifiBackgroundWorker {
       return;
     }
 
+    // No active shift → alignment warnings are irrelevant.  Clear any
+    // leftover popups so a punched-out user at home (offline / GPS off)
+    // stays quiet.
+    if (!await _isPunchedIn()) {
+      await _clearNoConnectivityWarning();
+      await _clearBssidWarning();
+    }
+
     // Cooldown guard: prevent rapid punch decisions when the
     // fallback timer and connectivity stream fire close together.
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -796,6 +804,11 @@ class WifiBackgroundWorker {
     return prefs.getString(_kLastPunchType);
   }
 
+  /// True while the user is on an active shift — the only state in which
+  /// alignment warnings (airplane mode, hidden network) make sense.
+  Future<bool> _isPunchedIn() async =>
+      await _getLastPunchType() == 'In';
+
   Future<void> _setLastPunchType(String type) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kLastPunchType, type);
@@ -1103,7 +1116,10 @@ class WifiBackgroundWorker {
   static const _kBssidHiddenNotifId = 997;
 
   /// Airplane mode / no signal at all — punches will be saved and sent later.
+  /// Only nags while the user is punched in; at home, punched out, offline
+  /// is normal and stays quiet.
   Future<void> _warnNoConnectivity() async {
+    if (!await _isPunchedIn()) return;
     try {
       final prefs = await SharedPreferences.getInstance();
       if (prefs.getBool(_kNoConnectivityWarned) ?? false) return;
@@ -1133,8 +1149,10 @@ class WifiBackgroundWorker {
   }
 
   /// Connected to WiFi but Android hides the network name (location/GPS off).
-  /// Rate-limited so the 15s fallback poll doesn't spam the user.
+  /// Rate-limited so the 15s fallback poll doesn't spam the user.  Only nags
+  /// while punched in.
   Future<void> _warnBssidUnreadable() async {
+    if (!await _isPunchedIn()) return;
     try {
       final prefs = await SharedPreferences.getInstance();
       final now = DateTime.now().millisecondsSinceEpoch;

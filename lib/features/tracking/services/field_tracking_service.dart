@@ -661,6 +661,11 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
       FlutterLocalNotificationsPlugin();
   gpsStatusSub = Geolocator.getServiceStatusStream().listen((status) async {
     final prefs = await SharedPreferences.getInstance();
+    // No shift → no nagging: GPS-off alerts only matter while the user is
+    // punched in (auto punch must work).  At home, punched out, GPS being
+    // off is normal and must stay quiet.
+    final punchType = prefs.getString(_kPersistPunchType);
+    if (punchType != 'In') return;
     final gfEnabled = prefs.getBool('geofence_auto_enabled') ?? false;
     final ftEnabled = prefs.getBool('field_tracking_enabled') ?? false;
     final wifiEnabled = prefs.getBool('wifi_auto_punch_enabled_bg') ?? false;

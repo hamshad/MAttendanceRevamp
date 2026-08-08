@@ -19,6 +19,12 @@ final appNavigatorKey = GlobalKey<NavigatorState>();
 /// punch (GPS off, background-location permission revoked, airplane mode,
 /// WiFi network name hidden by the OS).
 ///
+/// **Punch-state gate:** alerts only matter while the user is on an active
+/// shift.  Punched in → broken settings surface immediately.  Punched out
+/// (e.g. at home) → every alert clears and stays quiet, including the
+/// background isolate's popups (996/997/998).  Re-evaluated every minute
+/// and on every punch (see `reEvaluate()`).
+///
 /// Surfaces alerts three ways:
 ///  - **In-app dialog** (critical alerts, app foreground) — pops over the
 ///    current screen with a "Fix it" button.
@@ -76,8 +82,23 @@ class AlignmentMonitor extends ChangeNotifier {
 
     await _evaluateAll();
     debugPrint('[ALIGN] start() — initial evaluation complete');
-    _permTimer = Timer.periodic(const Duration(minutes: 1), (_) => _evaluatePermission());
+    // Full re-evaluation each minute: catches punch-state transitions made
+    // by background isolates (geofence / wifi) that this isolate can't see
+    // as events.
+    _permTimer = Timer.periodic(const Duration(minutes: 1), (_) => _evaluateAll());
   }
+
+  /// True while the user is on an active shift.  Alignment alerts only make
+  /// sense then — GPS off / airplane mode at home (punched out) is normal.
+  Future<bool> _isPunchedIn() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('gf_last_punch_type') == 'In';
+  }
+
+  /// Re-evaluate every alert right now.  Called by the punch flow so a
+  /// punch-in immediately surfaces an existing broken setting and a
+  /// punch-out immediately silences everything.
+  Future<void> reEvaluate() => _evaluateAll();
 
   @override
   void dispose() {
@@ -91,6 +112,7 @@ class AlignmentMonitor extends ChangeNotifier {
   // ── Stream handlers ──────────────────────────────────────────────────────
 
   Future<void> _onGpsStatus(ServiceStatus status) async {
+    if (!await _isPunchedIn()) return; // no shift → no alert
     final gpsOn = status == ServiceStatus.enabled;
     final anyAuto = await _anyAutoFeatureEnabled();
     _setOrClear(
@@ -100,6 +122,7 @@ class AlignmentMonitor extends ChangeNotifier {
   }
 
   Future<void> _onConnectivityChanged(List<ConnectivityResult> results) async {
+    if (!await _isPunchedIn()) return; // no shift → no alert
     final wifiEnabled = await _wifiAutoEnabled();
     final none = results.isEmpty || results.every((r) => r == ConnectivityResult.none);
     _setOrClear(
@@ -114,6 +137,20 @@ class AlignmentMonitor extends ChangeNotifier {
   }
 
   Future<void> _evaluateAll() async {
+    // No active shift → all alignment alerts are irrelevant (GPS off /
+    // airplane mode at home, punched out, is normal).  Clear every alert
+    // and every popup — including the background isolate's — so a
+    // punched-out user stays quiet.
+    if (!await _isPunchedIn()) {
+      _active.clear();
+      notifyListeners();
+      for (final id in const [996, 997, 998, _permissionNotifId]) {
+        try {
+          await localNotifications.cancel(id);
+        } catch (_) {}
+      }
+      return;
+    }
     debugPrint('[ALIGN] _evaluateAll: gps');
     await _onGpsStatus(
       await Geolocator.isLocationServiceEnabled()

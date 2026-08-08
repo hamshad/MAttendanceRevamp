@@ -11,6 +11,7 @@ import '../../../core/offline/offline_providers.dart';
 import '../../../core/offline/offline_sync_manager.dart';
 import '../../../core/punch/punch_coordinator.dart';
 import '../../../core/utils/constants.dart';
+import '../../alignment/alignment_monitor.dart';
 import '../../punch/services/manual_geo_service.dart';
 import '../../punch/services/location_service.dart';
 import '../../../models/attendance.dart';
@@ -235,6 +236,9 @@ class PunchNotifier extends AsyncNotifier<void> {
 
       state = const AsyncData(null);
       ref.invalidate(attendanceStatusProvider);
+      // Punch state changed → alignment alerts (GPS off, airplane mode, …)
+      // surface immediately on punch-in and silence on punch-out.
+      await AlignmentMonitor.instance.reEvaluate();
       return result;
     } on DioException catch (e) {
       state = AsyncError(e, StackTrace.current);
