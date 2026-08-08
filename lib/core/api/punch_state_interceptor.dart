@@ -6,7 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 ///
 /// This is the SINGLE source of truth for punch direction across all
 /// isolates — manual, geofence, WiFi, foreground, background.
-/// Both [GeofenceBackgroundWorker] and [WifiBackgroundWorker] read these
+/// Both [GeofencePunchHandler] and [WifiBackgroundWorker] read these
 /// keys to gate duplicate punches.
 class PunchStateInterceptor extends Interceptor {
   static const _punchPath = 'attendance/punch';

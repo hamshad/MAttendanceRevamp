@@ -264,7 +264,7 @@ class _MainShellState extends ConsumerState<MainShell>
     }
   }
 
-  // ── Geofence Scheduler lifecycle (independent of GeofenceAutoPunchService) ──
+  // ── Geofence Scheduler lifecycle (independent of GeofenceMonitor) ──
 
   /// Fetch shifts, cache them, and start the combined background service if
   /// within the current shift window.  Runs on every app start so that the

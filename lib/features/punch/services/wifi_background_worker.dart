@@ -19,7 +19,7 @@ import '../../../models/office.dart';
 /// Background WiFi auto-punch worker.
 ///
 /// Runs inside the same flutter_background_service isolate as
-/// GeofenceBackgroundWorker. Monitors WiFi connect/disconnect via
+/// GeofenceMonitor. Monitors WiFi connect/disconnect via
 /// connectivity_plus stream + 15s fallback poll. Matches current BSSID
 /// against persisted wifiRouters on each office. Punches IN on match,
 /// OUT on disconnect.
@@ -58,7 +58,7 @@ class WifiBackgroundWorker {
   static const int _cooldownMs = 10000;
   int _lastActionTimestamp = 0;
 
-  // SharedPreferences keys — shared with GeofenceBackgroundWorker
+  // SharedPreferences keys — shared with GeofenceMonitor
   // so both workers have a single source of truth for punch state
   static const _kLastBssid = 'wifi_bg_last_bssid';
   static const _kLastPunchType = 'gf_last_punch_type';
@@ -419,7 +419,7 @@ class WifiBackgroundWorker {
   /// Fetch todayStatus from the server once and persist the current punch
   /// state so the worker never acts on a stale local 'In' carried over from
   /// a previous day / session (e.g. alarm-manager wake while at home).
-  /// Mirrors [GeofenceBackgroundWorker._syncPunchStateFromServer].
+  /// Mirrors [GeofencePunchHandler._syncPunchStateFromServer].
   Future<void> _syncPunchStateFromServer() async {
     try {
       final dio = await _buildDio();

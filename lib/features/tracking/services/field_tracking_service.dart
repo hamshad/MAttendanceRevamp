@@ -28,7 +28,7 @@ import 'filters/location_filter.dart';
 /// Updated in [MainShell] by listening to [FieldTrackingService.runningStream].
 final fieldTrackingRunningProvider = StateProvider<bool>((ref) => false);
 
-// ── SharedPreferences keys written by GeofenceAutoPunchService ────────────────
+// ── SharedPreferences keys written by GeofenceMonitor ─────────────────────────
 
 /// Key where the geofence service stores the nearest office latitude.
 const _kDbgGeofenceLat    = 'dbg_geofence_lat';
@@ -53,7 +53,7 @@ const _kBgRefreshLock = 'bg_refresh_lock';
 /// The combined entrypoint reads this to decide whether to send pings.
 const _kFieldTrackingEnabled = 'field_tracking_enabled';
 
-/// Persisted punch-state keys (mirrors GeofenceBackgroundWorker).
+/// Persisted punch-state keys (mirrors GeofencePunchHandler).
 const _kPersistPunchType  = 'gf_last_punch_type';
 const _kPersistPunchTime  = 'gf_last_punch_time';
 const _kPersistPunchOffice = 'gf_last_punch_office';
@@ -272,7 +272,7 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
 
   // ── Debug helper ──────────────────────────────────────────────────────────
 
-  /// Reads geofence context written by [GeofenceAutoPunchService] and emits a
+  /// Reads geofence context written by [GeofenceMonitor] and emits a
   /// `trackingDebug` event back to the main isolate (→ [FieldTrackingService.debugStream]).
   Future<void> emitDebug({
     required String event,
