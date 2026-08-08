@@ -18,11 +18,9 @@ import '../../../core/api/api_endpoints.dart';
 import '../../../core/utils/constants.dart';
 import '../../../core/utils/location_precision.dart';
 import '../../../models/offline_punch.dart';
-import '../../punch/services/geofence_background_worker.dart';
 import '../../punch/services/wifi_background_worker.dart';
 import '../models/location_result.dart';
 import 'filters/location_filter.dart';
-import 'filters/confidence_scorer.dart';
 
 // ── Running state ─────────────────────────────────────────────────────────────
 
@@ -229,10 +227,6 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
   StreamSubscription<Position>? positionSub;
   StreamSubscription<ServiceStatus>? gpsStatusSub;
   Timer? timer;
-
-  // ── Geofence auto-punch worker ─────────────────────────────────────────────
-  final geoWorker = GeofenceBackgroundWorker(service);
-  debugPrint('[GF_BG_ENTRY] GeoWorker created');
 
   // ── WiFi auto-punch background worker ──────────────────────────────────────
   final wifiWorker = WifiBackgroundWorker(service);
@@ -654,10 +648,7 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
         );
       }
 
-      // ── Geofence auto-punch check ──────────────────────────────────────────
-      final gfConfidence = ConfidenceScorer.score(filtered, trackingState, jumpScore: filtered.jumpScore);
-      geoWorker.onLocationFix(filtered, trackingState, gfConfidence);
-
+      // ── Update foreground notification (punch state / accuracy) ──────────
       await updateNotification(loc: filtered);
     },
     onError: (_) {},
@@ -765,53 +756,15 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
   await emitDebug(event: 'service_start', reason: 'Background service started');
 
   // ── Geofence worker data load ────────────────────────────────────────────────
-  debugPrint('[GF_BG_ENTRY] Calling geoWorker.loadData()...');
-  await geoWorker.loadData();
-  debugPrint('[GF_BG_ENTRY] geoWorker.loadData() complete');
+  // Geofence auto-punch no longer runs here — it is OS-native via
+  // native_geofence (geofenceTriggered in geofence_monitor.dart), registered
+  // from the main isolate by MainShell.  This service only does field-tracking
+  // pings + WiFi auto-punch.
+  debugPrint('[GF_BG_ENTRY] Geofence handled natively (native_geofence)');
 
   // ── Start WiFi background worker ─────────────────────────────────────────
   wifiWorker.start();
   debugPrint('[GF_BG_ENTRY] WiFi background worker started');
-
-  // ── Proactive initial location check ──────────────────────────────────────
-  // On first start (fresh install, new login, app restart), the GPS stream may
-  // take 10-60s for a cold fix.  If the user is already inside an office zone,
-  // we want to punch IN immediately rather than waiting for the first stream
-  // fix.  A single `getCurrentPosition` call resolves faster than the stream.
-  try {
-    debugPrint('[GF_BG_ENTRY] Proactive location check...');
-    final initPos = await Geolocator.getCurrentPosition(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        timeLimit: Duration(seconds: 10),
-      ),
-    );
-    {
-      final initRaw = LocationResult(
-        latitude: initPos.latitude,
-        longitude: initPos.longitude,
-        accuracy: initPos.accuracy,
-        speed: initPos.speed,
-        altitude: initPos.altitude,
-        heading: initPos.heading,
-        timestamp: initPos.timestamp,
-      );
-      if (initRaw.accuracy <= LocationFilter.MIN_ACCURACY) {
-        final initFiltered = locationFilter.process(initRaw, trackingState);
-        if (initFiltered != null) {
-          trackingState = locationFilter.evaluateState(initFiltered, trackingState);
-          final initConfidence = ConfidenceScorer.score(
-            initFiltered, trackingState,
-            jumpScore: initFiltered.jumpScore,
-          );
-          debugPrint('[GF_BG_ENTRY] Initial fix — lat=${initFiltered.latitude.toStringAsFixed(5)} acc=${initFiltered.accuracy.toStringAsFixed(1)}m conf=${initConfidence.toStringAsFixed(2)}');
-          geoWorker.onLocationFix(initFiltered, trackingState, initConfidence);
-        }
-      }
-    }
-  } catch (e) {
-    debugPrint('[GF_BG_ENTRY] Proactive location check failed: $e');
-  }
 
   await updateNotification();
   debugPrint('[GF_BG_ENTRY] Initial setup complete — monitoring active');

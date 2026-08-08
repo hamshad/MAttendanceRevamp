@@ -4,14 +4,14 @@ import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart' as ph;
 import 'dart:io';
 
-import '../../punch/services/geofence_auto_punch_service.dart';
+import '../../punch/services/geofence_monitor.dart';
 
 // ── Provider ──────────────────────────────────────────────────────────────────
 
 /// Reactive toggle — backed by Hive via [GeofenceMonitorService.isEnabled].
 /// Changes here are listened to in MainShell to start/stop the service.
 final geofenceEnabledProvider = StateProvider<bool>(
-  (ref) => GeofenceAutoPunchService.isEnabled,
+  (ref) => GeofenceMonitor.isEnabled,
 );
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -154,7 +154,7 @@ class _GeofenceSettingsScreenState
       await _requestNotificationPermission();
     }
 
-    await GeofenceAutoPunchService.setEnabled(value);
+    await GeofenceMonitor.setEnabled(value);
     ref.read(geofenceEnabledProvider.notifier).state = value;
   }
 

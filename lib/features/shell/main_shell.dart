@@ -31,7 +31,7 @@ import '../history/screens/regularization_screen.dart';
 import '../leave/screens/leave_screen.dart';
 import '../notifications/providers/notifications_provider.dart';
 import '../notifications/screens/notifications_screen.dart';
-import '../punch/services/geofence_auto_punch_service.dart';
+import '../punch/services/geofence_monitor.dart';
 import '../punch/services/geofence_scheduler.dart';
 import '../punch/services/shift_service.dart';
 import '../punch/services/wifi_auto_punch_service.dart';
@@ -61,7 +61,6 @@ class MainShell extends ConsumerStatefulWidget {
 
 class _MainShellState extends ConsumerState<MainShell>
     with WidgetsBindingObserver {
-  GeofenceAutoPunchService? _geofenceService;
   WifiAutoPunchService? _wifiAutoService;
   StreamSubscription<bool>? _trackingRunSub;
   StreamSubscription<Map<String, dynamic>>? _punchSub;
@@ -153,7 +152,7 @@ class _MainShellState extends ConsumerState<MainShell>
       //    The combined service is started by _initGeofenceScheduler() below
       //    if within the shift window.
       SharedPreferences.getInstance().then((prefs) {
-        final isEnabled = GeofenceAutoPunchService.isEnabled;
+        final isEnabled = GeofenceMonitor.isEnabled;
         debugPrint('SHELL_Lifecycle: syncing geofence_auto_enabled=$isEnabled');
         prefs.setBool('geofence_auto_enabled', isEnabled);
       });
@@ -173,7 +172,7 @@ class _MainShellState extends ConsumerState<MainShell>
 
   Future<void> _initGeofence() async {
     if (!mounted) return;
-    debugPrint('SHELL: _initGeofence() triggered — GeofenceAutoPunchService.isEnabled=${GeofenceAutoPunchService.isEnabled}');
+    debugPrint('SHELL: _initGeofence() triggered — GeofenceMonitor.isEnabled=${GeofenceMonitor.isEnabled}');
 
     final perms = ref.read(accessPermissionsProvider).value;
     if (perms == null) {
@@ -184,9 +183,10 @@ class _MainShellState extends ConsumerState<MainShell>
     }
     if (!perms.allowGeofenceAuto) {
       debugPrint('SHELL: Geofence not permitted by backend — stopping geofence service/alarms');
-      // Definitive denial → revoke the background path: cancel shift alarms
-      // and tell the running service geofence is off.  The combined service
-      // stays alive if field tracking needs it.
+      // Definitive denial → revoke the background path: cancel shift alarms,
+      // unregister OS geofences, and tell the running service geofence is off.
+      // The combined service stays alive if field tracking needs it.
+      await GeofenceMonitor.unregisterAll();
       await GeofenceScheduler.cancel();
       FieldTrackingService.notifyGeofenceToggle();
       final prefs = await SharedPreferences.getInstance();
@@ -197,11 +197,11 @@ class _MainShellState extends ConsumerState<MainShell>
       return;
     }
 
-    bool isEnabled = GeofenceAutoPunchService.isEnabled;
+    bool isEnabled = GeofenceMonitor.isEnabled;
 
-    if (!GeofenceAutoPunchService.hasUserToggled) {
+    if (!GeofenceMonitor.hasUserToggled) {
       debugPrint('SHELL: First launch — auto-enabling geofence');
-      await GeofenceAutoPunchService.setEnabled(true);
+      await GeofenceMonitor.setEnabled(true);
       ref.read(geofenceEnabledProvider.notifier).state = true;
       isEnabled = true;
     }
@@ -212,10 +212,6 @@ class _MainShellState extends ConsumerState<MainShell>
     final readback = prefs.getBool('geofence_auto_enabled');
     debugPrint('SHELL: Geofence enabled in settings: $isEnabled, readback from prefs: $readback');
 
-    // Stop the legacy GeofenceAutoPunchService if it was started by a previous version
-    _geofenceService?.stop();
-    _geofenceService = null;
-
     if (isEnabled) {
       if (!mounted) return;
       if (!await FieldTrackingService.isRunning) {
@@ -224,27 +220,13 @@ class _MainShellState extends ConsumerState<MainShell>
       } else {
         debugPrint('SHELL: Combined service already running');
       }
+      // Register OS geofences (native_geofence). The plugin's
+      // initialTriggers:{enter} re-arms catch-up punches for zones the user
+      // is already inside, so this is safe to run on every resume.
+      await GeofenceMonitor.registerZones(providedDio: ref.read(dioClientProvider).dio);
+    } else {
+      await GeofenceMonitor.unregisterAll();
     }
-  }
-
-  Future<void> _startGeofenceService() async {
-    if (!mounted) return;
-    if (Platform.isAndroid) {
-      await _ensureBatteryOptimizationExempt();
-    }
-    if (!mounted) return;
-
-    _geofenceService = GeofenceAutoPunchService(
-      dio: ref.read(dioClientProvider).dio,
-      notifications: localNotifications,
-      onPunch: () {
-        if (mounted) {
-          ref.invalidate(attendanceStatusProvider);
-        }
-      },
-    );
-    final started = await _geofenceService!.start();
-    if (!started) _geofenceService = null;
   }
 
   void _onGeofenceToggle(bool? prev, bool next) async {
@@ -263,12 +245,12 @@ class _MainShellState extends ConsumerState<MainShell>
         debugPrint('SHELL_Toggle: starting combined service');
         await FieldTrackingService.start();
       }
+      await GeofenceMonitor.registerZones(providedDio: ref.read(dioClientProvider).dio);
     } else {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('geofence_auto_enabled', false);
 
-      _geofenceService?.stop();
-      _geofenceService = null;
+      await GeofenceMonitor.unregisterAll();
 
       final ftEnabled = prefs.getBool('field_tracking_enabled') ?? false;
       debugPrint('SHELL_Toggle: geofence OFF, field_tracking_enabled=$ftEnabled');
@@ -531,7 +513,6 @@ class _MainShellState extends ConsumerState<MainShell>
         WifiAutoPunchService.setManualOutOnWifi();
         WifiAutoPunchService.clearLastInMethod();
         _stopFieldTracking();
-        _geofenceService?.stop();
         ref.read(manualPunchOutProvider.notifier).state = false;
       } else {
         SharedPreferences.getInstance().then((sp) async {
@@ -540,7 +521,6 @@ class _MainShellState extends ConsumerState<MainShell>
             debugPrint('SHELL_Punch: auto punch OUT after shift end -> stopping geofence');
             await sp.remove('gf_shift_ended');
             _stopFieldTracking();
-            _geofenceService?.stop();
           } else {
             debugPrint('SHELL_Punch: auto punch OUT -> keeping geofence running for re-entry');
           }
@@ -714,7 +694,7 @@ class _MainShellState extends ConsumerState<MainShell>
 
     return WillStartForegroundTask(
       onWillStart: () async {
-        return GeofenceAutoPunchService.isEnabled;
+        return GeofenceMonitor.isEnabled;
       },
       androidNotificationOptions: AndroidNotificationOptions(
         channelId: 'geofence_service_channel',
@@ -1208,7 +1188,7 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                     return;
                   }
                 }
-                await GeofenceAutoPunchService.setEnabled(value);
+                await GeofenceMonitor.setEnabled(value);
                 (await SharedPreferences.getInstance()).setBool('geofence_auto_enabled', value);
                 ref.read(geofenceEnabledProvider.notifier).state = value;
               },

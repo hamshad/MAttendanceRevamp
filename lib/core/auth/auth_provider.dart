@@ -15,6 +15,7 @@ import 'token_storage.dart';
 import 'biometric_service.dart';
 import '../utils/app_logger.dart';
 import '../services/office_data_service.dart';
+import '../../features/punch/services/geofence_monitor.dart';
 import '../../features/punch/services/geofence_scheduler.dart';
 import '../offline/offline_sync_manager.dart';
 
@@ -297,6 +298,8 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
     }
     await GeofenceScheduler.cancel();
     await GeofenceScheduler.stopGeofenceService();
+    // Unregister OS geofences so no events fire while logged out.
+    await GeofenceMonitor.unregisterAll();
     // No queued punches to sync after logout — stop the background manager.
     await OfflineSyncManager.cancel();
     await _tokenStorage.clearTokens();
