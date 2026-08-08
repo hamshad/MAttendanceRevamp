@@ -102,16 +102,24 @@ Shift _makeShift({
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Mirrors the delay-computation logic in [GeofenceScheduler.scheduleNextShift].
+///
+/// NOTE: [Shift.todayStart]/[Shift.todayEnd] are computed against the REAL
+/// clock, so the mirrors below derive the day from the passed `now` — keeps
+/// these tests date-independent (they used to drift stale as dates passed).
 Duration _computeDelay(Shift shift, {DateTime? now}) {
   now ??= DateTime.now();
-  final start = shift.todayStart;
+  final parts = shift.startTime.split(':');
+  final start = DateTime(
+    now.year, now.month, now.day,
+    int.parse(parts[0]), int.parse(parts[1]),
+    parts.length > 2 ? int.parse(parts[2]) : 0,
+  );
 
   if (now.isBefore(start)) {
     return start.difference(now);
   }
 
   final tomorrow = now.add(const Duration(days: 1));
-  final parts = shift.startTime.split(':');
   final nextStart = DateTime(
     tomorrow.year, tomorrow.month, tomorrow.day,
     int.parse(parts[0]), int.parse(parts[1]),
@@ -123,8 +131,19 @@ Duration _computeDelay(Shift shift, {DateTime? now}) {
 /// Mirrors the window-check logic in [GeofenceScheduler.startIfWithinShiftWindow].
 bool _isWithinShiftWindow(Shift shift, {DateTime? now}) {
   now ??= DateTime.now();
-  final start = shift.todayStart;
-  final end = shift.todayEnd;
+  final startParts = shift.startTime.split(':');
+  final endParts = shift.endTime.split(':');
+  final start = DateTime(
+    now.year, now.month, now.day,
+    int.parse(startParts[0]), int.parse(startParts[1]),
+    startParts.length > 2 ? int.parse(startParts[2]) : 0,
+  );
+  var end = DateTime(
+    now.year, now.month, now.day,
+    int.parse(endParts[0]), int.parse(endParts[1]),
+    endParts.length > 2 ? int.parse(endParts[2]) : 0,
+  );
+  if (shift.isOvernight) end = end.add(const Duration(days: 1));
   return !now.isBefore(start) && now.isBefore(end);
 }
 
