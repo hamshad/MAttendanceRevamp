@@ -41,6 +41,42 @@ class _MockInterceptor extends Interceptor {
   String? lastDirection;
   Map<String, dynamic>? lastPayload;
 
+  /// Model-valid /attendance/status payload (EmployeeStatus.fromJson).
+  Map<String, dynamic> _statusJson() {
+    final punches = <Map<String, dynamic>>[];
+    if (isPunchedIn) {
+      punches.add({
+        'id': 1,
+        'punchTime': '2026-08-08T09:00:00.000Z',
+        'punchType': 'In',
+        'method': 'Biometric',
+      });
+    }
+    if (isPunchedOut) {
+      punches.add({
+        'id': 2,
+        'punchTime': '2026-08-08T18:00:00.000Z',
+        'punchType': 'Out',
+        'method': 'Biometric',
+      });
+    }
+    return {
+      'empId': 1,
+      'fullName': 'Test',
+      'date': '2026-08-08',
+      'status': 'Present',
+      'firstInTime': isPunchedIn ? '2026-08-08T09:00:00.000Z' : null,
+      'lastOutTime': isPunchedOut ? '2026-08-08T18:00:00.000Z' : null,
+      'workMinutes': 0,
+      'breakMinutes': 0,
+      'isLateIn': false,
+      'isOnBreak': false,
+      'currentShift': 'Morning',
+      'officeName': 'HQ',
+      'todaysPunches': punches,
+    };
+  }
+
   @override
   void onRequest(
     RequestOptions options,
@@ -61,13 +97,7 @@ class _MockInterceptor extends Interceptor {
           Response(
             requestOptions: options,
             statusCode: 200,
-            data: {
-              'data': {
-                'isPunchedIn': isPunchedIn,
-                'isPunchedOut': isPunchedOut,
-                'hasNotPunchedIn': hasNotPunchedIn,
-              },
-            },
+            data: {'data': _statusJson()},
           ),
         );
       }
@@ -279,6 +309,7 @@ void main() {
     test('exit + fresh fix outside → punch OUT', () async {
       SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'In'));
       fakeGeo.position = _fixAt(0.0027, 0.0027); // ~300m away
+      mock.isPunchedIn = true; // punched in earlier today (e.g. biometric)
 
       final h = GeofencePunchHandler.forTest(_dioWith(mock));
       await h.handleEvent(_params(_officeId, GeofenceEvent.exit));
@@ -357,6 +388,76 @@ void main() {
       expect(mock.punchCalls, 1);
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('gf_last_punch_type'), isNull);
+    });
+  });
+
+  group('PunchCoordinator gate', () {
+    test('server unreachable on IN → queued offline, never dropped', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs());
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      mock.failStatus = true;
+
+      final queued = <String>[];
+      final h = GeofencePunchHandler.forTest(
+        _dioWith(mock),
+        queueOverride: (direction, lat, lng) async {
+          queued.add(direction);
+          return true;
+        },
+      );
+      await h.handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+      expect(queued, ['In']);
+    });
+
+    test('server unreachable + queue unavailable → no crash, no punch',
+        () async {
+      SharedPreferences.setMockInitialValues(_basePrefs());
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      mock.failStatus = true;
+
+      final h = GeofencePunchHandler.forTest(
+        _dioWith(mock),
+        queueOverride: (direction, lat, lng) async => false,
+      );
+      await h.handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+    });
+
+    test('server unreachable on OUT → still attempts punch (falls to queue)',
+        () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'In'));
+      fakeGeo.position = _fixAt(0.0027, 0.0027);
+      mock.failStatus = true;
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.exit));
+
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'Out');
+    });
+
+    test('biometric IN already recorded → skip, no punch, no queue', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs());
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      mock.isPunchedIn = true; // punch made via biometric machine
+
+      var queued = false;
+      final h = GeofencePunchHandler.forTest(
+        _dioWith(mock),
+        queueOverride: (direction, lat, lng) async {
+          queued = true;
+          return true;
+        },
+      );
+      await h.handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+      expect(queued, isFalse);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('gf_last_punch_type'), 'In');
     });
   });
 

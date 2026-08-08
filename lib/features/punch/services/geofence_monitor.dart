@@ -14,6 +14,7 @@ import '../../../core/api/api_endpoints.dart';
 import '../../../core/api/punch_state_interceptor.dart';
 import '../../../core/offline/offline_queue.dart';
 import '../../../core/offline/offline_sync_manager.dart';
+import '../../../core/punch/punch_coordinator.dart';
 import '../../../core/utils/constants.dart';
 import '../../../models/client_site.dart';
 import '../../../models/office.dart';
@@ -312,18 +313,32 @@ Future<void> geofenceTriggered(GeofenceCallbackParams params) async {
 }
 
 class GeofencePunchHandler {
-  GeofencePunchHandler._({Dio? testDio}) : _testDio = testDio;
+  GeofencePunchHandler._({
+    Dio? testDio,
+    Future<bool> Function(String direction, double lat, double lng)?
+        queueOverride,
+  })  : _testDio = testDio,
+        _queueOverride = queueOverride;
   static GeofencePunchHandler? _instance;
   static GeofencePunchHandler get instance =>
       _instance ??= GeofencePunchHandler._();
 
   /// Test seam — builds a handler whose HTTP calls route through [dio].
   @visibleForTesting
-  static GeofencePunchHandler forTest(Dio dio) =>
-      GeofencePunchHandler._(testDio: dio);
+  static GeofencePunchHandler forTest(
+    Dio dio, {
+    Future<bool> Function(String direction, double lat, double lng)?
+        queueOverride,
+  }) =>
+      GeofencePunchHandler._(testDio: dio, queueOverride: queueOverride);
 
   /// Test seam — overrides the self-built background dio.
   final Dio? _testDio;
+
+  /// Test seam — replaces the Hive-backed offline queue (Hive is unavailable
+  /// in unit tests, so the queue decision needs injection to be testable).
+  final Future<bool> Function(String direction, double lat, double lng)?
+      _queueOverride;
 
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
@@ -395,7 +410,9 @@ class GeofencePunchHandler {
       return;
     }
 
-    // ── Build dio (token mirror + 401 refresh + punch-state interceptor) ─
+    // ── Server-truth gate (PunchCoordinator) ─────────────────────────────
+    // Catches punches the app can't see (biometric machine / website) and
+    // prevents the toggle corruption.  See punch_coordinator.dart.
     final dio = await _buildDio(prefs);
     if (dio == null) {
       debugPrint('[GF_MON] ${zone.id}: no token — skipping $direction');
@@ -403,39 +420,35 @@ class GeofencePunchHandler {
     }
 
     final now = DateTime.now();
+    final verdict =
+        await PunchCoordinator.check(dio: dio, direction: direction);
 
-    // ── Gate: server status ─────────────────────────────────────────────
-    Map<String, dynamic>? status;
-    try {
-      final resp = await dio.get(ApiEndpoints.todayStatus);
-      status = resp.data['data'] as Map<String, dynamic>?;
-    } catch (e) {
-      debugPrint('[GF_MON] Status check failed: $e');
+    if (verdict == PunchCheck.duplicate) {
+      debugPrint('[GF_MON] ${zone.id}: skip $direction — already $direction via another source');
+      await _persistPunchState(prefs, direction, now, zone.name);
+      if (direction == 'In') await _clearShiftEndedFlag(prefs);
+      await _emitSkipNotification(direction, zone,
+          'Already punched $direction (biometric/website)');
+      return;
     }
-
-    if (direction == 'In') {
-      if (status == null) {
-        debugPrint('[GF_MON] ${zone.id}: skip IN — cannot reach server');
-        return;
-      }
-      if (status['isPunchedIn'] == true) {
-        debugPrint('[GF_MON] ${zone.id}: skip IN — already punched in');
-        await _persistPunchState(prefs, 'In', now, zone.name);
-        await _clearShiftEndedFlag(prefs);
-        return;
-      }
+    if (verdict == PunchCheck.blocked) {
+      debugPrint('[GF_MON] ${zone.id}: skip $direction — blocked by server state');
+      await _emitSkipNotification(
+          direction, zone, direction == 'Out' ? 'No IN punch today' : 'Break in progress');
+      return;
     }
-    if (direction == 'Out') {
-      if (status != null) {
-        if (status['isPunchedOut'] == true) {
-          debugPrint('[GF_MON] ${zone.id}: skip OUT — already punched out');
-          await _persistPunchState(prefs, 'Out', now, zone.name);
-          return;
+    if (verdict == PunchCheck.undecided) {
+      // Server unreachable.  IN → queue for a later verified sync (never
+      // silently drop).  OUT → proceed: the punch POST itself will fail and
+      // fall back to the offline queue with current coordinates.
+      if (direction == 'In') {
+        debugPrint('[GF_MON] ${zone.id}: server unreachable — queuing IN offline');
+        final queued = await _queueOfflinePunch(
+            'In', verifiedFix.latitude, verifiedFix.longitude);
+        if (!queued) {
+          debugPrint('[GF_MON] ${zone.id}: queue unavailable — IN lost');
         }
-        if (status['hasNotPunchedIn'] == true) {
-          debugPrint('[GF_MON] ${zone.id}: skip OUT — no IN today');
-          return;
-        }
+        return;
       }
     }
 
@@ -629,6 +642,31 @@ class GeofencePunchHandler {
     } catch (_) {}
   }
 
+  /// Informs the user why the punch was skipped — always a short, direct
+  /// message, never a big block of text.
+  Future<void> _emitSkipNotification(
+      String direction, GeofenceZone zone, String reason) async {
+    _emit('skipped', zone: zone, direction: direction, reason: reason);
+    await _ensureNotifications();
+    try {
+      await _notifications.show(
+        999,
+        'Punch skipped',
+        'Already ${direction == 'In' ? 'punched in' : 'punched out'} via another source',
+        NotificationDetails(
+          android: AndroidNotificationDetails(
+            'geofence_auto_punch',
+            'Geofence Auto-Punch',
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+        ),
+      );
+    } catch (e) {
+      debugPrint('[GF_MON] Skip notification failed: $e');
+    }
+  }
+
   Future<void> _showPunchNotification(String direction, String officeName) async {
     await _ensureNotifications();
     final isIn = direction == 'In';
@@ -709,6 +747,7 @@ class GeofencePunchHandler {
     double lat,
     double lng,
   ) async {
+    if (_queueOverride != null) return _queueOverride!(direction, lat, lng);
     try {
       await _ensureHive();
       final punch = OfflinePunch()
