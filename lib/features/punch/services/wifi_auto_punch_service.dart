@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/offline/offline_queue.dart';
 import '../../../core/offline/offline_sync_manager.dart';
+import '../../../core/punch/punch_coordinator.dart';
 import '../../../core/services/office_data_service.dart';
 import '../../../core/utils/constants.dart';
 import '../../../core/utils/app_logger.dart';
@@ -241,8 +242,17 @@ class WifiAutoPunchService {
     return prefs.getString(_pendingOutBssidKey) ?? '';
   }
 
-  Future<void> _savePendingOut() async {
-    AppLogger.i('WIFI_AUTO: Saving pending OUT (no internet)');
+  /// Server-truth gate — true when the server already has this direction
+  /// (biometric machine / website) or the punch is invalid (OUT with no IN,
+  /// IN mid-break).  Offline → false: the POST itself will fail and the
+  /// existing failure handling queues / clears as before.
+  Future<bool> _serverSaysDuplicate(String direction) async {
+    final verdict =
+        await PunchCoordinator.check(dio: _dio, direction: direction);
+    return verdict == PunchCheck.duplicate || verdict == PunchCheck.blocked;
+  }
+
+  Future<void> _savePendingOut() async {    AppLogger.i('WIFI_AUTO: Saving pending OUT (no internet)');
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_pendingOutKey, true);
     await prefs.setString(_pendingOutTsKey, DateTime.now().toIso8601String());
@@ -277,6 +287,15 @@ class WifiAutoPunchService {
       try {
         ip = await _wifiService.getWifiIP() ?? '0.0.0.0';
       } catch (_) {}
+
+      // Server-truth gate — a biometric/website OUT may already exist.
+      if (await _serverSaysDuplicate('Out')) {
+        await _clearPendingOut();
+        await setLastPunchStatus('Out');
+        await setCurrentOfficeName('');
+        onPunch?.call();
+        return;
+      }
 
       final response = await _dio.post(ApiEndpoints.punch, data: {
         'Method': 'WiFi',
@@ -523,6 +542,16 @@ class WifiAutoPunchService {
       }
 
       try {
+        // Server-truth gate — a biometric/website IN may already exist.
+        if (await _serverSaysDuplicate('In')) {
+          await setLastPunchStatus('In');
+          await setCurrentOfficeName(matchedOffice.name);
+          await clearManualIn();
+          await markLastInByWifi();
+          AppLogger.w('WIFI_AUTO: Already IN via another source — syncing local state');
+          return;
+        }
+
         // Get IP Address
         String ip = '0.0.0.0';
         try {
@@ -577,6 +606,14 @@ class WifiAutoPunchService {
         AppLogger.i('WIFI_AUTO: Left office WiFi → Punch OUT');
         final mac = _getRegisteredOfficeMac(currentOfficeName);
         try {
+          // Server-truth gate — a biometric/website OUT may already exist.
+          if (await _serverSaysDuplicate('Out')) {
+            await setLastPunchStatus('Out');
+            await setCurrentOfficeName('');
+            AppLogger.w('WIFI_AUTO: Already OUT via another source — syncing local state');
+            return;
+          }
+
           String ip = '0.0.0.0';
           try {
             ip = await _wifiService.getWifiIP() ?? '0.0.0.0';
@@ -667,6 +704,16 @@ class WifiAutoPunchService {
       final mac = _getRegisteredOfficeMac(currentOfficeName);
   
       try {
+        // Server-truth gate — a biometric/website OUT may already exist.
+        if (await _serverSaysDuplicate('Out')) {
+          await setLastPunchStatus('Out');
+          await setCurrentOfficeName('');
+          await clearManualIn();
+          await clearLastInMethod();
+          AppLogger.w('WIFI_AUTO: Already OUT via another source — syncing local state');
+          return;
+        }
+
         String ip = '0.0.0.0';
         try {
           ip = await _wifiService.getWifiIP() ?? '0.0.0.0';

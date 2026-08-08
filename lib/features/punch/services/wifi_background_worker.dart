@@ -12,7 +12,9 @@ import '../../../core/api/api_endpoints.dart';
 import '../../../core/api/punch_state_interceptor.dart';
 import '../../../core/offline/offline_queue.dart';
 import '../../../core/offline/offline_sync_manager.dart';
+import '../../../core/punch/punch_coordinator.dart';
 import '../../../core/utils/constants.dart';
+import '../../../models/attendance.dart';
 import '../../../models/offline_punch.dart';
 import '../../../models/office.dart';
 
@@ -428,18 +430,16 @@ class WifiBackgroundWorker {
         return;
       }
       final resp = await dio.get(ApiEndpoints.todayStatus);
-      final status = resp.data['data'] as Map<String, dynamic>?;
-      if (status == null) return;
+      final data = resp.data['data'] as Map<String, dynamic>?;
+      if (data == null) return;
+      final status = EmployeeStatus.fromJson(data);
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.reload();
-      if (status['isPunchedIn'] == true) {
-        await prefs.setString(_kLastPunchType, 'In');
-        debugPrint('[WIFI_BG] Synced punch state — IN (from server)');
-      } else if (status['isPunchedOut'] == true ||
-          status['hasNotPunchedIn'] == true) {
-        await prefs.setString(_kLastPunchType, 'Out');
-        debugPrint('[WIFI_BG] Synced punch state — OUT (from server)');
+      final last = PunchCoordinator.lastPunchType(status);
+      if (last != null && last != 'BreakStart') {
+        await prefs.setString(_kLastPunchType, last);
+        debugPrint('[WIFI_BG] Synced punch state — $last (from server)');
       }
     } catch (e) {
       debugPrint('[WIFI_BG] Failed to sync punch state from server: $e');
@@ -545,6 +545,19 @@ class WifiBackgroundWorker {
         return;
       }
 
+      // Server-truth gate — a biometric/website IN may already exist.
+      final verdict =
+          await PunchCoordinator.check(dio: dio, direction: 'In');
+      if (verdict == PunchCheck.duplicate) {
+        debugPrint('[WIFI_BG] skip IN — already punched in (biometric/website)');
+        await _setLastPunchType('In');
+        return;
+      }
+      if (verdict == PunchCheck.blocked) {
+        debugPrint('[WIFI_BG] skip IN — blocked (break in progress?)');
+        return;
+      }
+
       String ip = '0.0.0.0';
       try {
         ip = await NetworkInfo().getWifiIP() ?? '0.0.0.0';
@@ -604,30 +617,44 @@ class WifiBackgroundWorker {
   /// Returns `true` if punch was accepted (200/201) or duplicate.
   Future<bool> _punchOut(String bssid) async {
     _lastActionTimestamp = DateTime.now().millisecondsSinceEpoch;
-    final officeName = await _getMatchedOffice();
-    final officeMac = _getOfficeMac(officeName);
-    try {
-      final dio = await _buildDio();
-      if (dio == null) {
-        debugPrint('[WIFI_BG] No auth token — cannot punch OUT');
-        return false;
-      }
-
-      String ip = '0.0.0.0';
+      final officeName = await _getMatchedOffice();
+      final officeMac = _getOfficeMac(officeName);
       try {
-        ip = await NetworkInfo().getWifiIP() ?? '0.0.0.0';
-      } catch (_) {}
+        final dio = await _buildDio();
+        if (dio == null) {
+          debugPrint('[WIFI_BG] No auth token — cannot punch OUT');
+          return false;
+        }
 
-      final resp = await dio.post(
-        ApiEndpoints.punch,
-        data: {
-          'Method': 'WiFi',
-          'Direction': 'Out',
-          'WifiMAC': officeMac.isNotEmpty ? officeMac : 'unknown',
-          'IPAddress': ip,
-          'remarks': 'Auto Punch-Out (WiFi disconnected)',
-        },
-      );
+        // Server-truth gate — a biometric/website OUT may already exist.
+        final verdict =
+            await PunchCoordinator.check(dio: dio, direction: 'Out');
+        if (verdict == PunchCheck.duplicate) {
+          debugPrint('[WIFI_BG] skip OUT — already punched out (biometric/website)');
+          await _setLastPunchType('Out');
+          await _setMatchedOffice('');
+          return false;
+        }
+        if (verdict == PunchCheck.blocked) {
+          debugPrint('[WIFI_BG] skip OUT — no IN punch today');
+          return false;
+        }
+
+        String ip = '0.0.0.0';
+        try {
+          ip = await NetworkInfo().getWifiIP() ?? '0.0.0.0';
+        } catch (_) {}
+
+        final resp = await dio.post(
+          ApiEndpoints.punch,
+          data: {
+            'Method': 'WiFi',
+            'Direction': 'Out',
+            'WifiMAC': officeMac.isNotEmpty ? officeMac : 'unknown',
+            'IPAddress': ip,
+            'remarks': 'Auto Punch-Out (WiFi disconnected)',
+          },
+        );
 
       if (resp.statusCode == 200 || resp.statusCode == 201) {
         debugPrint('[WIFI_BG] Punched OUT');
