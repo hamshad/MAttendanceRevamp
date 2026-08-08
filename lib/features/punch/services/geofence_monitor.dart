@@ -41,6 +41,9 @@ import 'geofence_debug_bus.dart';
 //      against false positives); the OS trigger location is the fallback.
 //   3. Server status + local punch state gates (proven behavior from the
 //      old worker) prevent duplicate / toggle-misinterpreted punches.
+//   4. Office-first hierarchy: a client-site prompt is suppressed while the
+//      user is verified inside an office radius — office and a client site
+//      may share coordinates, and office always wins.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// One punchable region, normalized from an [Office] or [ClientSite].
@@ -389,6 +392,19 @@ class GeofencePunchHandler {
   ) async {
     // ── CLIENT SITE: selfie is mandatory — prompt, never auto-punch ──────
     if (zone.isClientSite) {
+      // Office-first hierarchy: when the user is simultaneously inside an
+      // office radius, office wins — never prompt a client-site punch.
+      // An office and a client site may share coordinates (e.g. a site
+      // inside the office compound); the office zone's own enter event
+      // handles the punch instead. Mirrors the old worker's decision order.
+      if (direction == 'In') {
+        final office = await _officeContainingUser(prefs, triggerLoc);
+        if (office != null) {
+          debugPrint('[GF_MON] ${zone.id}: inside office ${office.name} — '
+              'skipping client prompt (office-first)');
+          return;
+        }
+      }
       await _promptClientSitePunch(direction, zone, prefs);
       return;
     }
@@ -623,6 +639,27 @@ class GeofencePunchHandler {
       debugPrint('[GF_MON] Corrupt zone metadata for $id: $e');
       return null;
     }
+  }
+
+  /// Office-first guard: returns the first office zone whose radius the user
+  /// is verified inside (same acceptance rules as the office IN path).
+  /// Office beats client sites, so an office and a client site at the same
+  /// coordinates never conflict. Only office zones that were actually
+  /// registered (persisted under `gf_zone_ids`) are considered.
+  Future<GeofenceZone?> _officeContainingUser(
+    SharedPreferences prefs,
+    Location? triggerLoc,
+  ) async {
+    final ids =
+        prefs.getStringList(GeofenceMonitor._zoneIdsKey) ?? const <String>[];
+    for (final id in ids) {
+      final office = _loadZone(prefs, id);
+      if (office == null || office.isClientSite) continue;
+      if (await _verifyTransition(office, 'In', triggerLoc) != null) {
+        return office;
+      }
+    }
+    return null;
   }
 
   Future<void> _persistPunchState(

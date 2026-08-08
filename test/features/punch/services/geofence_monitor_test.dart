@@ -137,11 +137,20 @@ const _officeRadius = 100.0;
 
 const _siteId = 'site_5';
 
-Map<String, Object> _zoneMeta(String id, {bool isClientSite = false}) => {
+/// Client-site coordinates ~1.4km from the office — non-overlapping by
+/// default, so prompt tests stay independent of the office-first guard.
+const _siteLat = 19.88;
+const _siteLng = 75.35;
+
+Map<String, Object> _zoneMeta(String id,
+        {bool isClientSite = false,
+        double lat = _officeLat,
+        double lng = _officeLng}) =>
+    {
       'gf_zone_$id': jsonEncode({
         'name': id == _officeId ? 'HQ' : 'Client A',
-        'lat': _officeLat,
-        'lng': _officeLng,
+        'lat': lat,
+        'lng': lng,
         'radius': _officeRadius,
         'isClientSite': isClientSite,
         'officeId': isClientSite ? null : 1,
@@ -155,6 +164,9 @@ Map<String, Object> _basePrefs({String? lastType}) => {
       'bg_access_token': 'token',
       'bg_refresh_token': 'refresh',
       'auth_session_id': 'sess',
+      // Registration always persists the zone-id list — the office-first
+      // guard keys off it.
+      'gf_zone_ids': [_officeId],
       if (lastType != null) 'gf_last_punch_type': lastType,
       ..._zoneMeta(_officeId),
     };
@@ -185,9 +197,14 @@ GeofenceCallbackParams _params(
       location: triggerLoc,
     );
 
-geo.Position _fixAt(double dLat, double dLng) => geo.Position(
-      latitude: _officeLat + dLat,
-      longitude: _officeLng + dLng,
+geo.Position _fixAt(double dLat, double dLng) =>
+    _fixNear(_officeLat, _officeLng, dLat, dLng);
+
+/// Fix offset from an arbitrary base point (e.g. a client site).
+geo.Position _fixNear(double baseLat, double baseLng, double dLat, double dLng) =>
+    geo.Position(
+      latitude: baseLat + dLat,
+      longitude: baseLng + dLng,
       timestamp: DateTime.now(),
       accuracy: 20,
       altitude: 0,
@@ -465,9 +482,10 @@ void main() {
     test('enter client site → prompt, never auto-punch', () async {
       SharedPreferences.setMockInitialValues({
         ..._basePrefs(),
-        ..._zoneMeta(_siteId, isClientSite: true),
+        ..._zoneMeta(_siteId,
+            isClientSite: true, lat: _siteLat, lng: _siteLng),
       });
-      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      fakeGeo.position = _fixNear(_siteLat, _siteLng, 0.0002, 0.0002);
 
       await GeofencePunchHandler.forTest(_dioWith(mock))
           .handleEvent(_params(_siteId, GeofenceEvent.enter));
@@ -480,11 +498,12 @@ void main() {
     test('client-site prompt cooldown → single prompt', () async {
       SharedPreferences.setMockInitialValues({
         ..._basePrefs(),
-        ..._zoneMeta(_siteId, isClientSite: true),
+        ..._zoneMeta(_siteId,
+            isClientSite: true, lat: _siteLat, lng: _siteLng),
         'gf_prompt_site_5': DateTime.now().subtract(const Duration(minutes: 2))
             .toIso8601String(),
       });
-      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      fakeGeo.position = _fixNear(_siteLat, _siteLng, 0.0002, 0.0002);
 
       final h = GeofencePunchHandler.forTest(_dioWith(mock));
       await h.handleEvent(_params(_siteId, GeofenceEvent.enter));
@@ -494,6 +513,44 @@ void main() {
       await h.handleEvent(_params(_siteId, GeofenceEvent.enter));
       final after = prefs.getString('gf_prompt_site_5');
       expect(before, after); // unchanged → no re-prompt
+    });
+
+    test('enter client site overlapping office → office wins, no prompt',
+        () async {
+      // Office + client site share coordinates (site inside office compound).
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(),
+        ..._zoneMeta(_siteId,
+            isClientSite: true, lat: _officeLat, lng: _officeLng),
+        'gf_zone_ids': [_officeId, _siteId],
+      });
+      fakeGeo.position = _fixAt(0.0002, 0.0002); // ~30m from office center
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_siteId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('gf_prompt_site_5'), isNull); // no prompt
+    });
+
+    test('enter client site near office but outside radius → prompt fires',
+        () async {
+      // Site is registered but ~1.4km from the office — office-first guard
+      // must NOT suppress the prompt here.
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(),
+        ..._zoneMeta(_siteId,
+            isClientSite: true, lat: _siteLat, lng: _siteLng),
+        'gf_zone_ids': [_officeId, _siteId],
+      });
+      fakeGeo.position = _fixNear(_siteLat, _siteLng, 0.0002, 0.0002);
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_siteId, GeofenceEvent.enter));
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('gf_prompt_site_5'), isNotNull);
     });
   });
 }
