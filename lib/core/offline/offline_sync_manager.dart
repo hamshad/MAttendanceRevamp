@@ -59,8 +59,9 @@ class OfflineSyncManager {
       taskName == syncTaskName || taskName == periodicTaskName;
 
   /// Executed inside the Workmanager isolate.  Returns true when finished —
-  /// Workmanager then closes the isolate.
-  static Future<bool> executeSyncTask() async {
+  /// Workmanager then closes the isolate.  [testDio] replaces the
+  /// self-built dio in unit tests.
+  static Future<bool> executeSyncTask({Dio? testDio}) async {
     try {
       // Auth guard: no token → nothing to sync.
       final prefs = await SharedPreferences.getInstance();
@@ -69,7 +70,9 @@ class OfflineSyncManager {
 
       // Initialize Hive in this isolate and open the queue box.
       await Hive.initFlutter();
-      Hive.registerAdapter(OfflinePunchAdapter());
+      if (!Hive.isAdapterRegistered(0)) {
+        Hive.registerAdapter(OfflinePunchAdapter());
+      }
       final box = await Hive.openBox<OfflinePunch>(AppConstants.offlinePunchBox);
       await Hive.openBox(AppConstants.cacheBox);
       await Hive.openBox(AppConstants.tokenBackupBox);
@@ -80,7 +83,7 @@ class OfflineSyncManager {
         ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
       if (pending.isEmpty) return true;
 
-      var dio = _buildDio(token);
+      var dio = testDio ?? _buildDio(token);
 
       for (final punch in pending) {
         // ── Server-truth gate + freshness (PunchCoordinator) ─────────────
