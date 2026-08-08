@@ -187,6 +187,22 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
     return;
   }
 
+  // Guard: never run an EMPTY service.  The service exists only to serve
+  // auto features — geofence auto-punch, WiFi auto-punch, field tracking.
+  // If none is enabled there is nothing to monitor; starting anyway would
+  // just show a pointless "Mattendance" foreground notification forever.
+  final gfEnabled = prefs.getBool('geofence_auto_enabled') ?? false;
+  final wifiBg = prefs.getBool('wifi_auto_punch_enabled_bg') ?? false;
+  final wifiFg = prefs.getBool('wifi_auto_punch_enabled') ?? false;
+  final ftEnabled = prefs.getBool('field_tracking_enabled') ?? false;
+  if (!gfEnabled && !wifiBg && !wifiFg && !ftEnabled) {
+    debugPrint('[GF_BG_ENTRY] No auto feature enabled — stopping empty service');
+    if (service is AndroidServiceInstance) {
+      service.stopSelf();
+    }
+    return;
+  }
+
   // Mandatory PRECISE location. Approximate (coarse) fixes are 500m–2km off —
   // silently breaking geofence auto-punch and field tracking. If the user
   // downgraded to approximate while the service was running, stop immediately

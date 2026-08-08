@@ -46,6 +46,13 @@ void geofenceWorkmanagerCallback() {
         return true;
       }
 
+      // Guard: no auto feature enabled → nothing to monitor, don't start an
+      // empty foreground service.
+      if (!await GeofenceScheduler.anyAutoFeatureEnabled()) {
+        debugPrint('[GF_SCHED] No auto feature enabled — skip service start');
+        return true;
+      }
+
       final svc = FlutterBackgroundService();
       final isRunning = await svc.isRunning();
 
@@ -81,6 +88,12 @@ void geofenceWorkmanagerCallback() {
       final token2 = sp2.getString('bg_access_token');
       if (token2 == null || token2.isEmpty) {
         debugPrint('[GF_SCHED] No auth token — skip restart');
+        return true;
+      }
+
+      // Guard: no auto feature enabled → nothing to restart.
+      if (!await GeofenceScheduler.anyAutoFeatureEnabled()) {
+        debugPrint('[GF_SCHED] No auto feature enabled — skip restart');
         return true;
       }
 
@@ -167,6 +180,19 @@ class GeofenceScheduler {
     final end = DateTime.tryParse(raw);
     if (end == null) return false;
     return DateTime.now().isAfter(end);
+  }
+
+  /// True when any auto feature that needs the background service is
+  /// enabled: geofence auto-punch, WiFi auto-punch (bg or fg flag), or
+  /// field tracking.  When all are off the service must not start at all —
+  /// it would otherwise sit as an empty "Mattendance" foreground
+  /// notification doing nothing.
+  static Future<bool> anyAutoFeatureEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (prefs.getBool('geofence_auto_enabled') ?? false) ||
+        (prefs.getBool('wifi_auto_punch_enabled_bg') ?? false) ||
+        (prefs.getBool('wifi_auto_punch_enabled') ?? false) ||
+        (prefs.getBool('field_tracking_enabled') ?? false);
   }
 
   /// Cancel the 15-minute restart safety-net so a shift-end stop STAYS
@@ -290,6 +316,15 @@ class GeofenceScheduler {
     await _persistShiftEnd(end);
 
     if (!now.isBefore(start) && now.isBefore(end)) {
+      // Nothing to monitor if every auto feature is off — don't start an
+      // empty foreground service.  The shift-start alarm stays armed so an
+      // enable later in the day still kicks the service off.
+      if (!await anyAutoFeatureEnabled()) {
+        debugPrint('[GF_SCHED] Within window but no auto feature enabled — skipping service start');
+        await scheduleNextShift(shift);
+        return;
+      }
+
       final svc = FlutterBackgroundService();
       final alreadyRunning = await svc.isRunning();
       debugPrint('[GF_SCHED] Within shift window — service running=$alreadyRunning');

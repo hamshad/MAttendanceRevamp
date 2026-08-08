@@ -375,4 +375,28 @@ void main() {
       await GeofenceScheduler.cancelRestartAlarm();
     });
   });
+
+  group('Empty-service guard', () {
+    test('anyAutoFeatureEnabled false when everything is off', () async {
+      SharedPreferences.setMockInitialValues({});
+      expect(await GeofenceScheduler.anyAutoFeatureEnabled(), isFalse);
+    });
+
+    test('anyAutoFeatureEnabled true when geofence auto is on', () async {
+      SharedPreferences.setMockInitialValues({'geofence_auto_enabled': true});
+      expect(await GeofenceScheduler.anyAutoFeatureEnabled(), isTrue);
+    });
+
+    test('anyAutoFeatureEnabled true when wifi bg flag is on', () async {
+      SharedPreferences.setMockInitialValues({
+        'wifi_auto_punch_enabled_bg': true,
+      });
+      expect(await GeofenceScheduler.anyAutoFeatureEnabled(), isTrue);
+    });
+
+    test('anyAutoFeatureEnabled true when field tracking is on', () async {
+      SharedPreferences.setMockInitialValues({'field_tracking_enabled': true});
+      expect(await GeofenceScheduler.anyAutoFeatureEnabled(), isTrue);
+    });
+  });
 }
