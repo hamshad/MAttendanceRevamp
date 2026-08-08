@@ -13,6 +13,7 @@ const _kTaskName = 'geofence_shift_start';
 const _kRestartTaskName = 'geofence_restart';
 const _kPrefNextShiftStart = 'gf_next_shift_start';
 const _kPrefShiftName = 'gf_cached_shift_name';
+const _kPrefShiftEnd = 'gf_shift_end_time';
 
 /// MethodChannel for native AlarmManager (Android only).
 /// Works from both main and background isolates.
@@ -149,6 +150,31 @@ class GeofenceScheduler {
     await Workmanager().initialize(geofenceWorkmanagerCallback, isInDebugMode: kDebugMode);
   }
 
+  /// Persist today's shift-end so the background service can kill itself
+  /// once the shift is over and the user has punched out (nothing left to
+  /// monitor until the next shift-start alarm).
+  static Future<void> _persistShiftEnd(DateTime end) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kPrefShiftEnd, end.toIso8601String());
+  }
+
+  /// True when the current time is past the persisted shift end.
+  /// Fail-safe: unknown shift end → false (never stop).
+  static Future<bool> isPastShiftEnd() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_kPrefShiftEnd);
+    if (raw == null) return false;
+    final end = DateTime.tryParse(raw);
+    if (end == null) return false;
+    return DateTime.now().isAfter(end);
+  }
+
+  /// Cancel the 15-minute restart safety-net so a shift-end stop STAYS
+  /// stopped until the next shift-start alarm.
+  static Future<void> cancelRestartAlarm() async {
+    await Workmanager().cancelByUniqueName(_kRestartTaskName);
+  }
+
   /// Check if a native AlarmManager alarm fired while the Dart isolate was
   /// not running (app killed). If so, clear the flag and return true so the
   /// caller can trigger shift-start logic.
@@ -194,6 +220,7 @@ class GeofenceScheduler {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kPrefShiftName, shift.name);
     await prefs.setString(_kPrefNextShiftStart, nextAlarm.toIso8601String());
+    await _persistShiftEnd(shift.todayEnd);
     // Persist the raw start time ("HH:mm") so the native GeofenceAlarmReceiver
     // can self re-arm the next alarm without the Dart isolate.  The Dart
     // background isolate cannot reach the app's MethodChannel (it is only
@@ -260,6 +287,7 @@ class GeofenceScheduler {
     final end = shift.todayEnd;
 
     debugPrint('[GF_SCHED] startIfWithinShiftWindow — shift=${shift.name}, now=$now, start=$start, end=$end, isOvernight=${shift.isOvernight}');
+    await _persistShiftEnd(end);
 
     if (!now.isBefore(start) && now.isBefore(end)) {
       final svc = FlutterBackgroundService();

@@ -332,5 +332,47 @@ void main() {
       expect(nextTime, isNotNull);
       expect(nextTime!.isAfter(DateTime.now()), isTrue);
     });
+
+    test('persists shift end time for the self-kill check', () async {
+      SharedPreferences.setMockInitialValues({});
+
+      final shift = _makeShift(name: 'TestShift', startTime: '14:00', endTime: '22:00');
+      await GeofenceScheduler.scheduleNextShift(shift);
+
+      final prefs = await SharedPreferences.getInstance();
+      final endRaw = prefs.getString('gf_shift_end_time');
+      expect(endRaw, isNotNull);
+      expect(DateTime.tryParse(endRaw!), isNotNull);
+    });
+  });
+
+  group('Shift-end self-kill', () {
+    test('isPastShiftEnd true when persisted end is in the past', () async {
+      SharedPreferences.setMockInitialValues({
+        'gf_shift_end_time': DateTime.now()
+            .subtract(const Duration(hours: 1))
+            .toIso8601String(),
+      });
+      expect(await GeofenceScheduler.isPastShiftEnd(), isTrue);
+    });
+
+    test('isPastShiftEnd false when persisted end is in the future', () async {
+      SharedPreferences.setMockInitialValues({
+        'gf_shift_end_time': DateTime.now()
+            .add(const Duration(hours: 1))
+            .toIso8601String(),
+      });
+      expect(await GeofenceScheduler.isPastShiftEnd(), isFalse);
+    });
+
+    test('isPastShiftEnd false when no end persisted (fail-safe)', () async {
+      SharedPreferences.setMockInitialValues({});
+      expect(await GeofenceScheduler.isPastShiftEnd(), isFalse);
+    });
+
+    test('cancelRestartAlarm does not throw', () async {
+      SharedPreferences.setMockInitialValues({});
+      await GeofenceScheduler.cancelRestartAlarm();
+    });
   });
 }

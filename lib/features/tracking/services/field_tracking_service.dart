@@ -18,6 +18,7 @@ import '../../../core/api/api_endpoints.dart';
 import '../../../core/utils/constants.dart';
 import '../../../core/utils/location_precision.dart';
 import '../../../models/offline_punch.dart';
+import '../../punch/services/geofence_scheduler.dart';
 import '../../punch/services/wifi_background_worker.dart';
 import '../models/location_result.dart';
 import 'filters/location_filter.dart';
@@ -798,6 +799,13 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
     service.invoke('running', {'value': false});
     final stopPrefs = await SharedPreferences.getInstance();
     await stopPrefs.setBool('was_field_tracking', false);
+    // Kill the 15-min restart safety-net: a shift-end stop (or a settings
+    // disable) must stay stopped until the next shift-start alarm re-arms.
+    try {
+      await GeofenceScheduler.cancelRestartAlarm();
+    } catch (e) {
+      debugPrint('[GF_BG_ENTRY] Cancel restart alarm failed: $e');
+    }
     service.stopSelf();
   });
 }

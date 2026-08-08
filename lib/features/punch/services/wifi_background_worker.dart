@@ -99,6 +99,7 @@ class WifiBackgroundWorker {
 
     // 15s fallback poll (catches stream drops on some OEM ROMs)
     _fallbackTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      _maybeStopAfterShift();
       _checkCurrentWifi();
     });
 
@@ -117,6 +118,34 @@ class WifiBackgroundWorker {
     _fallbackTimer?.cancel();
     _fallbackTimer = null;
     debugPrint('[WIFI_BG] Monitoring stopped');
+  }
+
+  // ── Shift-end self-kill ─────────────────────────────────────────────────────
+  //
+  // The service was meant to live only around the shift: started by the
+  // shift-start alarm, and killed once the shift is over and the user is no
+  // longer being monitored (punched out — left the geofence / disconnected
+  // from office WiFi).  Runs even when WiFi auto is disabled, so geofence-only
+  // users get the same battery win.
+
+  /// Shift over (past persisted shift end) AND no active punch → the
+  /// background service has nothing left to do until the next shift-start
+  /// alarm.  Ask the entrypoint to stop itself; its 'stop' listener cancels
+  /// the 15-min restart safety-net so the kill sticks.
+  Future<void> _maybeStopAfterShift() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      final endRaw = prefs.getString('gf_shift_end_time');
+      if (endRaw == null) return; // fail-safe: unknown → keep running
+      final end = DateTime.tryParse(endRaw);
+      if (end == null || !DateTime.now().isAfter(end)) return;
+      if (prefs.getString('gf_last_punch_type') == 'In') return; // overtime
+      debugPrint('[WIFI_BG] Shift over + punched out — stopping background service');
+      FlutterBackgroundService().invoke('stop');
+    } catch (e) {
+      debugPrint('[WIFI_BG] Stop-after-shift check failed: $e');
+    }
   }
 
   // ── Connectivity Listener ──────────────────────────────────────────────────
