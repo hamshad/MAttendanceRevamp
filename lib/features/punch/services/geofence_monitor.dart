@@ -394,16 +394,19 @@ class GeofencePunchHandler {
     }
   }
 
-  /// Background recovery for missed / deferred OS enter events.
+  /// Background recovery for missed / deferred OS events.
   ///
   /// Some OEM ROMs (Doze / aggressive battery) defer geofence transition
-  /// delivery while the app is backgrounded — after an OUT punch the fused
-  /// location provider can be throttled, so a re-entry ENTER event may not
-  /// reach the app until foregrounded.  The combined service's 15s poll
-  /// calls this to re-check containment: if the user is verified inside an
-  /// office radius and locally punched out, run the normal office IN path.
+  /// delivery while the app is backgrounded — a re-entry ENTER may never
+  /// reach the app until foregrounded (no IN), or an EXIT may be dropped
+  /// (stuck IN).  The combined service's 15s poll calls this to re-check
+  /// containment:
+  ///   - punched out + verified inside an office radius  → normal IN path
+  ///   - punched in + verified OUTSIDE every office radius → OUT path, but
+  ///     only after TWO consecutive polls both confirm (jump guard: a
+  ///     single wifi-derived fix can sit 300-500m off).
   ///
-  /// Returns true when an office containment punch was issued.
+  /// Returns true when a reconciliation punch was issued.
   Future<bool> reconcileContainment() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
@@ -417,15 +420,22 @@ class GeofencePunchHandler {
       debugPrint('[GF_MON] reconcile: no auth token');
       return false;
     }
-    if (prefs.getString('gf_last_punch_type') == 'In') return false;
 
     // GPS off → no dependable fix.  Wait for location to return; the next
-    // poll (or app resume) will re-check and punch IN then.
+    // poll (or app resume) will re-check and punch then.
     if (!await _locationServiceEnabled()) {
       debugPrint('[GF_MON] reconcile: location service disabled — deferring');
       return false;
     }
 
+    final lastType = prefs.getString('gf_last_punch_type') ?? 'Out';
+
+    // ── Punched IN → look for a missed EXIT ─────────────────────────────
+    if (lastType == 'In') {
+      return _reconcileOut(prefs);
+    }
+
+    // ── Punched OUT → look for a missed ENTER ───────────────────────────
     final ids = prefs.getStringList('gf_zone_ids') ?? const [];
     for (final id in ids) {
       final zone = _loadZone(prefs, id);
@@ -446,6 +456,86 @@ class GeofencePunchHandler {
     }
     debugPrint('[GF_MON] reconcile: no office contains user');
     return false;
+  }
+
+  /// Missed-EXIT recovery: user locally punched in but the OS exit event
+  /// never arrived.  Requires two consecutive polls with fixes outside
+  /// EVERY office radius (hysteresis — a single wifi-provider fix can jump
+  /// hundreds of metres and must not punch the user out), with implausible
+  /// movement between the polls treated as noise.
+  Future<bool> _reconcileOut(SharedPreferences prefs) async {
+    final zones = (prefs.getStringList('gf_zone_ids') ?? const [])
+        .map((id) => _loadZone(prefs, id))
+        .whereType<GeofenceZone>()
+        .where((z) => !z.isClientSite)
+        .toList();
+    if (zones.isEmpty) return false;
+
+    final fix = await _freshFix();
+    if (fix == null) return false;
+
+    bool insideAny = false;
+    for (final zone in zones) {
+      final dist = geo.Geolocator.distanceBetween(
+          fix.latitude, fix.longitude, zone.latitude, zone.longitude);
+      if (dist <= zone.radius + _gpsMargin(fix.accuracy)) {
+        insideAny = true;
+        break;
+      }
+    }
+    // User verified inside an office — nothing to reconcile (this poll may
+    // be the missed IN's recovery instead).
+    if (insideAny) {
+      prefs.remove('gf_out_poll1_ts');
+      return false;
+    }
+
+    // First outside poll — remember it, wait for confirmation next poll.
+    const key = 'gf_out_poll1_ts';
+    final lastTs = prefs.getString(key);
+    if (lastTs == null) {
+      await prefs.setString(key, DateTime.now().toIso8601String());
+      await prefs.setString('gf_out_poll1_lat', fix.latitude.toString());
+      await prefs.setString('gf_out_poll1_lng', fix.longitude.toString());
+      debugPrint('[GF_MON] reconcile: outside all offices — poll #1 recorded, '
+          'waiting for confirmation');
+      return false;
+    }
+
+    // Movement sanity: fixes more than ~800m apart between polls are noise.
+    final lat1 = double.tryParse(prefs.getString('gf_out_poll1_lat') ?? '');
+    final lng1 = double.tryParse(prefs.getString('gf_out_poll1_lng') ?? '');
+    final ts1 = DateTime.tryParse(lastTs);
+    final stale = ts1 == null ||
+        DateTime.now().difference(ts1) > const Duration(minutes: 2);
+    if (stale || lat1 == null || lng1 == null) {
+      // Marker is stale / corrupt — re-start the confirmation cycle.
+      await prefs.setString(key, DateTime.now().toIso8601String());
+      await prefs.setString('gf_out_poll1_lat', fix.latitude.toString());
+      await prefs.setString('gf_out_poll1_lng', fix.longitude.toString());
+      return false;
+    }
+    final moved = geo.Geolocator.distanceBetween(
+        lat1, lng1, fix.latitude, fix.longitude);
+    if (moved > 800) {
+      debugPrint('[GF_MON] reconcile: ${moved.toStringAsFixed(0)}m jump between '
+          'polls — treating as noise, re-starting confirmation');
+      await prefs.setString(key, DateTime.now().toIso8601String());
+      await prefs.setString('gf_out_poll1_lat', fix.latitude.toString());
+      await prefs.setString('gf_out_poll1_lng', fix.longitude.toString());
+      return false;
+    }
+    await prefs.remove(key);
+
+    // Which zone context?  Prefer the zone the user is punched into
+    // (address attribution); fall back to the first office.
+    final inZoneId = prefs.getString('gf_last_punch_zone_id');
+    var zone = zones.firstWhere((z) => z.id == inZoneId, orElse: () => zones.first);
+
+    debugPrint('[GF_MON] reconcile: outside all offices confirmed across 2 '
+        'polls — punching OUT (${zone.name})');
+    await _executePunch(zone, fix, prefs, 'Out');
+    return true;
   }
 
   Future<void> _handleZoneEvent(
@@ -509,18 +599,11 @@ class GeofencePunchHandler {
     SharedPreferences prefs,
     String direction,
   ) async {
-    // ── Gate: local punch state ──────────────────────────────────────────
-    // Never send the same direction twice — the server treats a second IN
-    // as an OUT toggle.
-    final lastType = prefs.getString('gf_last_punch_type');
-    if (lastType == direction) {
-      debugPrint('[GF_MON] ${zone.id}: skip $direction — already ${direction == 'In' ? 'punched in' : 'punched out'} (local)');
-      return;
-    }
-
     // ── Server-truth gate (PunchCoordinator) ─────────────────────────────
-    // Catches punches the app can't see (biometric machine / website) and
-    // prevents the toggle corruption.  See punch_coordinator.dart.
+    // Runs FIRST: the local state may be stale across days (a leftover 'In'
+    // from yesterday would otherwise skip today's IN punch — a missed
+    // punch).  The server decides; the local gate below only applies when
+    // the server is unreachable.
     final dio = await _buildDio(prefs);
     if (dio == null) {
       debugPrint('[GF_MON] ${zone.id}: no token — skipping $direction');
@@ -546,9 +629,16 @@ class GeofencePunchHandler {
       return;
     }
     if (verdict == PunchCheck.undecided) {
-      // Server unreachable.  IN → queue for a later verified sync (never
-      // silently drop).  OUT → proceed: the punch POST itself will fail and
-      // fall back to the offline queue with current coordinates.
+      // Server unreachable.  Local state is the only truth left — never send
+      // the same direction twice (the server treats a second IN as an OUT
+      // toggle).  IN → queue for a later verified sync (never silently
+      // drop).  OUT → proceed: the punch POST itself will fail and fall back
+      // to the offline queue with current coordinates.
+      final lastType = prefs.getString('gf_last_punch_type');
+      if (lastType == direction) {
+        debugPrint('[GF_MON] ${zone.id}: skip $direction — already $direction (local, offline)');
+        return;
+      }
       if (direction == 'In') {
         debugPrint('[GF_MON] ${zone.id}: server unreachable — queuing IN offline');
         final queued = await _queueOfflinePunch(
@@ -710,12 +800,25 @@ class GeofencePunchHandler {
       }
       return null;
     } else {
-      // OUT (no usable crossing location): require a fresh fix strictly
-      // outside the radius.
-      if (fixDist != null && fixDist > zone.radius + margin) {
-        return fix;
-      }
-      return null;
+      // OUT (no usable crossing location): require the fresh fix strictly
+      // outside the radius — AND a second confirmatory fix (jump guard:
+      // wifi-derived fixes can sit 300-500m off, a single outside fix must
+      // never punch the user out while they are still inside the office).
+      if (fixDist == null || fixDist <= zone.radius + margin) return null;
+      final f = fix!;
+
+      final fix2 = await _freshFix();
+      if (fix2 == null) return null; // can't confirm → conservative: no punch
+      final fix2Dist = geo.Geolocator.distanceBetween(
+          fix2.latitude, fix2.longitude, zone.latitude, zone.longitude);
+      if (fix2Dist <= zone.radius + margin) return null;
+
+      // Implausible displacement between the two fixes = noise, not movement.
+      final moved = geo.Geolocator.distanceBetween(
+          f.latitude, f.longitude, fix2.latitude, fix2.longitude);
+      if (moved > 800) return null;
+
+      return fix2;
     }
   }
 

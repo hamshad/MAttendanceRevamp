@@ -415,9 +415,10 @@ void main() {
   });
 
   group('Punch gates', () {
-    test('already punched in locally → no duplicate IN', () async {
+    test('server already punched in + local In → no duplicate IN', () async {
       SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'In'));
       fakeGeo.position = _fixAt(0.0002, 0.0002);
+      mock.isPunchedIn = true; // server agrees user is already IN
 
       await GeofencePunchHandler.forTest(_dioWith(mock))
           .handleEvent(_params(_officeId, GeofenceEvent.enter));
@@ -542,6 +543,42 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('gf_last_punch_type'), 'In');
     });
+
+    test('stale local IN from yesterday → server decides, IN punches', () async {
+      // Local state left over from a previous day would silently skip
+      // today's IN (missed punch).  Server truth runs FIRST now.
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'In'));
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      // Server mock default: no punches today → IN is valid.
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'In');
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('gf_last_punch_type'), 'In');
+    });
+
+    test('offline + stale local IN → skipped, no queue, no punch', () async {
+      // Server unreachable: local state is the only truth — a stale 'In'
+      // must not re-punch IN (server would toggle it to OUT).
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'In'));
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      mock.failStatus = true;
+
+      var queued = false;
+      await GeofencePunchHandler.forTest(
+        _dioWith(mock),
+        queueOverride: (direction, lat, lng) async {
+          queued = true;
+          return true;
+        },
+      ).handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+      expect(queued, isFalse);
+    });
   });
 
   group('Background containment reconcile', () {
@@ -626,6 +663,73 @@ void main() {
       expect(mock.punchCalls, 0);
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('gf_last_punch_type'), 'In'); // state synced
+    });
+
+    test('punched in + outside all offices across 2 polls → OUT punches',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'In'),
+        'gf_last_punch_zone_id': _officeId,
+      });
+      fakeGeo.position = _fixAt(0.005, 0.005); // ~770m outside radius
+      mock.isPunchedIn = true; // server agrees user is IN
+
+      final h = GeofencePunchHandler.forTest(_dioWith(mock));
+
+      // Poll #1: outside → marker recorded, no punch yet (jump guard).
+      expect(await h.reconcileContainment(), isFalse);
+      expect(mock.punchCalls, 0);
+
+      // Poll #2 (~15s later, same position): confirms outside → OUT.
+      expect(await h.reconcileContainment(), isTrue);
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'Out');
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('gf_last_punch_type'), 'Out');
+    });
+
+    test('punched in + inside a different office → no OUT', () async {
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'In'),
+        'gf_last_punch_zone_id': _officeId,
+        ..._zoneMeta('office_2',
+            isClientSite: false, lat: _siteLat, lng: _siteLng),
+        'gf_zone_ids': [_officeId, 'office_2'],
+      });
+      // User moved to office_2 (site coords) — still inside A registered
+      // office → must NOT punch OUT.
+      fakeGeo.position = _fixNear(_siteLat, _siteLng, 0.0002, 0.0002);
+      mock.isPunchedIn = true;
+
+      final h = GeofencePunchHandler.forTest(_dioWith(mock));
+      expect(await h.reconcileContainment(), isFalse);
+      expect(await h.reconcileContainment(), isFalse);
+      expect(mock.punchCalls, 0);
+    });
+
+    test('punched in + outside + implausible jump between polls → no OUT',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'In'),
+        'gf_last_punch_zone_id': _officeId,
+      });
+      mock.isPunchedIn = true;
+
+      final h = GeofencePunchHandler.forTest(_dioWith(mock));
+
+      // Poll #1: outside at A.
+      fakeGeo.position = _fixAt(0.02, 0.02); // ~3km from office
+      expect(await h.reconcileContainment(), isFalse);
+
+      // Poll #2: jumps 2km+ — noise, confirmation marker resets to B.
+      fakeGeo.position = _fixAt(-0.02, -0.02);
+      expect(await h.reconcileContainment(), isFalse);
+      expect(mock.punchCalls, 0);
+
+      // Poll #3: stable at B — marker refreshed at B → confirms → OUT.
+      expect(await h.reconcileContainment(), isTrue);
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'Out');
     });
   });
 
