@@ -15,6 +15,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class _FakeGeolocatorPlatform extends GeolocatorPlatform {
   geo.Position? position;
+  bool locationServicesEnabled = true;
 
   @override
   Future<geo.Position> getCurrentPosition({
@@ -24,6 +25,9 @@ class _FakeGeolocatorPlatform extends GeolocatorPlatform {
     if (p == null) throw Exception('no fix in test');
     return p;
   }
+
+  @override
+  Future<bool> isLocationServiceEnabled() async => locationServicesEnabled;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -622,6 +626,102 @@ void main() {
       expect(mock.punchCalls, 0);
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('gf_last_punch_type'), 'In'); // state synced
+    });
+  });
+
+  group('GPS off & OUT zone identity', () {
+    test('GPS off → enter event rejected, no punch', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs());
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      fakeGeo.locationServicesEnabled = false;
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+    });
+
+    test('GPS off → exit event rejected, no bogus punch-out', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'In'));
+      fakeGeo.position = _fixAt(0.0002, 0.0002); // user still inside office
+      fakeGeo.locationServicesEnabled = false;
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.exit));
+
+      expect(mock.punchCalls, 0);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('gf_last_punch_type'), 'In'); // still punched in
+    });
+
+    test('GPS off → reconcile defers, no punch-in', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'Out'));
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      fakeGeo.locationServicesEnabled = false;
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment();
+
+      expect(punched, isFalse);
+      expect(mock.punchCalls, 0);
+    });
+
+    test('exit of a zone user is NOT punched into → rejected (batch exit)',
+        () async {
+      // User punched into the India office; the UAE fence fires a spurious
+      // exit (GPS toggle / provider drop batch).  Must NOT punch OUT "of
+      // UAE office".
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'In'),
+        'gf_last_punch_zone_id': _officeId,
+        ..._zoneMeta('uae_1',
+            isClientSite: false, lat: 24.4539, lng: 54.3773),
+        'gf_zone_ids': [_officeId, 'uae_1'],
+      });
+      fakeGeo.position = _fixAt(0.0002, 0.0002); // user in India
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params('uae_1', GeofenceEvent.exit));
+
+      expect(mock.punchCalls, 0);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('gf_last_punch_type'), 'In');
+    });
+
+    test('exit of the punched-in zone still punches OUT', () async {
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'In'),
+        'gf_last_punch_zone_id': _officeId,
+      });
+      fakeGeo.position = _fixAt(0.0027, 0.0027); // ~400m outside radius
+      mock.isPunchedIn = true; // server agrees user is IN
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.exit));
+
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'Out');
+    });
+
+    test('far-away exit trigger point → not an exit of this fence', () async {
+      // OS reports an exit for the office fence with a trigger location
+      // thousands of km away (batch exit) — must fall back to the fix
+      // check instead of trusting the crossing point.
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'In'),
+        'gf_last_punch_zone_id': _officeId,
+      });
+      fakeGeo.position = _fixAt(0.0027, 0.0027); // genuinely outside
+      mock.isPunchedIn = true;
+
+      final farTrigger = const Location(latitude: 55.7558, longitude: 37.6173);
+      await GeofencePunchHandler.forTest(_dioWith(mock)).handleEvent(
+          _params(_officeId, GeofenceEvent.exit, triggerLoc: farTrigger));
+
+      // Fresh fix strictly outside the radius confirms the exit regardless
+      // of the bogus trigger point.
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'Out');
     });
   });
 

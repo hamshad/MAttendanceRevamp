@@ -357,6 +357,13 @@ class GeofencePunchHandler {
   /// window is ignored.
   static const Duration _dedupeWindow = Duration(seconds: 30);
 
+  /// How far beyond a fence's radius an OS exit crossing point may lie and
+  /// still count as THAT fence's genuine exit.  A real crossing sits at
+  /// ~radius (GPS jitter adds a few tens of metres); a trigger point far
+  /// beyond is a spurious batch exit (GPS toggle / provider drop) or an
+  /// unrelated fence.
+  static const double _outCrossingTolerance = 250.0;
+
   Future<void> handleEvent(GeofenceCallbackParams params) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
@@ -411,6 +418,13 @@ class GeofencePunchHandler {
       return false;
     }
     if (prefs.getString('gf_last_punch_type') == 'In') return false;
+
+    // GPS off → no dependable fix.  Wait for location to return; the next
+    // poll (or app resume) will re-check and punch IN then.
+    if (!await _locationServiceEnabled()) {
+      debugPrint('[GF_MON] reconcile: location service disabled — deferring');
+      return false;
+    }
 
     final ids = prefs.getStringList('gf_zone_ids') ?? const [];
     for (final id in ids) {
@@ -467,6 +481,22 @@ class GeofencePunchHandler {
       return;
     }
 
+    // ── OUT zone-identity gate ───────────────────────────────────────────
+    // GPS toggles / OEM ROMs can fire batch EXIT events for EVERY
+    // registered fence at once when a location provider drops.  Only the
+    // fence the user is actually punched into may punch OUT — otherwise a
+    // user standing inside the India office gets "punched out of UAE
+    // office" when the UAE fence fires a spurious exit.
+    if (direction == 'Out') {
+      final lastType = prefs.getString('gf_last_punch_type');
+      final inZoneId = prefs.getString('gf_last_punch_zone_id');
+      if (lastType == 'In' && inZoneId != null && inZoneId != zone.id) {
+        debugPrint('[GF_MON] ${zone.id}: skip OUT — punched into $inZoneId, '
+            'not this zone (spurious batch exit)');
+        return;
+      }
+    }
+
     await _executePunch(zone, verifiedFix, prefs, direction);
   }
 
@@ -503,7 +533,7 @@ class GeofencePunchHandler {
 
     if (verdict == PunchCheck.duplicate) {
       debugPrint('[GF_MON] ${zone.id}: skip $direction — already $direction via another source');
-      await _persistPunchState(prefs, direction, now, zone.name);
+      await _persistPunchState(prefs, direction, now, zone.name, zoneId: zone.id);
       if (direction == 'In') await _clearShiftEndedFlag(prefs);
       await _emitSkipNotification(direction, zone,
           'Already punched $direction (biometric/website)');
@@ -581,7 +611,7 @@ class GeofencePunchHandler {
     }
 
     if (punchAccepted) {
-      await _persistPunchState(prefs, direction, now, zone.name);
+      await _persistPunchState(prefs, direction, now, zone.name, zoneId: zone.id);
       debugPrint('[GF_MON] ${zone.id}: $direction SUCCESS');
       await _showPunchNotification(direction, zone.name);
       if (direction == 'In') {
@@ -589,6 +619,18 @@ class GeofencePunchHandler {
       }
       _emit('punch_success', zone: zone, direction: direction,
           reason: '$direction via native geofence');
+    }
+  }
+
+  /// Location services as the OS sees them.  Fails open (treated as enabled)
+  /// when the platform/plugin can't answer — guards must never block
+  /// legitimate punches on a probe failure.
+  Future<bool> _locationServiceEnabled() async {
+    try {
+      return await geo.Geolocator.isLocationServiceEnabled();
+    } catch (e) {
+      debugPrint('[GF_MON] Location-service probe failed: $e');
+      return true;
     }
   }
 
@@ -621,17 +663,33 @@ class GeofencePunchHandler {
     String direction,
     Location? triggerLoc,
   ) async {
+    // GPS off → no transition is trustworthy.  Android can fire batch
+    // EXIT events for every registered fence when the location provider
+    // drops, and a trigger point taken at that moment is meaningless.
+    // Defer entirely: when location returns, reconcileContainment()
+    // re-evaluates and punches IN if the user is inside an office.
+    if (!await _locationServiceEnabled()) {
+      debugPrint('[GF_MON] ${zone.id}: location service disabled — '
+          'rejecting $direction (no trustworthy transitions)');
+      return null;
+    }
+
     final trigDist = triggerLoc != null
         ? geo.Geolocator.distanceBetween(
             triggerLoc.latitude, triggerLoc.longitude, zone.latitude, zone.longitude)
         : null;
 
     // OUT: the OS exit transition IS the boundary-crossing signal — punch
-    // immediately at its crossing location, no fix wait.
+    // immediately at its crossing location, no fix wait.  Only accepts
+    // crossings genuinely AT this fence: the trigger point of a real exit
+    // always sits at ~radius.  A trigger point far beyond the radius is a
+    // spurious batch exit (GPS toggle) or an unrelated fence — reject so
+    // the fresh-fix path below cannot punch "OUT of the wrong office".
     if (direction == 'Out' &&
         triggerLoc != null &&
         trigDist != null &&
-        trigDist > zone.radius) {
+        trigDist > zone.radius &&
+        trigDist <= zone.radius + _outCrossingTolerance) {
       return _toPosition(triggerLoc!);
     }
 
@@ -743,11 +801,17 @@ class GeofencePunchHandler {
     SharedPreferences prefs,
     String type,
     DateTime time,
-    String officeName,
-  ) async {
+    String officeName, {
+    String? zoneId,
+  }) async {
     await prefs.setString('gf_last_punch_type', type);
     await prefs.setString('gf_last_punch_time', time.toIso8601String());
     await prefs.setString('gf_last_punch_office', officeName);
+    // Zone identity for the OUT gate: only the fence the user is punched
+    // into may punch them out (spurious batch exits must be ignored).
+    if (zoneId != null) {
+      await prefs.setString('gf_last_punch_zone_id', zoneId);
+    }
   }
 
   Future<void> _clearShiftEndedFlag(SharedPreferences prefs) async {
