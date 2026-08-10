@@ -38,7 +38,10 @@ import 'geofence_debug_bus.dart';
 //   1. The OS only fires at the real zone boundary (no radius inflation).
 //   2. Hybrid verification: every event re-checks a fresh high-accuracy fix
 //      against the zone radius + accuracy margin before punching (guards
-//      against false positives); the OS trigger location is the fallback.
+//      against false positives IN; the OS trigger location is the fallback).
+//      OUT punches AT the OS exit crossing point (triggeringLocation) —
+//      never at a later, far-away processing-time fix, which would skew the
+//      punch-out distance way beyond the real boundary.
 //   3. Server status + local punch state gates (proven behavior from the
 //      old worker) prevent duplicate / toggle-misinterpreted punches.
 //   4. Office-first hierarchy: a client-site prompt is suppressed while the
@@ -548,19 +551,35 @@ class GeofencePunchHandler {
   /// Accept the OS transition only when a fresh fix (or the OS trigger
   /// location) agrees the user is on the correct side of the boundary.
   /// Returns the verified fix on acceptance, null on rejection.
+  ///
+  /// OUT prefers the OS exit crossing point ([Location]) over any fresh fix:
+  /// processing may run long after the boundary crossing (WorkManager can
+  /// defer the task), so a fix taken here would already be far away and
+  /// punch OUT far outside the radius.  Punching at the crossing keeps the
+  /// punch-out distance conventional (~boundary).
   Future<geo.Position?> _verifyTransition(
     GeofenceZone zone,
     String direction,
     Location? triggerLoc,
   ) async {
+    final trigDist = triggerLoc != null
+        ? geo.Geolocator.distanceBetween(
+            triggerLoc.latitude, triggerLoc.longitude, zone.latitude, zone.longitude)
+        : null;
+
+    // OUT: the OS exit transition IS the boundary-crossing signal — punch
+    // immediately at its crossing location, no fix wait.
+    if (direction == 'Out' &&
+        triggerLoc != null &&
+        trigDist != null &&
+        trigDist > zone.radius) {
+      return _toPosition(triggerLoc!);
+    }
+
     final fix = await _freshFix();
     final fixDist = fix != null
         ? geo.Geolocator.distanceBetween(
             fix.latitude, fix.longitude, zone.latitude, zone.longitude)
-        : null;
-    final trigDist = triggerLoc != null
-        ? geo.Geolocator.distanceBetween(
-            triggerLoc.latitude, triggerLoc.longitude, zone.latitude, zone.longitude)
         : null;
     final margin = fix != null ? _gpsMargin(fix.accuracy) : 10.0;
 
@@ -574,13 +593,12 @@ class GeofencePunchHandler {
       }
       return null;
     } else {
-      // OUT: fresh fix outside → confirmed.  No fix → trust trigger location.
-      if (fixDist != null) {
-        return fixDist > zone.radius + margin ? fix : null;
+      // OUT (no usable crossing location): require a fresh fix strictly
+      // outside the radius.
+      if (fixDist != null && fixDist > zone.radius + margin) {
+        return fix;
       }
-      return (trigDist != null && trigDist > zone.radius)
-          ? _toPosition(triggerLoc!)
-          : null;
+      return null;
     }
   }
 

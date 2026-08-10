@@ -346,6 +346,68 @@ void main() {
 
       expect(mock.punchCalls, 0);
     });
+
+    test('exit with OS crossing location → punch AT crossing, not the later fix',
+        () async {
+      // The 95m repro: OS fires exit at the boundary (~133m from center,
+      // just outside the 100m radius) but deferred processing's fresh fix
+      // is already ~300m away.  Punch must record the crossing, not the fix.
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'In'));
+      mock.isPunchedIn = true; // punched in earlier today
+      fakeGeo.position = _fixAt(0.0027, 0.0027); // ~300m — late processing fix
+      final crossing = const Location(
+        latitude: _officeLat + 0.0012,
+        longitude: _officeLng,
+      ); // ~133m — just outside the 100m radius
+
+      final h = GeofencePunchHandler.forTest(_dioWith(mock));
+      await h.handleEvent(_params(_officeId, GeofenceEvent.exit,
+          triggerLoc: crossing));
+
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'Out');
+      final lat = double.parse(mock.lastPayload!['Latitude'] as String);
+      final lng = double.parse(mock.lastPayload!['Longitude'] as String);
+      expect(lat, closeTo(crossing.latitude, 1e-6));
+      expect(lng, closeTo(crossing.longitude, 1e-6));
+    });
+
+    test('exit with OS crossing outside + fix still inside → punches at crossing',
+        () async {
+      // OS crossing outranks the later fix: the exit transition IS the
+      // boundary-crossing signal, even if a processing-time fix still shows
+      // inside (user walked back / fix churn at the edge).
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'In'));
+      mock.isPunchedIn = true;
+      fakeGeo.position = _fixAt(0.0002, 0.0002); // ~28m — still inside radius
+      final crossing = const Location(
+        latitude: _officeLat + 0.0012,
+        longitude: _officeLng,
+      );
+
+      await GeofencePunchHandler.forTest(_dioWith(mock)).handleEvent(
+          _params(_officeId, GeofenceEvent.exit, triggerLoc: crossing));
+
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'Out');
+    });
+
+    test('exit + no fresh fix + OS crossing outside → punch OUT at crossing',
+        () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'In'));
+      mock.isPunchedIn = true;
+      fakeGeo.position = null; // fix unavailable
+      final crossing = const Location(
+        latitude: _officeLat + 0.0012,
+        longitude: _officeLng,
+      );
+
+      await GeofencePunchHandler.forTest(_dioWith(mock)).handleEvent(
+          _params(_officeId, GeofenceEvent.exit, triggerLoc: crossing));
+
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'Out');
+    });
   });
 
   group('Punch gates', () {
