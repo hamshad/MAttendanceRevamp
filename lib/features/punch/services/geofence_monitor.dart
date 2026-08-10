@@ -387,6 +387,53 @@ class GeofencePunchHandler {
     }
   }
 
+  /// Background recovery for missed / deferred OS enter events.
+  ///
+  /// Some OEM ROMs (Doze / aggressive battery) defer geofence transition
+  /// delivery while the app is backgrounded — after an OUT punch the fused
+  /// location provider can be throttled, so a re-entry ENTER event may not
+  /// reach the app until foregrounded.  The combined service's 15s poll
+  /// calls this to re-check containment: if the user is verified inside an
+  /// office radius and locally punched out, run the normal office IN path.
+  ///
+  /// Returns true when an office containment punch was issued.
+  Future<bool> reconcileContainment() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+
+    if (!_isEnabled(prefs)) {
+      debugPrint('[GF_MON] reconcile: geofence disabled / not permitted');
+      return false;
+    }
+    final token = prefs.getString('bg_access_token');
+    if (token == null || token.isEmpty) {
+      debugPrint('[GF_MON] reconcile: no auth token');
+      return false;
+    }
+    if (prefs.getString('gf_last_punch_type') == 'In') return false;
+
+    final ids = prefs.getStringList('gf_zone_ids') ?? const [];
+    for (final id in ids) {
+      final zone = _loadZone(prefs, id);
+      // Office containment only — client sites always prompt, never auto-punch.
+      if (zone == null || zone.isClientSite) continue;
+
+      final fix = await _freshFix();
+      if (fix == null) continue;
+      final dist = geo.Geolocator.distanceBetween(
+          fix.latitude, fix.longitude, zone.latitude, zone.longitude);
+      final margin = _gpsMargin(fix.accuracy);
+      if (dist > zone.radius + margin) continue; // user not inside this office
+
+      debugPrint('[GF_MON] reconcile: ${zone.id} contains user '
+          '(${dist.toStringAsFixed(0)}m / r=${zone.radius}m) — punching IN');
+      await _executePunch(zone, fix, prefs, 'In');
+      return true;
+    }
+    debugPrint('[GF_MON] reconcile: no office contains user');
+    return false;
+  }
+
   Future<void> _handleZoneEvent(
     GeofenceZone zone,
     String direction,
@@ -420,6 +467,18 @@ class GeofencePunchHandler {
       return;
     }
 
+    await _executePunch(zone, verifiedFix, prefs, direction);
+  }
+
+  /// Punch-execution path shared by OS transition events and background
+  /// containment recovery: local-state gate, server-truth gate
+  /// (PunchCoordinator), offline queueing, and local punch-state persistence.
+  Future<void> _executePunch(
+    GeofenceZone zone,
+    geo.Position fix,
+    SharedPreferences prefs,
+    String direction,
+  ) async {
     // ── Gate: local punch state ──────────────────────────────────────────
     // Never send the same direction twice — the server treats a second IN
     // as an OUT toggle.
@@ -463,7 +522,7 @@ class GeofencePunchHandler {
       if (direction == 'In') {
         debugPrint('[GF_MON] ${zone.id}: server unreachable — queuing IN offline');
         final queued = await _queueOfflinePunch(
-            'In', verifiedFix.latitude, verifiedFix.longitude);
+            'In', fix.latitude, fix.longitude);
         if (!queued) {
           debugPrint('[GF_MON] ${zone.id}: queue unavailable — IN lost');
         }
@@ -472,15 +531,15 @@ class GeofencePunchHandler {
     }
 
     // ── Punch API ────────────────────────────────────────────────────────
-    // verifiedFix is non-null here — acceptance returned a fresh fix or a
+    // fix is non-null here — acceptance returned a fresh fix or a
     // fallback Position built from the OS trigger location.
-    final lat = verifiedFix.latitude;
-    final lng = verifiedFix.longitude;
+    final lat = fix.latitude;
+    final lng = fix.longitude;
     final dist = geo.Geolocator.distanceBetween(
         lat, lng, zone.latitude, zone.longitude);
 
     _emit('punch_attempt', zone: zone, direction: direction,
-        lat: lat, lng: lng, accuracy: verifiedFix.accuracy,
+        lat: lat, lng: lng, accuracy: fix.accuracy,
         distM: dist, thresholdM: zone.radius,
         reason: 'OS ${direction == 'In' ? 'enter' : 'exit'} event verified');
 

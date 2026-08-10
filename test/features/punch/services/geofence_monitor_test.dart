@@ -540,6 +540,91 @@ void main() {
     });
   });
 
+  group('Background containment reconcile', () {
+    test('punched out + inside office → punches IN in background', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'Out'));
+      fakeGeo.position = _fixAt(0.0002, 0.0002); // ~30m inside 100m radius
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment();
+
+      expect(punched, isTrue);
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'In');
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('gf_last_punch_type'), 'In');
+    });
+
+    test('already punched in → no redundant punch', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'In'));
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment();
+
+      expect(punched, isFalse);
+      expect(mock.punchCalls, 0);
+    });
+
+    test('outside office radius → no punch', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'Out'));
+      fakeGeo.position = _fixAt(0.005, 0.005); // ~770m away
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment();
+
+      expect(punched, isFalse);
+      expect(mock.punchCalls, 0);
+    });
+
+    test('geofence disabled → no punch', () async {
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'Out'),
+        'geofence_auto_enabled': false,
+      });
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment();
+
+      expect(punched, isFalse);
+      expect(mock.punchCalls, 0);
+    });
+
+    test('server unreachable → IN queued offline, not lost', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'Out'));
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      mock.failStatus = true;
+
+      var queued = false;
+      final punched = await GeofencePunchHandler.forTest(
+        _dioWith(mock),
+        queueOverride: (direction, lat, lng) async {
+          queued = true;
+          return true;
+        },
+      ).reconcileContainment();
+
+      expect(punched, isTrue);
+      expect(mock.punchCalls, 0);
+      expect(queued, isTrue);
+    });
+
+    test('biometric IN exists on server → skip, sync local state', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'Out'));
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      mock.isPunchedIn = true; // user already IN via biometric machine
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment();
+
+      expect(punched, isTrue);
+      expect(mock.punchCalls, 0);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('gf_last_punch_type'), 'In'); // state synced
+    });
+  });
+
   group('Client sites', () {
     test('enter client site → prompt, never auto-punch', () async {
       SharedPreferences.setMockInitialValues({

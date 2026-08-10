@@ -13,6 +13,7 @@ import '../../../core/api/punch_state_interceptor.dart';
 import '../../../core/offline/offline_queue.dart';
 import '../../../core/offline/offline_sync_manager.dart';
 import '../../../core/punch/punch_coordinator.dart';
+import 'geofence_monitor.dart';
 import '../../../core/utils/constants.dart';
 import '../../../models/attendance.dart';
 import '../../../models/offline_punch.dart';
@@ -100,6 +101,7 @@ class WifiBackgroundWorker {
     // 15s fallback poll (catches stream drops on some OEM ROMs)
     _fallbackTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       _maybeStopAfterShift();
+      _checkGeofenceContainment();
       _checkCurrentWifi();
     });
 
@@ -145,6 +147,23 @@ class WifiBackgroundWorker {
       FlutterBackgroundService().invoke('stop');
     } catch (e) {
       debugPrint('[WIFI_BG] Stop-after-shift check failed: $e');
+    }
+  }
+
+  /// Geofence-only recovery: OS enter events can be deferred by OEM battery
+  /// optimizations while the app is backgrounded, so a re-entry punch-out
+  /// may never fire.  Re-check office containment on the poll cadence so an
+  /// IN punch lands within ~15s of crossing back into the radius even when
+  /// the OS never delivers the transition.  Geofence-only users still get
+  /// this fallback because the combined service runs while geofence auto is
+  /// enabled (see GeofenceScheduler.anyAutoFeatureEnabled).
+  Future<void> _checkGeofenceContainment() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!(prefs.getBool('geofence_auto_enabled') ?? false)) return;
+      await GeofencePunchHandler.instance.reconcileContainment();
+    } catch (e) {
+      debugPrint('[WIFI_BG] Geofence containment check failed: $e');
     }
   }
 
