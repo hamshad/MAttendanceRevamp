@@ -7,6 +7,7 @@ import 'package:workmanager/workmanager.dart';
 
 import '../../../core/offline/offline_sync_manager.dart';
 import '../../../models/shift.dart';
+import '../../alignment/headless_alignment_worker.dart';
 import '../../tracking/services/field_tracking_service.dart';
 import 'geofence_monitor.dart';
 
@@ -34,6 +35,15 @@ void geofenceWorkmanagerCallback() {
     // sync queued punches when connectivity returns, then close.
     if (OfflineSyncManager.handles(taskName)) {
       return OfflineSyncManager.executeSyncTask();
+    }
+
+    // ── Headless alignment warnings ─────────────────────────────────────
+    // Periodic task (see registerAlignmentWorker) — re-posts the GPS-off /
+    // wifi-hidden / no-connectivity nags for users whose background service
+    // no longer runs (geofence-only).  Pure prefs + plugin channels, no
+    // service needed.
+    if (taskName == HeadlessAlignmentWorker.taskName) {
+      return HeadlessAlignmentWorker.run();
     }
 
     if (taskName == _kTaskName) {
@@ -316,6 +326,29 @@ class GeofenceScheduler {
     debugPrint('[GF_SCHED] Restart safety-net alarm scheduled (+15m)');
   }
 
+  /// Periodically re-check alignment conditions from the headless isolate
+  /// (GPS off / wifi hidden / no connectivity).  Replaces the service-isolate
+  /// nags for geofence-only users who no longer run a service.  The worker
+  /// self-gates on prefs (token, punch state, feature toggles) — scheduling
+  /// it unconditionally is harmless.  WorkManager persists + reschedules it
+  /// across app kills and reboots; min frequency is 15 min.
+  static Future<void> registerAlignmentWorker() async {
+    await Workmanager().registerPeriodicTask(
+      HeadlessAlignmentWorker.taskName,
+      HeadlessAlignmentWorker.taskName,
+      frequency: const Duration(minutes: 30),
+      existingWorkPolicy: ExistingPeriodicWorkPolicy.keep,
+    );
+    debugPrint('[GF_SCHED] Alignment warning worker scheduled (+30m)');
+  }
+
+  /// Stop the periodic alignment worker (all auto features off / logout).
+  static Future<void> cancelAlignmentWorker() async {
+    await Workmanager()
+        .cancelByUniqueName(HeadlessAlignmentWorker.taskName);
+    debugPrint('[GF_SCHED] Alignment warning worker cancelled');
+  }
+
   /// Start the combined background service immediately if we are within
   /// an active shift window, and always schedule the next shift-start alarm.
   /// Call this after shifts are loaded/cached (e.g. after login).
@@ -337,6 +370,7 @@ class GeofenceScheduler {
 
     debugPrint('[GF_SCHED] startIfWithinShiftWindow — shift=${shift.name}, now=$now, start=$start, end=$end, isOvernight=${shift.isOvernight}');
     await _persistShiftEnd(end);
+    await registerAlignmentWorker();
 
     if (!now.isBefore(start) && now.isBefore(end)) {
       // Nothing to monitor that needs a live isolate — geofence-only users
@@ -393,6 +427,7 @@ class GeofenceScheduler {
   static Future<void> cancel() async {
     await Workmanager().cancelByUniqueName(_kTaskName);
     await Workmanager().cancelByUniqueName(_kRestartTaskName);
+    await cancelAlignmentWorker();
     if (Platform.isAndroid) {
       try {
         await _kAlarmChannel.invokeMethod('cancelShiftAlarm');
