@@ -167,6 +167,18 @@ class _MainShellState extends ConsumerState<MainShell>
       //     locally punched out; cheap no-op otherwise.
       GeofencePunchHandler.instance.reconcileContainment();
 
+      // 4c. Re-register OS geofences on every resume (self-healing).  The
+      //     system drops geofence registrations on force-stop and some OEM
+      //     memory cleanups; re-arming also refreshes the plugin's Dart
+      //     callback handle and re-fires the enter catch-up (initialTrigger)
+      //     for zones the user is already inside — the headless punch path
+      //     keeps working with the app killed even when registration was
+      //     lost while backgrounded.  Idempotent: registerZones wipes and
+      //     recreates, and self-gates on enable/permission/token.
+      if (GeofenceMonitor.isEnabled) {
+        GeofenceMonitor.registerZones(providedDio: ref.read(dioClientProvider).dio);
+      }
+
       // 5. Try syncing offline punches on resume
       _syncOfflinePunches();
 
