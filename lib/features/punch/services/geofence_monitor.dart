@@ -550,7 +550,11 @@ class GeofencePunchHandler {
         .toList();
     if (zones.isEmpty) return false;
 
-    final fix = await _freshFix();
+    // First fix: reuse the OS last-known position when fresh — a
+    // stationary user inside the office (or at home) never turns on the
+    // GPS radio.  Only when the cache says "outside" (or is stale) does
+    // the confirm path below take fresh fixes.
+    final fix = await _lastKnownOrFreshFix();
     if (fix == null) return false;
 
     bool insideAny = false;
@@ -1060,6 +1064,13 @@ class GeofencePunchHandler {
     if (zoneId != null) {
       await prefs.setString('gf_last_punch_zone_id', zoneId);
     }
+    // Containment alarm keep-alive: punched IN → the native receiver keeps
+    // self-arming the 15-min check (guaranteed OUT even when the OS misses
+    // the geofence exit).  Punched OUT → receiver stops on its next fire.
+    // Written from ANY isolate — headless punches arm/disarm without the
+    // app ever being opened.
+    await prefs.setBool(
+        'gf_containment_alarm_armed', type == 'In');
   }
 
   Future<void> _clearShiftEndedFlag(SharedPreferences prefs) async {

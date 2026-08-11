@@ -88,6 +88,13 @@
         <receiver
             android:name=".GeofenceAlarmReceiver"
             android:exported="false" />
+        <!-- Periodic containment check (15 min, Doze-tolerant): guarantees
+             auto punch-out/IN even when the OS misses geofence transitions
+             while backgrounded.  Self-perpetuating; enqueues headless
+             WorkManager work (no foreground service). -->
+        <receiver
+            android:name=".ContainmentAlarmReceiver"
+            android:exported="false" />
 
         <!-- Used by plugin: native_geofence — OS-native geofencing events.
              BroadcastReceiver: receives GeofencingClient transitions (spawns

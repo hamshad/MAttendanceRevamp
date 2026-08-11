@@ -13,9 +13,15 @@ import 'geofence_monitor.dart';
 
 const _kTaskName = 'geofence_shift_start';
 const _kRestartTaskName = 'geofence_restart';
+const _kContainmentTaskName = 'geofence_containment';
 const _kPrefNextShiftStart = 'gf_next_shift_start';
 const _kPrefShiftName = 'gf_cached_shift_name';
 const _kPrefShiftEnd = 'gf_shift_end_time';
+
+/// Dart-visible mirror of the native arm flag.  Written from ANY isolate
+/// (prefs work headless); read by the native [ContainmentAlarmReceiver]
+/// every fire to decide whether to keep self-arming.
+const _kPrefContainmentArmed = 'gf_containment_alarm_armed';
 
 /// MethodChannel for native AlarmManager (Android only).
 /// Works from both main and background isolates.
@@ -44,6 +50,16 @@ void geofenceWorkmanagerCallback() {
     // service needed.
     if (taskName == HeadlessAlignmentWorker.taskName) {
       return HeadlessAlignmentWorker.run();
+    }
+
+    // ── Containment check (missed-EXIT/missed-ENTER guarantee) ──────────
+    // Fired by the native ContainmentAlarmReceiver every ~15 min (the OS
+    // misses geofence EXIT transitions while backgrounded — this task is
+    // the net that punches the user out anyway).  Re-checks containment
+    // from the headless isolate and punches when the user is on the wrong
+    // side of the boundary.  No service, no app needed.
+    if (taskName == _kContainmentTaskName) {
+      return ContainmentCheckWorker.run();
     }
 
     if (taskName == _kTaskName) {
@@ -153,6 +169,31 @@ void geofenceWorkmanagerCallback() {
 
 @pragma('vm:entry-point')
 Future<bool> _iosBackground(ServiceInstance service) async => true;
+
+/// Headless body of the periodic containment check — run by the
+/// [ContainmentAlarmReceiver]-fired WorkManager task (see
+/// [GeofenceScheduler.armContainmentAlarmIfNeeded]).
+///
+/// Re-checks containment and punches OUT/IN when the user is on the wrong
+/// side of an office boundary, without any app/service process.  All gates
+/// (token, enable flags, punch state, location service) live inside
+/// [GeofencePunchHandler.reconcileContainment], so this worker is safe to
+/// fire unconditionally.
+class ContainmentCheckWorker {
+  ContainmentCheckWorker._();
+
+  static const taskName = _kContainmentTaskName;
+
+  static Future<bool> run() async {
+    try {
+      debugPrint('[GF_SCHED] Containment check fired (headless)');
+      await GeofencePunchHandler.instance.reconcileContainment(confirmOut: true);
+    } catch (e) {
+      debugPrint('[GF_SCHED] Containment check failed: $e');
+    }
+    return true;
+  }
+}
 
 /// Schedules and manages workmanager tasks for shift-start alarms.
 ///
@@ -349,6 +390,52 @@ class GeofenceScheduler {
     debugPrint('[GF_SCHED] Alignment warning worker cancelled');
   }
 
+  /// Arm the 15-minute containment-check alarm (native AlarmManager,
+  /// Doze-tolerant — see ContainmentAlarmReceiver).  Called from the main
+  /// isolate (init / resume / after login) to schedule the FIRST fire;
+  /// afterwards the receiver self-perpetuates on every fire as long as the
+  /// prefs flag ([_kPrefContainmentArmed]) is set — the flag is flipped by
+  /// punch-in / punch-out from ANY isolate, so the loop survives app kills
+  /// without the app ever being opened again.
+  ///
+  /// Battery note: while punched in at the office the Dart side reuses the
+  /// OS last-known position (no GPS radio) — each fire is a brief CPU
+  /// wakeup + prefs read.  GPS (≤2 short fixes) only when the cache shows
+  /// the user has left the office radius.
+  static Future<void> armContainmentAlarmIfNeeded() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('bg_access_token');
+    if (token == null || token.isEmpty) {
+      await cancelContainmentAlarm();
+      return;
+    }
+    if (!await anyAutoFeatureEnabled()) {
+      await cancelContainmentAlarm();
+      return;
+    }
+    await prefs.setBool(_kPrefContainmentArmed, true);
+    if (Platform.isAndroid) {
+      try {
+        await _kAlarmChannel.invokeMethod('scheduleContainmentAlarm');
+        debugPrint('[GF_SCHED] Containment alarm armed (+15m periodic)');
+      } catch (e) {
+        debugPrint('[GF_SCHED] Containment alarm skipped (channel): $e');
+      }
+    }
+  }
+
+  /// Stop the containment alarm entirely (logout / geofence disabled).
+  static Future<void> cancelContainmentAlarm() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kPrefContainmentArmed, false);
+    if (Platform.isAndroid) {
+      try {
+        await _kAlarmChannel.invokeMethod('cancelContainmentAlarm');
+        debugPrint('[GF_SCHED] Containment alarm cancelled');
+      } catch (_) {}
+    }
+  }
+
   /// Start the combined background service immediately if we are within
   /// an active shift window, and always schedule the next shift-start alarm.
   /// Call this after shifts are loaded/cached (e.g. after login).
@@ -428,6 +515,7 @@ class GeofenceScheduler {
     await Workmanager().cancelByUniqueName(_kTaskName);
     await Workmanager().cancelByUniqueName(_kRestartTaskName);
     await cancelAlignmentWorker();
+    await cancelContainmentAlarm();
     if (Platform.isAndroid) {
       try {
         await _kAlarmChannel.invokeMethod('cancelShiftAlarm');

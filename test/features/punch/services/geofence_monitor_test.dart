@@ -730,6 +730,9 @@ void main() {
       expect(mock.lastDirection, 'In');
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('gf_last_punch_type'), 'In');
+      // Containment alarm keep-alive: punched IN → armed (headless flag —
+      // the native receiver keeps the 15-min background check alive).
+      expect(prefs.getBool('gf_containment_alarm_armed'), isTrue);
     });
 
     test('already punched in → no redundant punch', () async {
@@ -881,6 +884,48 @@ void main() {
       expect(mock.lastDirection, 'Out');
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('gf_last_punch_type'), 'Out');
+      // Punched OUT → containment alarm flag cleared (receiver stops).
+      expect(prefs.getBool('gf_containment_alarm_armed'), isFalse);
+    });
+
+    test('confirmOut: cached outside position → GPS only for confirm fix',
+        () async {
+      // Battery guard for the 15-min background alarm: while punched in
+      // and STILL at the office, the OS last-known position (fresh, inside)
+      // must skip GPS entirely.  When the cache says outside, exactly one
+      // fresh confirm fix is taken.
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'In'),
+        'gf_last_punch_zone_id': _officeId,
+      });
+      mock.isPunchedIn = true;
+      fakeGeo.lastKnownPosition = _fixAt(0.005, 0.005); // outside, fresh
+      fakeGeo.position = _fixAt(0.005, 0.005);
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment(confirmOut: true);
+
+      expect(punched, isTrue);
+      expect(mock.punchCalls, 1);
+      expect(fakeGeo.currentPositionCalls, 1); // only the confirm fix
+    });
+
+    test('confirmOut: cached inside position → no GPS at all', () async {
+      // The common case: user sitting at the desk, punched in.  OS cache
+      // says inside → the 15-min alarm fire costs NO GPS radio.
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'In'),
+        'gf_last_punch_zone_id': _officeId,
+      });
+      mock.isPunchedIn = true;
+      fakeGeo.lastKnownPosition = _fixAt(0.0002, 0.0002); // inside, fresh
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment(confirmOut: true);
+
+      expect(punched, isFalse);
+      expect(mock.punchCalls, 0);
+      expect(fakeGeo.currentPositionCalls, 0); // no GPS radio
     });
 
     test('confirmOut: punched in + outside on both fixes → punches OUT',

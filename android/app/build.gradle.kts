@@ -93,4 +93,9 @@ afterEvaluate {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+
+    // Direct access to androidx.work from app Kotlin (ContainmentAlarmReceiver
+    // enqueues the workmanager plugin's BackgroundWorker headlessly).
+    // Version must match the workmanager plugin's (workmanager_android 0.9.0+2 → 2.10.2).
+    implementation("androidx.work:work-runtime:2.10.2")
 }

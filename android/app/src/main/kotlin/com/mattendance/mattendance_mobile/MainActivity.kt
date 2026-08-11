@@ -81,6 +81,16 @@ class MainActivity : FlutterFragmentActivity() {
                     GeofenceAlarmReceiver.cancelShiftStartAlarm(this)
                     result.success(null)
                 }
+                "scheduleContainmentAlarm" -> {
+                    Log.d(TAG, "scheduleContainmentAlarm")
+                    ContainmentAlarmReceiver.armContainmentAlarm(this)
+                    result.success(null)
+                }
+                "cancelContainmentAlarm" -> {
+                    Log.d(TAG, "cancelContainmentAlarm")
+                    ContainmentAlarmReceiver.cancelContainmentAlarm(this)
+                    result.success(null)
+                }
                 "stopBackgroundService" -> {
                     Log.d(TAG, "stopBackgroundService called")
                     val intent = Intent(this, BackgroundService::class.java)

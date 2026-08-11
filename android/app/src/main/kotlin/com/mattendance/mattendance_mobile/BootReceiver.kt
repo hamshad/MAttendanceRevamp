@@ -34,6 +34,10 @@ class BootReceiver : BroadcastReceiver() {
         if (wasTracking) {
             startBackgroundService(context)
         }
+
+        // Re-arm the periodic containment check (punched-in auto-punch users).
+        // The alarm self-perpetuates once its first fire is scheduled.
+        ContainmentAlarmReceiver.armFromPrefsIfNeeded(context)
     }
 
     private fun startBackgroundService(context: Context) {

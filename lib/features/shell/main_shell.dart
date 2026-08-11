@@ -322,6 +322,12 @@ class _MainShellState extends ConsumerState<MainShell>
     }
     debugPrint('SHELL: _initGeofenceScheduler() triggered');
 
+    // Guaranteed background punch-out: arm the 15-min containment alarm
+    // (main isolate can reach the MethodChannel).  Once armed, the native
+    // receiver self-perpetuates and only the prefs flag (flipped by
+    // headless punches) matters — the app never needs opening again.
+    GeofenceScheduler.armContainmentAlarmIfNeeded().catchError((_) {});
+
     // Try cached shifts first (fast path — no API call)
     final cached = ShiftService.loadCachedShifts();
     debugPrint('SHELL: Cached shifts count: ${cached.length}');

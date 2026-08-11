@@ -150,6 +150,7 @@ bool _isWithinShiftWindow(Shift shift, {DateTime? now}) {
 void main() {
   setUp(() {
     WorkmanagerPlatform.instance = _FakeWorkmanagerPlatform();
+    SharedPreferences.setMockInitialValues({});
   });
 
   group('Delay computation', () {
@@ -430,6 +431,42 @@ void main() {
     test('serviceRequired true when field tracking is on', () async {
       SharedPreferences.setMockInitialValues({'field_tracking_enabled': true});
       expect(await GeofenceScheduler.serviceRequired(), isTrue);
+    });
+
+    test('armContainmentAlarmIfNeeded: no token → disarmed', () async {
+      SharedPreferences.setMockInitialValues({'geofence_auto_enabled': true});
+      await GeofenceScheduler.armContainmentAlarmIfNeeded();
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('gf_containment_alarm_armed'), isFalse);
+    });
+
+    test('armContainmentAlarmIfNeeded: token + auto feature → armed', () async {
+      SharedPreferences.setMockInitialValues({
+        'geofence_auto_enabled': true,
+        'bg_access_token': 'tok',
+      });
+      await GeofenceScheduler.armContainmentAlarmIfNeeded();
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('gf_containment_alarm_armed'), isTrue);
+    });
+
+    test('armContainmentAlarmIfNeeded: token, no features → disarmed',
+        () async {
+      SharedPreferences.setMockInitialValues({'bg_access_token': 'tok'});
+      await GeofenceScheduler.armContainmentAlarmIfNeeded();
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('gf_containment_alarm_armed'), isFalse);
+    });
+
+    test('cancelContainmentAlarm clears the armed flag', () async {
+      SharedPreferences.setMockInitialValues({
+        'geofence_auto_enabled': true,
+        'bg_access_token': 'tok',
+        'gf_containment_alarm_armed': true,
+      });
+      await GeofenceScheduler.cancelContainmentAlarm();
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('gf_containment_alarm_armed'), isFalse);
     });
   });
 }
