@@ -398,5 +398,38 @@ void main() {
       SharedPreferences.setMockInitialValues({'field_tracking_enabled': true});
       expect(await GeofenceScheduler.anyAutoFeatureEnabled(), isTrue);
     });
+
+    test('serviceRequired false when geofence is the only auto feature',
+        () async {
+      // Phase 2: geofence-only users run headless — no service process.
+      SharedPreferences.setMockInitialValues({
+        'geofence_auto_enabled': true,
+      });
+      expect(await GeofenceScheduler.serviceRequired(), isFalse);
+    });
+
+    test('serviceRequired false when everything is off', () async {
+      SharedPreferences.setMockInitialValues({});
+      expect(await GeofenceScheduler.serviceRequired(), isFalse);
+    });
+
+    test('serviceRequired true when wifi bg flag is on', () async {
+      SharedPreferences.setMockInitialValues({
+        'wifi_auto_punch_enabled_bg': true,
+      });
+      expect(await GeofenceScheduler.serviceRequired(), isTrue);
+    });
+
+    test('serviceRequired true when wifi fg flag is on', () async {
+      SharedPreferences.setMockInitialValues({
+        'wifi_auto_punch_enabled': true,
+      });
+      expect(await GeofenceScheduler.serviceRequired(), isTrue);
+    });
+
+    test('serviceRequired true when field tracking is on', () async {
+      SharedPreferences.setMockInitialValues({'field_tracking_enabled': true});
+      expect(await GeofenceScheduler.serviceRequired(), isTrue);
+    });
   });
 }

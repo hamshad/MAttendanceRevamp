@@ -46,9 +46,10 @@ void geofenceWorkmanagerCallback() {
         return true;
       }
 
-      // Guard: no auto feature enabled → nothing to monitor, don't start an
-      // empty foreground service.
-      if (!await GeofenceScheduler.anyAutoFeatureEnabled()) {
+      // Guard: no auto feature that needs a live isolate → the native
+      // geofence path handles geofence-only users headlessly; don't start
+      // an empty foreground service.
+      if (!await GeofenceScheduler.serviceRequired()) {
         debugPrint('[GF_SCHED] No auto feature enabled — skip service start');
         return true;
       }
@@ -91,8 +92,9 @@ void geofenceWorkmanagerCallback() {
         return true;
       }
 
-      // Guard: no auto feature enabled → nothing to restart.
-      if (!await GeofenceScheduler.anyAutoFeatureEnabled()) {
+      // Guard: no auto feature that needs a live isolate → geofence-only
+      // users run headless via the native path; nothing to restart.
+      if (!await GeofenceScheduler.serviceRequired()) {
         debugPrint('[GF_SCHED] No auto feature enabled — skip restart');
         return true;
       }
@@ -182,15 +184,30 @@ class GeofenceScheduler {
     return DateTime.now().isAfter(end);
   }
 
-  /// True when any auto feature that needs the background service is
-  /// enabled: geofence auto-punch, WiFi auto-punch (bg or fg flag), or
-  /// field tracking.  When all are off the service must not start at all —
+  /// True when any auto feature needs the background service process:
+  /// geofence auto-punch, WiFi auto-punch (bg or fg flag), or field
+  /// tracking.  When all are off the service must not start at all —
   /// it would otherwise sit as an empty "Mattendance" foreground
   /// notification doing nothing.
   static Future<bool> anyAutoFeatureEnabled() async {
     final prefs = await SharedPreferences.getInstance();
     return (prefs.getBool('geofence_auto_enabled') ?? false) ||
         (prefs.getBool('wifi_auto_punch_enabled_bg') ?? false) ||
+        (prefs.getBool('wifi_auto_punch_enabled') ?? false) ||
+        (prefs.getBool('field_tracking_enabled') ?? false);
+  }
+
+  /// True when an auto feature NEEDS a live isolate: WiFi auto-punch
+  /// (bg or fg — BSSID checks need a process with streams/timers) or field
+  /// tracking (periodic GPS pings).  Geofence auto-punch alone does NOT:
+  /// OS-registered geofences + the plugin's always-alive BroadcastReceiver
+  /// + WorkManager headless engine punch with the app AND service dead
+  /// (verified end-to-end).  Geofence-only users therefore get no service
+  /// process and no alarms at all — zero service battery cost, and the
+  /// native geofence does the work.
+  static Future<bool> serviceRequired() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (prefs.getBool('wifi_auto_punch_enabled_bg') ?? false) ||
         (prefs.getBool('wifi_auto_punch_enabled') ?? false) ||
         (prefs.getBool('field_tracking_enabled') ?? false);
   }
@@ -316,12 +333,11 @@ class GeofenceScheduler {
     await _persistShiftEnd(end);
 
     if (!now.isBefore(start) && now.isBefore(end)) {
-      // Nothing to monitor if every auto feature is off — don't start an
-      // empty foreground service.  The shift-start alarm stays armed so an
-      // enable later in the day still kicks the service off.
-      if (!await anyAutoFeatureEnabled()) {
-        debugPrint('[GF_SCHED] Within window but no auto feature enabled — skipping service start');
-        await scheduleNextShift(shift);
+      // Nothing to monitor that needs a live isolate — geofence-only users
+      // punch via the native headless path (no service, no alarms).  If the
+      // user enables wifi/tracking later, the next app open re-arms.
+      if (!await serviceRequired()) {
+        debugPrint('[GF_SCHED] Within window but no service-requiring feature enabled — skipping service start');
         return;
       }
 
@@ -354,7 +370,12 @@ class GeofenceScheduler {
       debugPrint('[GF_SCHED] NOT within shift window — start=${start}, end=$end');
     }
 
-    await scheduleNextShift(shift);
+    // Geofence-only: nothing to arm — native geofences + headless punch need
+    // no alarms.  Re-armed on the next app open if a service-requiring
+    // feature gets enabled.
+    if (await serviceRequired()) {
+      await scheduleNextShift(shift);
+    }
   }
 
   /// Cancel any pending shift-start and restart alarms.
