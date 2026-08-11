@@ -449,7 +449,15 @@ class GeofencePunchHandler {
   ///     single wifi-derived fix can sit 300-500m off).
   ///
   /// Returns true when a reconciliation punch was issued.
-  Future<bool> reconcileContainment() async {
+  ///
+  /// [confirmOut] — resolve the missed-EXIT case in a SINGLE call: takes a
+  /// second confirmatory fix back-to-back instead of waiting for the next
+  /// poll (which may never come — geofence-only mode has no background
+  /// poller, so the OS-missed exit would stay stuck until the user opens
+  /// the app).  Same jump guard as the two-poll flow: both fixes must be
+  /// outside and ≤800m apart.  Used by the app-resume path and the
+  /// headless alignment worker; the service poll keeps the two-poll flow.
+  Future<bool> reconcileContainment({bool confirmOut = false}) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
 
@@ -474,7 +482,7 @@ class GeofencePunchHandler {
 
     // ── Punched IN → look for a missed EXIT ─────────────────────────────
     if (lastType == 'In') {
-      return _reconcileOut(prefs);
+      return _reconcileOut(prefs, confirmOut: confirmOut);
     }
 
     // ── Punched OUT → look for a missed ENTER ───────────────────────────
@@ -524,11 +532,17 @@ class GeofencePunchHandler {
   }
 
   /// Missed-EXIT recovery: user locally punched in but the OS exit event
-  /// never arrived.  Requires two consecutive polls with fixes outside
-  /// EVERY office radius (hysteresis — a single wifi-provider fix can jump
-  /// hundreds of metres and must not punch the user out), with implausible
-  /// movement between the polls treated as noise.
-  Future<bool> _reconcileOut(SharedPreferences prefs) async {
+  /// never arrived.  Requires two consecutive fixes outside EVERY office
+  /// radius (hysteresis — a single wifi-provider fix can jump hundreds of
+  /// metres and must not punch the user out), with implausible movement
+  /// between the fixes treated as noise.
+  ///
+  /// With [confirmOut] the two fixes are taken back-to-back in this one
+  /// call (app resume / headless worker — contexts with no next poll).
+  /// Otherwise the first outside fix is stored and confirmed by the next
+  /// poll (combined-service cadence).
+  Future<bool> _reconcileOut(SharedPreferences prefs,
+      {bool confirmOut = false}) async {
     final zones = (prefs.getStringList('gf_zone_ids') ?? const [])
         .map((id) => _loadZone(prefs, id))
         .whereType<GeofenceZone>()
@@ -553,6 +567,28 @@ class GeofencePunchHandler {
     if (insideAny) {
       prefs.remove('gf_out_poll1_ts');
       return false;
+    }
+
+    // Inline confirmation: second fix now (must also be outside and close).
+    if (confirmOut) {
+      final fix2 = await _freshFix();
+      if (fix2 == null) return false; // can't confirm → conservative: no punch
+      for (final zone in zones) {
+        final d = geo.Geolocator.distanceBetween(
+            fix2.latitude, fix2.longitude, zone.latitude, zone.longitude);
+        if (d <= zone.radius + _gpsMargin(fix2.accuracy)) {
+          debugPrint('[GF_MON] reconcile: confirm fix inside office — no OUT');
+          return false;
+        }
+      }
+      final moved = geo.Geolocator.distanceBetween(
+          fix.latitude, fix.longitude, fix2.latitude, fix2.longitude);
+      if (moved > 800) {
+        debugPrint('[GF_MON] reconcile: ${moved.toStringAsFixed(0)}m jump between '
+            'fixes — treating as noise, no OUT');
+        return false;
+      }
+      return _punchOutConfirmed(prefs, zones, fix2);
     }
 
     // First outside poll — remember it, wait for confirmation next poll.
@@ -592,13 +628,19 @@ class GeofencePunchHandler {
     }
     await prefs.remove(key);
 
-    // Which zone context?  Prefer the zone the user is punched into
-    // (address attribution); fall back to the first office.
-    final inZoneId = prefs.getString('gf_last_punch_zone_id');
-    var zone = zones.firstWhere((z) => z.id == inZoneId, orElse: () => zones.first);
+    return _punchOutConfirmed(prefs, zones, fix);
+  }
 
-    debugPrint('[GF_MON] reconcile: outside all offices confirmed across 2 '
-        'polls — punching OUT (${zone.name})');
+  /// Both confirmations passed — punch OUT in the zone the user is punched
+  /// into (address attribution; fall back to the first office).
+  Future<bool> _punchOutConfirmed(
+      SharedPreferences prefs, List<GeofenceZone> zones, geo.Position fix) async {
+    final inZoneId = prefs.getString('gf_last_punch_zone_id');
+    final zone = zones.firstWhere((z) => z.id == inZoneId,
+        orElse: () => zones.first);
+
+    debugPrint('[GF_MON] reconcile: outside all offices confirmed — punching '
+        'OUT (${zone.name})');
     await _executePunch(zone, fix, prefs, 'Out');
     return true;
   }

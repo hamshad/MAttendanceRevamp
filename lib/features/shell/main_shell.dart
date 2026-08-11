@@ -160,12 +160,16 @@ class _MainShellState extends ConsumerState<MainShell>
       // 4. Ensure the combined service is running if within shift window
       _initGeofenceScheduler();
 
-      // 4b. Recover a missed geofence IN: GPS may have been off while the
-      //     app was backgrounded (no trustworthy OS transitions fired — the
-      //     user's re-entry into the office radius was never punched).  Only
-      //     punches when the user is verified inside an office radius and
-      //     locally punched out; cheap no-op otherwise.
-      GeofencePunchHandler.instance.reconcileContainment();
+      // 4b. Recover a missed geofence IN/OUT: GPS may have been off while
+      //     the app was backgrounded (no trustworthy OS transitions fired —
+      //     a re-entry INTO the office radius, or an EXIT while walking
+      //     away, was never punched).  Only punches when the user is
+      //     verified inside an office radius (IN) or outside every office
+      //     radius on two consecutive fixes (OUT).  confirmOut: the OS
+      //     exit is easily missed while backgrounded and geofence-only mode
+      //     has no background poller — confirm the exit with a second fix
+      //     right here instead of waiting for a poll that never comes.
+      GeofencePunchHandler.instance.reconcileContainment(confirmOut: true);
 
       // 4c. Re-register OS geofences on every resume (self-healing).  The
       //     system drops geofence registrations on force-stop and some OEM

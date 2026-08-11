@@ -2,6 +2,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:geolocator/geolocator.dart' as geo;
+import 'package:mattendance_mobile/features/punch/services/geofence_monitor.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -78,6 +79,16 @@ class HeadlessAlignmentWorker {
     await _checkGps(prefs, anyAuto: anyAuto);
     await _checkConnectivity(prefs);
     await _checkWifiHidden(prefs);
+
+    // Missed-EXIT recovery (geofence-only mode has no service poller): the
+    // OS can fail to deliver the exit transition while backgrounded, which
+    // leaves the user stuck punched in.  Re-check containment headlessly —
+    // two back-to-back fixes outside every office radius punch OUT.
+    // Battery: at most two 10s GPS fixes per 30-min run, only while
+    // punched in.  reconcileContainment self-gates on
+    // enable/permission/token/location-service, and its OUT path verifies
+    // against the server before punching.
+    await GeofencePunchHandler.instance.reconcileContainment(confirmOut: true);
   }
 
   /// GPS off → geofences can't fire; warn (996) while any auto feature is on.

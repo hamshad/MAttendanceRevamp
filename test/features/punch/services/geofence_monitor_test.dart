@@ -42,6 +42,10 @@ class _FakeGeolocatorPlatform extends GeolocatorPlatform {
   geo.Position? lastKnownPosition;
   bool locationServicesEnabled = true;
 
+  /// Optional queue of fresh fixes — popped in order, then [position] is
+  /// used.  Lets tests feed two DIFFERENT fixes (inline OUT confirmation).
+  List<geo.Position> positionQueue = [];
+
   /// Fresh-fix call counter — asserts GPS-radio budgets (reconcile must
   /// reuse cached positions and respect its fix-budget window).
   int currentPositionCalls = 0;
@@ -51,6 +55,7 @@ class _FakeGeolocatorPlatform extends GeolocatorPlatform {
     LocationSettings? locationSettings,
   }) async {
     currentPositionCalls++;
+    if (positionQueue.isNotEmpty) return positionQueue.removeAt(0);
     final p = position;
     if (p == null) throw Exception('no fix in test');
     return p;
@@ -876,6 +881,85 @@ void main() {
       expect(mock.lastDirection, 'Out');
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('gf_last_punch_type'), 'Out');
+    });
+
+    test('confirmOut: punched in + outside on both fixes → punches OUT',
+        () async {
+      // The user's bug: OS exit missed while backgrounded, app opened,
+      // still no OUT — the two-poll flow records poll #1 and waits for a
+      // second poll that never comes (geofence-only mode has no background
+      // poller).  confirmOut resolves it in a single call.
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'In'),
+        'gf_last_punch_zone_id': _officeId,
+      });
+      mock.isPunchedIn = true; // server agrees: last punch In
+      fakeGeo.position = _fixAt(0.005, 0.005); // ~770m outside
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment(confirmOut: true);
+
+      expect(punched, isTrue);
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'Out');
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('gf_last_punch_type'), 'Out');
+      // Inline confirmation = two fixes, one call.
+      expect(fakeGeo.currentPositionCalls, 2);
+    });
+
+    test('confirmOut: second fix inside → no OUT', () async {
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'In'),
+        'gf_last_punch_zone_id': _officeId,
+      });
+      mock.isPunchedIn = true;
+      // Fix 1 outside, fix 2 back inside → contradictory → conservative no.
+      fakeGeo.positionQueue = [
+        _fixAt(0.005, 0.005),
+        _fixAt(0.0002, 0.0002),
+      ];
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment(confirmOut: true);
+
+      expect(punched, isFalse);
+      expect(mock.punchCalls, 0);
+    });
+
+    test('confirmOut: implausible jump between fixes → no OUT', () async {
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'In'),
+        'gf_last_punch_zone_id': _officeId,
+      });
+      mock.isPunchedIn = true;
+      // ~890m apart — noise, not movement.
+      fakeGeo.positionQueue = [
+        _fixAt(0.005, 0.005),
+        _fixAt(0.013, 0.005),
+      ];
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment(confirmOut: true);
+
+      expect(punched, isFalse);
+      expect(mock.punchCalls, 0);
+    });
+
+    test('confirmOut: inside on first fix → no OUT, no second fix', () async {
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'In'),
+        'gf_last_punch_zone_id': _officeId,
+      });
+      mock.isPunchedIn = true;
+      fakeGeo.position = _fixAt(0.0002, 0.0002); // still at the office
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment(confirmOut: true);
+
+      expect(punched, isFalse);
+      expect(mock.punchCalls, 0);
+      expect(fakeGeo.currentPositionCalls, 1);
     });
 
     test('punched in + inside a different office → no OUT', () async {
