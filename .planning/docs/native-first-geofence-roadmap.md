@@ -4,38 +4,28 @@
 > Date: 2026-08-11
 > Depends on field-test feedback for Phase 2/3 correctness
 
-## Phase 5 — Native alignment warnings (user-requested next)
+## Phase 5 — Native alignment warnings ✅ IMPLEMENTED (`05d2e88`, `1fd502b`)
 
-**Problem:** geofence-only users (no service) lost background alignment
-warnings: "no network (airplane mode?)", "connected but app can't read WiFi
-(hidden BSSID)", GPS-off nag. Foreground AlignmentMonitor still covers
-app-open, but nothing runs with app killed.
+**Delivered as headless Dart worker** (deviation from original Kotlin plan —
+same WorkManager scheduling, but all logic in tested Dart, no prefs-schema
+duplication):
 
-**Design — native WorkManager periodic worker (headless):**
-- New Kotlin `AlignmentCheckWorker` (WorkManager periodic, ~30 min,
-  flex ~10 min — system-scheduled, battery-cheap)
-- On run: read SharedPreferences (FlutterSharedPreferences, same file the
-  Dart side writes) for: punch state (`flutter.gf_last_punch_type`), feature
-  toggles (`flutter.geofence_auto_enabled`, `flutter.wifi_auto_punch_enabled_bg`),
-  last warning timestamps (rate-limit prefs keys mirror Dart constants)
-- Connectivity check via `ConnectivityManager.registerDefaultNetworkCallback`
-  (instant) or `NetworkCapabilities` poll (30 min cadence is fine)
-- WiFi hidden check: `WifiManager.connectionInfo` — BSSID empty/`02:00:00:00:00:00`
-  while connected → hidden
-- Post notification via existing `user_alignment` channel (ID 998/997 match
-  Dart constants so both isolates replace, never duplicate)
-- Respect rate limits + only nag while punched in (mirror Dart semantics)
-- Schedule worker from `GeofenceScheduler` when any auto feature enabled;
-  cancel on all-off
+- `HeadlessAlignmentWorker`: periodic WorkManager task (30 min,
+  system-scheduled, survives kills/reboots) running in the headless isolate
+- Re-posts 996 GPS-off / 997 wifi-hidden / 998 no-connectivity nags with the
+  EXACT shared IDs + `user_alignment` channel + rate-limit keys of the
+  service/foreground monitors — replace, never duplicate
+- Gates mirror service semantics: token, punch-state (quiet at home), any
+  auto feature; once-only airplane warning; 10-min BSSID cooldown
+- Scheduled from `startIfWithinShiftWindow` (keep policy); cancelled on
+  logout/all-off via `GeofenceScheduler.cancel()`
+- +10 tests (platform-interface fakes); suite 129/129
 
-**Alternatives rejected:**
-- Manifest CONNECTIVITY_ACTION receiver: Android 8+ implicit-broadcast
-  restrictions + receiver is short-lived (~10s), can't do BSSID scan reliably
-- Adding the poll back to the service: reintroduces battery cost we just killed
-
-**Effort:** ~1-2 days (Kotlin + prefs schema sync + tests for semantics)
-**Tests:** unit-test the Kotlin decision logic via Robolectric (optional) or
-keep Dart-side semantics doc-tested; manual OEM test matrix.
+**Client-site prompts** (user question 2026-08-11): verified NO work needed —
+`_promptClientSitePunch` already runs in the same headless native route as
+auto-punch notifications (OS ENTER → WorkManager → headless isolate →
+"Punch in at {site}" notification with tap payload → selfie flow). 15-min
+cooldown + office-first hierarchy intact.
 
 ## Phase 6 — WiFi auto-punch without the service (deep cut)
 
@@ -107,5 +97,5 @@ once, and silently if they never grant exemptions.
 ## Suggested order
 
 ```
-Phase 5 (alignment warnings) → field-test feedback → Phase 6 gate → Phase 8 → Phase 7
+✅ Phase 5 (alignment warnings) → field-test feedback → Phase 6 gate → Phase 8 → Phase 7
 ```
