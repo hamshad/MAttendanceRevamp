@@ -191,5 +191,42 @@ void main() {
           PunchCheck.duplicate);
       expect(mock.statusCalls, 1);
     });
+
+    test('check caches the last punch method', () async {
+      // `_punch` always emits 'Biometric'; the LAST entry is a geofence echo.
+      mock.status = _status(punches: [
+        _punch('In', id: 1),
+        {
+          'id': 2,
+          'punchTime': '2026-08-08T09:05:00.000Z',
+          'punchType': 'In',
+          'method': 'GeofenceAuto',
+        },
+      ]);
+
+      expect(await PunchCoordinator.check(dio: _dioWith(mock), direction: 'In'),
+          PunchCheck.duplicate);
+      expect(await PunchCoordinator.lastMethod(), 'GeofenceAuto');
+    });
+
+    test('lastMethod null before any check', () async {
+      SharedPreferences.setMockInitialValues({});
+      expect(await PunchCoordinator.lastMethod(), isNull);
+    });
+
+    test('lastMethod null after cache expiry', () async {
+      mock.status = _status(punches: [_punch('In')]);
+      await PunchCoordinator.check(dio: _dioWith(mock), direction: 'In');
+      expect(await PunchCoordinator.lastMethod(), 'Biometric');
+
+      // Age the cache past the TTL → unknown again.
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(
+        'bg_server_status_ts',
+        DateTime.now().subtract(const Duration(seconds: 30))
+            .millisecondsSinceEpoch,
+      );
+      expect(await PunchCoordinator.lastMethod(), isNull);
+    });
   });
 }

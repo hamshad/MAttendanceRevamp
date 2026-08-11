@@ -25,6 +25,25 @@ class PunchCoordinator {
   static const String _cacheTypeKey = 'bg_server_last_type';
   static const String _cacheOnBreakKey = 'bg_server_on_break';
   static const String _cacheTsKey = 'bg_server_status_ts';
+  static const String _cacheMethodKey = 'bg_server_last_method';
+
+  /// How the server's last punch was made (Biometric / Website / GeofenceAuto
+  /// / WiFi / Manual), or null when unknown (no timeline / cache miss).
+  ///
+  /// Lets the auto-punch paths tell "duplicate from a REAL other source"
+  /// (biometric machine, website — worth telling the user) from "duplicate
+  /// from our own earlier geofence/wifi punch" (an OS re-delivery echo —
+  /// silence).  Populated whenever [check] fetches or hits a fresh cache.
+  static Future<String?> lastMethod() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ts = prefs.getInt(_cacheTsKey);
+    if (ts == null ||
+        DateTime.now().millisecondsSinceEpoch - ts >= _cacheTtl.inMilliseconds) {
+      return null;
+    }
+    final method = prefs.getString(_cacheMethodKey);
+    return (method == null || method.isEmpty) ? null : method;
+  }
 
   /// Ask the server for the last punch type and decide whether [direction]
   /// is still needed. Never throws — returns [PunchCheck.undecided] when the
@@ -53,9 +72,13 @@ class PunchCoordinator {
       if (status == null) return PunchCheck.undecided;
 
       final last = lastPunchType(status);
+      final method = status.todaysPunches.isNotEmpty
+          ? status.todaysPunches.last.method
+          : null;
       await Future.wait([
         prefs.setString(_cacheTypeKey, last ?? ''),
         prefs.setBool(_cacheOnBreakKey, status.isOnBreak),
+        prefs.setString(_cacheMethodKey, method ?? ''),
         prefs.setInt(_cacheTsKey, DateTime.now().millisecondsSinceEpoch),
       ]);
       return _decide(last, isOnBreak: status.isOnBreak, direction: direction);

@@ -150,7 +150,18 @@ class GeofenceMonitor {
   ///
   /// Guards: backend permission (`bg_allow_geofence_auto == false` blocks),
   /// enabled flag, auth token.
-  static Future<void> registerZones({Dio? providedDio}) async {
+  ///
+  /// [initialTriggers] controls whether re-creating a zone re-fires ENTER
+  /// for the user being inside it.  Default `{enter}` re-arms catch-up
+  /// punches (init / settings toggle / boot-heartbeat).  Pass an empty set
+  /// when refreshing registered zones purely for self-healing (resume) —
+  /// otherwise every background→foreground re-registers and re-fires ENTER,
+  /// which surfaces as a duplicate "already punched" notification.  Containment
+  /// catch-up for that path is handled by [reconcileContainment] instead.
+  static Future<void> registerZones({
+    Dio? providedDio,
+    Set<GeofenceEvent> initialTriggers = const {GeofenceEvent.enter},
+  }) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
 
@@ -223,7 +234,7 @@ class GeofenceMonitor {
         triggers: {GeofenceEvent.enter, GeofenceEvent.exit},
         iosSettings: IosGeofenceSettings(initialTrigger: true),
         androidSettings: AndroidGeofenceSettings(
-          initialTriggers: {GeofenceEvent.enter},
+          initialTriggers: initialTriggers,
           notificationResponsiveness: const Duration(seconds: 30),
         ),
       );
@@ -669,11 +680,26 @@ class GeofencePunchHandler {
         await PunchCoordinator.check(dio: dio, direction: direction);
 
     if (verdict == PunchCheck.duplicate) {
-      debugPrint('[GF_MON] ${zone.id}: skip $direction — already $direction via another source');
+      // Distinguish a REAL duplicate (biometric machine / website punched
+      // for the user — worth telling them) from an echo of our own earlier
+      // geofence/wifi punch (OS re-delivered ENTER after a re-registration,
+      // or resume catch-up).  Echoes persist state silently: notifying
+      // "already punched via another source" while the user sits still at
+      // the office is pure noise.
+      final method = await PunchCoordinator.lastMethod();
+      final ownSource = method == null ||
+          method == 'GeofenceAuto' ||
+          method == 'WiFi';
+      debugPrint('[GF_MON] ${zone.id}: skip $direction — duplicate (source: $method)');
       await _persistPunchState(prefs, direction, now, zone.name, zoneId: zone.id);
       if (direction == 'In') await _clearShiftEndedFlag(prefs);
+      if (ownSource) {
+        _emit('skipped', zone: zone, direction: direction,
+            reason: 'Already $direction (own echo)');
+        return;
+      }
       await _emitSkipNotification(direction, zone,
-          'Already punched $direction (biometric/website)');
+          'Already punched $direction via $method');
       return;
     }
     if (verdict == PunchCheck.blocked) {
@@ -1002,15 +1028,38 @@ class GeofencePunchHandler {
 
   /// Informs the user why the punch was skipped — always a short, direct
   /// message, never a big block of text.
+  /// Cooldown for skip notifications — at most one per zone+direction per
+  /// window, whatever the cause.  (The big spam source — own-source echoes —
+  /// is silenced before this point; this bounds the rest.)
+  static const Duration _skipNotifCooldown = Duration(minutes: 30);
+
+  /// Informs the user why the punch was skipped — always a short, direct
+  /// message, never a big block of text.  Rate-limited per zone+direction
+  /// (see [_skipNotifCooldown]); own-source echoes never reach here.
+  /// Notification ID 995 — NOT 999 (that id is reserved for the
+  /// permission alert) and not 998 (no-connectivity warning).
   Future<void> _emitSkipNotification(
       String direction, GeofenceZone zone, String reason) async {
     _emit('skipped', zone: zone, direction: direction, reason: reason);
+    final prefs = await SharedPreferences.getInstance();
+    final cooldownKey = 'gf_skip_notif_${zone.id}_$direction';
+    final lastShown = prefs.getString(cooldownKey);
+    if (lastShown != null) {
+      final last = DateTime.tryParse(lastShown);
+      if (last != null &&
+          DateTime.now().difference(last) < _skipNotifCooldown) {
+        debugPrint('[GF_MON] skip notification cooldown active ($cooldownKey)');
+        return;
+      }
+    }
+    await prefs.setString(cooldownKey, DateTime.now().toIso8601String());
+
     await _ensureNotifications();
     try {
       await _notifications.show(
-        999,
+        995,
         'Punch skipped',
-        'Already ${direction == 'In' ? 'punched in' : 'punched out'} via another source',
+        reason,
         NotificationDetails(
           android: AndroidNotificationDetails(
             'geofence_auto_punch',
@@ -1030,7 +1079,7 @@ class GeofencePunchHandler {
     final isIn = direction == 'In';
     try {
       await _notifications.show(
-        998,
+        994,
         isIn ? 'Auto-Punched In' : 'Auto-Punched Out',
         isIn ? 'Auto-punched IN at $officeName' : 'Auto-punched OUT from $officeName',
         NotificationDetails(

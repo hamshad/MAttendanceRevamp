@@ -1,12 +1,36 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_local_notifications_platform_interface/flutter_local_notifications_platform_interface.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:geolocator_platform_interface/geolocator_platform_interface.dart';
 import 'package:mattendance_mobile/features/punch/services/geofence_monitor.dart';
 import 'package:native_geofence/native_geofence.dart';
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+// ═══════════════════════════════════════════════════════════════════════
+// Fake notifications platform — records which notification ids were shown
+// (skip-notification hygiene: own-source echoes silent, id 995, cooldown).
+// ═══════════════════════════════════════════════════════════════════════
+
+class _FakeNotifications extends AndroidFlutterLocalNotificationsPlugin
+    with MockPlatformInterfaceMixin {
+  final List<int> shown = [];
+
+  @override
+  Future<void> show(
+    int id,
+    String? title,
+    String? body, {
+    AndroidNotificationDetails? notificationDetails,
+    String? payload,
+  }) async {
+    shown.add(id);
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Fake geolocator platform — controls the "fresh fix" returned by the
@@ -54,6 +78,9 @@ class _MockInterceptor extends Interceptor {
   bool failStatus = false;
   bool failPunch = false;
 
+  /// Method of the recorded punches (Biometric / GeofenceAuto / WiFi ...).
+  String punchMethod = 'Biometric';
+
   int punchCalls = 0;
   String? lastDirection;
   Map<String, dynamic>? lastPayload;
@@ -66,7 +93,7 @@ class _MockInterceptor extends Interceptor {
         'id': 1,
         'punchTime': '2026-08-08T09:00:00.000Z',
         'punchType': 'In',
-        'method': 'Biometric',
+        'method': punchMethod,
       });
     }
     if (isPunchedOut) {
@@ -74,7 +101,7 @@ class _MockInterceptor extends Interceptor {
         'id': 2,
         'punchTime': '2026-08-08T18:00:00.000Z',
         'punchType': 'Out',
-        'method': 'Biometric',
+        'method': punchMethod,
       });
     }
     return {
@@ -254,8 +281,11 @@ void main() {
 
   late _FakeGeolocatorPlatform fakeGeo;
   late _MockInterceptor mock;
+  late _FakeNotifications notifications;
 
   setUp(() {
+    notifications = _FakeNotifications();
+    FlutterLocalNotificationsPlatform.instance = notifications;
     fakeGeo = _FakeGeolocatorPlatform();
     geo.GeolocatorPlatform.instance = fakeGeo;
     mock = _MockInterceptor();
@@ -608,6 +638,77 @@ void main() {
 
       expect(mock.punchCalls, 0);
       expect(queued, isFalse);
+    });
+
+    test('own-source echo (GeofenceAuto) → silent skip, no notification',
+        () async {
+      // OS re-delivered ENTER after a re-registration: server says the last
+      // punch was OUR OWN GeofenceAuto punch → duplicate must NOT notify
+      // ("already punched via another source" while user sits at the office).
+      SharedPreferences.setMockInitialValues(_basePrefs());
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      mock.isPunchedIn = true;
+      mock.punchMethod = 'GeofenceAuto';
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+      expect(notifications.shown.where((id) => id == 995), isEmpty);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('gf_last_punch_type'), 'In');
+    });
+
+    test('WiFi echo → silent skip, no notification', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs());
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      mock.isPunchedIn = true;
+      mock.punchMethod = 'WiFi';
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+      expect(notifications.shown.where((id) => id == 995), isEmpty);
+    });
+
+    test('real other-source duplicate (Biometric) → notification id 995',
+        () async {
+      // A REAL duplicate — user punched via the biometric machine → tell
+      // them, using id 995 (999 is reserved for the permission alert).
+      SharedPreferences.setMockInitialValues(_basePrefs());
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      mock.isPunchedIn = true; // default punchMethod: Biometric
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+      expect(notifications.shown, contains(995));
+    });
+
+    test('skip notification rate-limited per zone+direction (30 min)',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(),
+        'gf_zone_ids': [_officeId, 'office_2'],
+        ..._zoneMeta('office_2'),
+      });
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      mock.isPunchedIn = true; // Biometric → notifiable duplicate
+
+      final h = GeofencePunchHandler.forTest(_dioWith(mock));
+      await h.handleEvent(_params(_officeId, GeofenceEvent.enter));
+      expect(notifications.shown.where((id) => id == 995).length, 1);
+
+      // Second duplicate for the SAME zone+direction within the window →
+      // suppressed (cooldown key from the first notification).
+      await h.handleEvent(_params(_officeId, GeofenceEvent.enter));
+      expect(notifications.shown.where((id) => id == 995).length, 1);
+
+      // Different zone → separate cooldown slot, not suppressed.
+      await h.handleEvent(_params('office_2', GeofenceEvent.enter));
+      expect(notifications.shown.where((id) => id == 995).length, 2);
     });
   });
 

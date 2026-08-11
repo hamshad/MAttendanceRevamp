@@ -170,13 +170,22 @@ class _MainShellState extends ConsumerState<MainShell>
       // 4c. Re-register OS geofences on every resume (self-healing).  The
       //     system drops geofence registrations on force-stop and some OEM
       //     memory cleanups; re-arming also refreshes the plugin's Dart
-      //     callback handle and re-fires the enter catch-up (initialTrigger)
-      //     for zones the user is already inside — the headless punch path
-      //     keeps working with the app killed even when registration was
-      //     lost while backgrounded.  Idempotent: registerZones wipes and
-      //     recreates, and self-gates on enable/permission/token.
+      //     callback handle so the headless punch path keeps working with
+      //     the app killed even when registration was lost while
+      //     backgrounded.  Idempotent: registerZones wipes and recreates,
+      //     and self-gates on enable/permission/token.
+      //
+      //     NOTE: initialTriggers: {} — do NOT re-arm the enter catch-up
+      //     here.  With the default {enter}, every background→foreground
+      //     re-registration re-fires ENTER for every zone the user is
+      //     inside → a duplicate "already punched" notification while the
+      //     user sits still at the office.  Containment catch-up on resume
+      //     is 4b's reconcileContainment.
       if (GeofenceMonitor.isEnabled) {
-        GeofenceMonitor.registerZones(providedDio: ref.read(dioClientProvider).dio);
+        GeofenceMonitor.registerZones(
+          providedDio: ref.read(dioClientProvider).dio,
+          initialTriggers: const {},
+        );
       }
 
       // 5. Try syncing offline punches on resume
