@@ -15,16 +15,29 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class _FakeGeolocatorPlatform extends GeolocatorPlatform {
   geo.Position? position;
+  geo.Position? lastKnownPosition;
   bool locationServicesEnabled = true;
+
+  /// Fresh-fix call counter — asserts GPS-radio budgets (reconcile must
+  /// reuse cached positions and respect its fix-budget window).
+  int currentPositionCalls = 0;
 
   @override
   Future<geo.Position> getCurrentPosition({
     LocationSettings? locationSettings,
   }) async {
+    currentPositionCalls++;
     final p = position;
     if (p == null) throw Exception('no fix in test');
     return p;
   }
+
+  @override
+  Future<geo.Position?> getLastKnownPosition({
+    LocationSettings? locationSettings,
+    bool forceLocationManager = false,
+  }) async =>
+      lastKnownPosition;
 
   @override
   Future<bool> isLocationServiceEnabled() async => locationServicesEnabled;
@@ -218,6 +231,23 @@ geo.Position _fixNear(double baseLat, double baseLng, double dLat, double dLng) 
       speed: 0,
       speedAccuracy: 0,
     );
+
+/// Fix with an explicit age (for stale-cache tests).
+geo.Position _fixAged(double dLat, double dLng, Duration age) {
+  final base = _fixAt(dLat, dLng);
+  return geo.Position(
+    latitude: base.latitude,
+    longitude: base.longitude,
+    timestamp: DateTime.now().subtract(age),
+    accuracy: base.accuracy,
+    altitude: 0,
+    altitudeAccuracy: 0,
+    heading: 0,
+    headingAccuracy: 0,
+    speed: 0,
+    speedAccuracy: 0,
+  );
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -616,6 +646,65 @@ void main() {
 
       expect(punched, isFalse);
       expect(mock.punchCalls, 0);
+    });
+
+    test('fix budget: second call within 90s window skips GPS', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'Out'));
+      fakeGeo.position = _fixAt(0.005, 0.005); // outside — no punch
+
+      final h = GeofencePunchHandler.forTest(_dioWith(mock));
+
+      await h.reconcileContainment();
+      expect(fakeGeo.currentPositionCalls, 1);
+
+      // Same budget window → no fresh fix, no punch (battery budget held).
+      expect(await h.reconcileContainment(), isFalse);
+      expect(fakeGeo.currentPositionCalls, 1);
+      expect(mock.punchCalls, 0);
+    });
+
+    test('fresh cached position reused → no GPS radio', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'Out'));
+      // OS cache already has a recent inside-office fix — punch must use it.
+      fakeGeo.lastKnownPosition = _fixAt(0.0002, 0.0002);
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment();
+
+      expect(punched, isTrue);
+      expect(mock.punchCalls, 1);
+      expect(fakeGeo.currentPositionCalls, 0); // GPS never turned on
+    });
+
+    test('stale cached position ignored → fresh fix taken', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'Out'));
+      // Yesterday's office fix must NOT fabricate today's IN.
+      fakeGeo.lastKnownPosition =
+          _fixAged(0.0002, 0.0002, const Duration(hours: 24));
+      fakeGeo.position = _fixAt(0.005, 0.005); // real position: home
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment();
+
+      expect(punched, isFalse);
+      expect(mock.punchCalls, 0);
+      expect(fakeGeo.currentPositionCalls, 1);
+    });
+
+    test('on registered office WiFi → wifi worker owns IN (no GPS, no punch)',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'Out'),
+        'wifi_bg_matched_name': 'HQ Office', // wifi worker will punch IN
+      });
+      fakeGeo.position = _fixAt(0.0002, 0.0002); // inside radius anyway
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment();
+
+      expect(punched, isFalse);
+      expect(mock.punchCalls, 0);
+      expect(fakeGeo.currentPositionCalls, 0);
     });
 
     test('geofence disabled → no punch', () async {

@@ -23,7 +23,7 @@ import '../../../models/office.dart';
 ///
 /// Runs inside the same flutter_background_service isolate as
 /// GeofenceMonitor. Monitors WiFi connect/disconnect via
-/// connectivity_plus stream + 15s fallback poll. Matches current BSSID
+/// connectivity_plus stream + 60s fallback poll. Matches current BSSID
 /// against persisted wifiRouters on each office. Punches IN on match,
 /// OUT on disconnect.
 class WifiBackgroundWorker {
@@ -52,9 +52,11 @@ class WifiBackgroundWorker {
   // BSSID confirmation — Android can return a stale cached BSSID on the first
   // read after isolate spawn. We only punch IN when the SAME matched BSSID is
   // observed on two separate checks (like the geofence worker's 3-fix rule).
+  // Window must comfortably span two poll ticks (poll = 60s): a stream
+  // event + the next poll both fit inside 90s.
   String? _lastMatchedBssid;
   DateTime? _lastMatchedAt;
-  static const Duration _bssidConfirmWindow = Duration(seconds: 30);
+  static const Duration _bssidConfirmWindow = Duration(seconds: 90);
 
   // Cooldown guard — prevents rapid IN→OUT when two scans return
   // different results (e.g. fallback timer + connectivity stream).
@@ -98,8 +100,11 @@ class WifiBackgroundWorker {
     // Subscribe to connectivity changes
     _connSub = Connectivity().onConnectivityChanged.listen(_onConnectivity);
 
-    // 15s fallback poll (catches stream drops on some OEM ROMs)
-    _fallbackTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+    // 60s fallback poll (catches stream drops on some OEM ROMs).  The
+    // connectivity stream delivers disconnects instantly; the poll only
+    // backs it up.  Slow cadence keeps the isolate's wakeups (and the
+    // reconcile GPS budget in GeofencePunchHandler) battery-cheap.
+    _fallbackTimer = Timer.periodic(const Duration(seconds: 60), (_) {
       _maybeStopAfterShift();
       _checkGeofenceContainment();
       _checkCurrentWifi();
@@ -153,7 +158,7 @@ class WifiBackgroundWorker {
   /// Geofence-only recovery: OS enter events can be deferred by OEM battery
   /// optimizations while the app is backgrounded, so a re-entry punch-out
   /// may never fire.  Re-check office containment on the poll cadence so an
-  /// IN punch lands within ~15s of crossing back into the radius even when
+  /// IN punch lands within ~2 min of crossing back into the radius even when
   /// the OS never delivers the transition.  Geofence-only users still get
   /// this fallback because the combined service runs while geofence auto is
   /// enabled (see GeofenceScheduler.anyAutoFeatureEnabled).
@@ -1197,7 +1202,7 @@ class WifiBackgroundWorker {
   }
 
   /// Connected to WiFi but Android hides the network name (location/GPS off).
-  /// Rate-limited so the 15s fallback poll doesn't spam the user.  Only nags
+  /// Rate-limited so the 60s fallback poll doesn't spam the user.  Only nags
   /// while punched in.
   Future<void> _warnBssidUnreadable() async {
     if (!await _isPunchedIn()) return;

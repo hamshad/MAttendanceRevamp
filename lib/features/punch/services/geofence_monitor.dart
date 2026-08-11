@@ -364,6 +364,18 @@ class GeofencePunchHandler {
   /// unrelated fence.
   static const double _outCrossingTolerance = 250.0;
 
+  /// Reconcile GPS budget.  The background poll reconciles containment on
+  /// every tick while the user is punched out; throttling fixes to one per
+  /// window keeps the service's GPS-radio cost bounded (the dominant
+  /// battery drain) while capping missed-IN recovery latency at
+  /// budget + fix time.
+  static const Duration _reconcileFixBudget = Duration(seconds: 90);
+
+  /// How old a cached (last-known) position may be and still be trusted for
+  /// containment.  A fix from yesterday at the office must NOT punch
+  /// today's IN — stale data can fabricate an office visit.
+  static const Duration _lastKnownMaxAge = Duration(minutes: 10);
+
   Future<void> handleEvent(GeofenceCallbackParams params) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
@@ -437,13 +449,36 @@ class GeofencePunchHandler {
 
     // ── Punched OUT → look for a missed ENTER ───────────────────────────
     final ids = prefs.getStringList('gf_zone_ids') ?? const [];
+    if (ids.isEmpty) return false;
+
+    // WiFi owns this case: on a registered office AP the wifi worker
+    // punches IN with zero GPS (BSSID match + confirm).  A GPS fix here
+    // would be pure battery cost for a punch that is already coming.
+    if ((prefs.getString('wifi_bg_matched_name') ?? '').isNotEmpty) {
+      debugPrint('[GF_MON] reconcile: registered office WiFi — wifi worker owns IN');
+      return false;
+    }
+
+    // One position reused for every office.  (The loop used to take one
+    // high-accuracy fix per office — with N offices that is N full GPS
+    // fixes every poll while punched out, the service's dominant battery
+    // cost.)  Throttled to one attempt per budget window.
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (nowMs - (prefs.getInt('gf_reconcile_fix_ts') ?? 0) <
+        _reconcileFixBudget.inMilliseconds) {
+      debugPrint('[GF_MON] reconcile: fix budget window — skipping GPS');
+      return false;
+    }
+    final fix = await _lastKnownOrFreshFix();
+    await prefs.setInt(
+        'gf_reconcile_fix_ts', DateTime.now().millisecondsSinceEpoch);
+    if (fix == null) return false;
+
     for (final id in ids) {
       final zone = _loadZone(prefs, id);
       // Office containment only — client sites always prompt, never auto-punch.
       if (zone == null || zone.isClientSite) continue;
 
-      final fix = await _freshFix();
-      if (fix == null) continue;
       final dist = geo.Geolocator.distanceBetween(
           fix.latitude, fix.longitude, zone.latitude, zone.longitude);
       final margin = _gpsMargin(fix.accuracy);
@@ -737,6 +772,29 @@ class GeofencePunchHandler {
       debugPrint('[GF_MON] Fresh fix unavailable: $e');
       return null;
     }
+  }
+
+  /// Cached position first — the OS already paid for it, so no GPS radio
+  /// turns on (a stationary user at home or at the office typically never
+  /// triggers a fresh fix).  Falls back to a fresh high-accuracy fix when
+  /// the cache is missing or older than [_lastKnownMaxAge]: a stale cached
+  /// fix can fabricate an office visit (yesterday's fix at the office must
+  /// not punch today's IN).
+  Future<geo.Position?> _lastKnownOrFreshFix() async {
+    try {
+      final last = await geo.Geolocator.getLastKnownPosition();
+      if (last != null) {
+        final age = DateTime.now().toUtc().difference(last.timestamp.toUtc());
+        if (age <= _lastKnownMaxAge) {
+          debugPrint('[GF_MON] Cached position reused (age ${age.inSeconds}s)');
+          return last;
+        }
+        debugPrint('[GF_MON] Cached position stale (age ${age.inMinutes}m) — fresh fix');
+      }
+    } catch (e) {
+      debugPrint('[GF_MON] Last-known probe failed: $e');
+    }
+    return _freshFix();
   }
 
   /// Accept the OS transition only when a fresh fix (or the OS trigger
