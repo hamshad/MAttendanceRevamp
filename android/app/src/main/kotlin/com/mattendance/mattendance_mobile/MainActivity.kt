@@ -91,6 +91,9 @@ class MainActivity : FlutterFragmentActivity() {
                     ContainmentAlarmReceiver.cancelContainmentAlarm(this)
                     result.success(null)
                 }
+                "isAggressiveOem" -> {
+                    result.success(ContainmentAlarmReceiver.isAggressiveOem(this))
+                }
                 "stopBackgroundService" -> {
                     Log.d(TAG, "stopBackgroundService called")
                     val intent = Intent(this, BackgroundService::class.java)

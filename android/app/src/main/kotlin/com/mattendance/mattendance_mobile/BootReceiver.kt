@@ -38,6 +38,24 @@ class BootReceiver : BroadcastReceiver() {
         // Re-arm the periodic containment check (punched-in auto-punch users).
         // The alarm self-perpetuates once its first fire is scheduled.
         ContainmentAlarmReceiver.armFromPrefsIfNeeded(context)
+
+        // Aggressive OEMs (MIUI & friends): also revive the keep-alive
+        // foreground service after reboot — these ROMs won't spawn the app
+        // from background at all, and the service holding the process is
+        // what makes geofence/alarm/WorkManager work without exemptions.
+        // Set the mode flag so the Dart entrypoint runs keep-alive (light),
+        // never the full GPS service, unless wifi/tracking genuinely need it
+        // (then `was_field_tracking` above already starts the full service).
+        val serviceRequired = prefs.getBoolean("flutter.wifi_auto_punch_enabled_bg", false) ||
+            prefs.getBoolean("flutter.wifi_auto_punch_enabled", false) ||
+            prefs.getBoolean("flutter.field_tracking_enabled", false)
+        if (ContainmentAlarmReceiver.isAggressiveOem(context) &&
+            !serviceRequired &&
+            prefs.getBoolean("flutter.gf_containment_alarm_armed", false)
+        ) {
+            prefs.edit().putBoolean("flutter.gf_keep_alive_mode", true).apply()
+            startBackgroundService(context)
+        }
     }
 
     private fun startBackgroundService(context: Context) {

@@ -10,6 +10,7 @@ import '../../../models/shift.dart';
 import '../../alignment/headless_alignment_worker.dart';
 import '../../tracking/services/field_tracking_service.dart';
 import 'geofence_monitor.dart';
+import 'oem_keep_alive_service.dart';
 
 const _kTaskName = 'geofence_shift_start';
 const _kRestartTaskName = 'geofence_restart';
@@ -398,10 +399,17 @@ class GeofenceScheduler {
   /// punch-in / punch-out from ANY isolate, so the loop survives app kills
   /// without the app ever being opened again.
   ///
+  /// On aggressive OEMs (MIUI & friends) also starts the lightweight
+  /// keep-alive foreground service — these ROMs won't spawn the app from
+  /// background at all, so the alarm+WorkManager path alone is not enough;
+  /// the foreground service holds the process so everything runs in a
+  /// live process.
+  ///
   /// Battery note: while punched in at the office the Dart side reuses the
   /// OS last-known position (no GPS radio) — each fire is a brief CPU
   /// wakeup + prefs read.  GPS (≤2 short fixes) only when the cache shows
-  /// the user has left the office radius.
+  /// the user has left the office radius.  The keep-alive service itself
+  /// is idle (no timers, no GPS) — cost is the process + notification.
   static Future<void> armContainmentAlarmIfNeeded() async {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString('bg_access_token');
@@ -422,6 +430,8 @@ class GeofenceScheduler {
         debugPrint('[GF_SCHED] Containment alarm skipped (channel): $e');
       }
     }
+    // Aggressive OEM: keep the process alive (see doc comment above).
+    await OemKeepAliveService.startIfNeeded();
   }
 
   /// Stop the containment alarm entirely (logout / geofence disabled).
@@ -434,6 +444,7 @@ class GeofenceScheduler {
         debugPrint('[GF_SCHED] Containment alarm cancelled');
       } catch (_) {}
     }
+    await OemKeepAliveService.stop();
   }
 
   /// Start the combined background service immediately if we are within
@@ -476,6 +487,11 @@ class GeofenceScheduler {
       final svc = FlutterBackgroundService();
       final alreadyRunning = await svc.isRunning();
       debugPrint('[GF_SCHED] Within shift window — service running=$alreadyRunning');
+
+      // Keep-alive mode would hold the process WITHOUT the full service —
+      // never start the combined service on top of it.  Stop first, then
+      // the configure+start below replaces it (mode flag cleared).
+      await OemKeepAliveService.stop();
 
       if (alreadyRunning) {
         if (_hasForceRestartedThisSession) {

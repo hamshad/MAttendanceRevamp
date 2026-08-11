@@ -18,7 +18,9 @@ import '../../../core/api/api_endpoints.dart';
 import '../../../core/utils/constants.dart';
 import '../../../core/utils/location_precision.dart';
 import '../../../models/offline_punch.dart';
+import '../../punch/services/geofence_monitor.dart';
 import '../../punch/services/geofence_scheduler.dart';
+import '../../punch/services/oem_keep_alive_service.dart';
 import '../../punch/services/wifi_background_worker.dart';
 import '../models/location_result.dart';
 import 'filters/location_filter.dart';
@@ -200,6 +202,39 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
     if (service is AndroidServiceInstance) {
       service.stopSelf();
     }
+    return;
+  }
+
+  // ── Keep-alive mode (aggressive OEMs: MIUI & friends) ─────────────────
+  // The service exists here ONLY to keep the process alive so OS geofence
+  // transitions, the containment alarm and WorkManager run in a live
+  // process (these ROMs won't spawn the app from background otherwise).
+  // No GPS, no timers — heal geofences, re-check containment once, idle.
+  if (prefs.getBool(OemKeepAliveService.keepAliveModeKey) ?? false) {
+    debugPrint('[GF_BG_ENTRY] Keep-alive mode — no polling, holding process');
+    if (service is AndroidServiceInstance) {
+      service.setForegroundNotificationInfo(
+        title: 'Geofence Active',
+        content: 'Monitoring',
+      );
+    }
+    // Heal OS geofences (a fresh process may find them dropped) and run one
+    // containment check immediately (missed exit/enter).  Everything else
+    // comes from the native alarm / plugin receiver / WorkManager.
+    try {
+      await GeofenceMonitor.registerZones();
+      await GeofencePunchHandler.instance.reconcileContainment(confirmOut: true);
+    } catch (e) {
+      debugPrint('[GF_BG_ENTRY] Keep-alive init check failed: $e');
+    }
+    // Idle: no streams, no timers.  Wait for a stop signal.
+    service.on('stopKeepAlive').listen((_) async {
+      debugPrint('[GF_BG_ENTRY] Keep-alive stop requested');
+      if (service is AndroidServiceInstance) service.stopSelf();
+    });
+    service.on('stop').listen((_) async {
+      if (service is AndroidServiceInstance) service.stopSelf();
+    });
     return;
   }
 

@@ -14,6 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/auth/auth_provider.dart';
 import '../../core/config/dev_flags.dart';
+import '../../core/utils/aggressive_oem.dart';
 import '../../core/utils/constants.dart';
 import '../../core/notifications/fcm_service.dart';
 import '../../core/notifications/local_notifications.dart';
@@ -33,6 +34,7 @@ import '../notifications/providers/notifications_provider.dart';
 import '../notifications/screens/notifications_screen.dart';
 import '../punch/services/geofence_monitor.dart';
 import '../punch/services/geofence_scheduler.dart';
+import '../punch/services/oem_keep_alive_service.dart';
 import '../punch/services/shift_service.dart';
 import '../punch/services/wifi_auto_punch_service.dart';
 import '../settings/screens/geofence_settings_screen.dart';
@@ -253,6 +255,7 @@ class _MainShellState extends ConsumerState<MainShell>
       if (await GeofenceScheduler.serviceRequired()) {
         if (!await FieldTrackingService.isRunning) {
           debugPrint('SHELL: Starting combined service (wifi/tracking enabled)');
+          await OemKeepAliveService.stop(); // keep-alive holds the process — stop it first
           await FieldTrackingService.start();
         } else {
           debugPrint('SHELL: Combined service already running');
@@ -286,6 +289,7 @@ class _MainShellState extends ConsumerState<MainShell>
         // everything).  Service only when wifi/tracking need a live isolate.
         if (await GeofenceScheduler.serviceRequired()) {
           debugPrint('SHELL_Toggle: starting combined service');
+          await OemKeepAliveService.stop(); // keep-alive holds the process — stop it first
           await FieldTrackingService.start();
         } else {
           debugPrint('SHELL_Toggle: geofence-only — service not started (native headless)');
@@ -322,10 +326,14 @@ class _MainShellState extends ConsumerState<MainShell>
     }
     debugPrint('SHELL: _initGeofenceScheduler() triggered');
 
+    // Aggressive-OEM detection (MIUI & friends) — cached for headless reads.
+    await AggressiveOem.refreshFromNative();
+
     // Guaranteed background punch-out: arm the 15-min containment alarm
     // (main isolate can reach the MethodChannel).  Once armed, the native
     // receiver self-perpetuates and only the prefs flag (flipped by
     // headless punches) matters — the app never needs opening again.
+    // On aggressive OEMs also starts the keep-alive foreground service.
     GeofenceScheduler.armContainmentAlarmIfNeeded().catchError((_) {});
 
     // Try cached shifts first (fast path — no API call)

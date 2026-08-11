@@ -5,12 +5,14 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.PowerManager
 import android.util.Log
 import androidx.work.Data
 import androidx.work.OneTimeWorkRequest
 import androidx.work.WorkManager
 import dev.fluttercommunity.workmanager.BackgroundWorker
+import id.flutter.flutter_background_service.BackgroundService
 import java.util.Calendar
 
 /**
@@ -57,7 +59,37 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
 
         private const val TASK_NAME = "geofence_containment"
 
-        /** One-shot 15-min alarm.  setAndAllowWhileIdle fires during Doze. */
+        /**
+         * ROMs that kill background app starts / WorkManager / deferred
+         * alarms without user exemptions (MIUI/HyperOS is the canonical
+         * pain; ColorOS/OxygenOS, Funtouch/OriginOS and MagicOS behave the
+         * same).  Must mirror AggressiveOem.aggressiveBrands (Dart).
+         */
+        private val AGGRESSIVE_BRANDS = listOf(
+            "xiaomi", "redmi", "poco", "honor",
+            "oppo", "realme", "oneplus", "vivo",
+        )
+
+        fun isAggressiveOem(context: Context): Boolean {
+            val brand = (Build.BRAND + " " + Build.MANUFACTURER).lowercase()
+            return AGGRESSIVE_BRANDS.any { brand.contains(it) }
+        }
+
+        /** True when a live isolate genuinely needs to run the FULL combined
+         *  service (wifi auto / field tracking) — that service is itself a
+         *  foreground service and owns the process; no keep-alive needed. */
+        private fun serviceRequired(context: Context): Boolean {
+            val prefs =
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean("flutter.wifi_auto_punch_enabled_bg", false) ||
+                prefs.getBoolean("flutter.wifi_auto_punch_enabled", false) ||
+                prefs.getBoolean("flutter.field_tracking_enabled", false)
+        }
+
+        /** One-shot 15-min alarm.  Doze-tolerant; exact on aggressive OEMs
+         *  (exact-alarm receivers are exempt from Android 12+ background
+         *  start restrictions, so the receiver can revive the keep-alive
+         *  foreground service without user exemptions). */
         fun armContainmentAlarm(context: Context) {
             val intent = Intent(context, ContainmentAlarmReceiver::class.java).apply {
                 action = ACTION_CONTAINMENT_CHECK
@@ -71,6 +103,16 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
             val alarmManager =
                 context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
             val triggerAt = System.currentTimeMillis() + INTERVAL_MS
+            if (isAggressiveOem(context)) {
+                try {
+                    alarmManager.setExactAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
+                    Log.d(TAG, "Containment alarm armed EXACT (+15m, aggressive OEM)")
+                    return
+                } catch (e: SecurityException) {
+                    // Exact-alarm permission revoked → fall through to inexact.
+                }
+            }
             try {
                 alarmManager.setAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
@@ -164,10 +206,15 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
             Log.w(TAG, "onReceive: unknown action=${intent.action}")
             return
         }
-        Log.i(TAG, "CONTAINMENT_ALARM_FIRED")
+        Log.i(TAG, "CONTAINMENT_ALARM_FIRED aggressive=${isAggressiveOem(context)}")
 
         if (!stillNeeded(context)) {
             Log.d(TAG, "Containment no longer needed — not re-arming")
+            // Also drop the keep-alive foreground service (punched out
+            // outside the shift window): the process must not linger.
+            try {
+                context.stopService(Intent(context, BackgroundService::class.java))
+            } catch (_: Exception) {}
             return
         }
 
@@ -176,19 +223,39 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
         wakeLock.acquire(30_000L)
 
         try {
-            // Enqueue the headless containment check.  BackgroundWorker is the
-            // workmanager plugin's worker: it spawns its own FlutterEngine and
-            // runs the registered Dart callback (task name = geofence_containment),
-            // which re-checks containment and punches OUT/IN when the user is
-            // on the wrong side of a boundary.  No foreground service involved.
-            val input = Data.Builder()
-                .putString(BackgroundWorker.DART_TASK_KEY, TASK_NAME)
-                .build()
-            val request = OneTimeWorkRequest.Builder(BackgroundWorker::class.java)
-                .setInputData(input)
-                .build()
-            WorkManager.getInstance(context).enqueue(request)
-            Log.d(TAG, "Containment WorkManager task enqueued")
+            if (isAggressiveOem(context) && !serviceRequired(context)) {
+                // Revive the keep-alive foreground service directly (exact
+                // alarm ⇒ exempt from background start restrictions).  Set
+                // the mode flag so the Dart entrypoint runs keep-alive
+                // (heal geofences + one containment check + idle holding
+                // the process), not the full GPS service — which is exactly
+                // what MIUI-class ROMs need for everything else to work
+                // (geofence transitions, WorkManager, alarms).
+                val prefs =
+                    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                prefs.edit()
+                    .putBoolean("flutter.gf_keep_alive_mode", true)
+                    .apply()
+                val serviceIntent = Intent(context, BackgroundService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(serviceIntent)
+                } else {
+                    context.startService(serviceIntent)
+                }
+                Log.d(TAG, "Keep-alive foreground service revived (aggressive OEM)")
+            } else {
+                // Standard ROMs: headless WorkManager task is enough — the
+                // plugin's BackgroundWorker spawns a fresh engine, runs the
+                // Dart containment callback, no foreground service involved.
+                val input = Data.Builder()
+                    .putString(BackgroundWorker.DART_TASK_KEY, TASK_NAME)
+                    .build()
+                val request = OneTimeWorkRequest.Builder(BackgroundWorker::class.java)
+                    .setInputData(input)
+                    .build()
+                WorkManager.getInstance(context).enqueue(request)
+                Log.d(TAG, "Containment WorkManager task enqueued")
+            }
 
             // Self-perpetuating: arm the next fire.
             armContainmentAlarm(context)
