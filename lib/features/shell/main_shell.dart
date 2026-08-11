@@ -233,11 +233,19 @@ class _MainShellState extends ConsumerState<MainShell>
 
     if (isEnabled) {
       if (!mounted) return;
-      if (!await FieldTrackingService.isRunning) {
-        debugPrint('SHELL: Starting combined service (geofence enabled)');
-        await FieldTrackingService.start();
+      // Phase 2: geofence-only users need no service process — native
+      // geofences + WorkManager headless punch handle everything.  The
+      // combined service starts here only when wifi auto / field tracking
+      // actually need a live isolate.
+      if (await GeofenceScheduler.serviceRequired()) {
+        if (!await FieldTrackingService.isRunning) {
+          debugPrint('SHELL: Starting combined service (wifi/tracking enabled)');
+          await FieldTrackingService.start();
+        } else {
+          debugPrint('SHELL: Combined service already running');
+        }
       } else {
-        debugPrint('SHELL: Combined service already running');
+        debugPrint('SHELL: Geofence-only — no service (native headless path)');
       }
       // Register OS geofences (native_geofence). The plugin's
       // initialTriggers:{enter} re-arms catch-up punches for zones the user
@@ -261,8 +269,14 @@ class _MainShellState extends ConsumerState<MainShell>
       final alreadyRunning = await FieldTrackingService.isRunning;
       debugPrint('SHELL_Toggle: geofence ON, service already running=$alreadyRunning');
       if (!alreadyRunning) {
-        debugPrint('SHELL_Toggle: starting combined service');
-        await FieldTrackingService.start();
+        // Phase 2: geofence-only → no service (native headless path handles
+        // everything).  Service only when wifi/tracking need a live isolate.
+        if (await GeofenceScheduler.serviceRequired()) {
+          debugPrint('SHELL_Toggle: starting combined service');
+          await FieldTrackingService.start();
+        } else {
+          debugPrint('SHELL_Toggle: geofence-only — service not started (native headless)');
+        }
       }
       await GeofenceMonitor.registerZones(providedDio: ref.read(dioClientProvider).dio);
     } else {
