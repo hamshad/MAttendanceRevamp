@@ -8,6 +8,7 @@ import 'package:workmanager/workmanager.dart';
 import '../../../core/offline/offline_sync_manager.dart';
 import '../../../models/shift.dart';
 import '../../tracking/services/field_tracking_service.dart';
+import 'geofence_monitor.dart';
 
 const _kTaskName = 'geofence_shift_start';
 const _kRestartTaskName = 'geofence_restart';
@@ -48,9 +49,13 @@ void geofenceWorkmanagerCallback() {
 
       // Guard: no auto feature that needs a live isolate → the native
       // geofence path handles geofence-only users headlessly; don't start
-      // an empty foreground service.
+      // an empty foreground service.  Still re-register OS geofences here:
+      // this alarm is the reboot-safe heartbeat (re-armed by the native
+      // BootReceiver after reboot) that self-heals the native path without
+      // the app being opened.
       if (!await GeofenceScheduler.serviceRequired()) {
-        debugPrint('[GF_SCHED] No auto feature enabled — skip service start');
+        debugPrint('[GF_SCHED] No service-requiring feature — headless geofence self-heal');
+        await GeofenceMonitor.reRegisterFromHeadless();
         return true;
       }
 
@@ -93,9 +98,10 @@ void geofenceWorkmanagerCallback() {
       }
 
       // Guard: no auto feature that needs a live isolate → geofence-only
-      // users run headless via the native path; nothing to restart.
+      // users run headless via the native path; still self-heal geofences.
       if (!await GeofenceScheduler.serviceRequired()) {
-        debugPrint('[GF_SCHED] No auto feature enabled — skip restart');
+        debugPrint('[GF_SCHED] No service-requiring feature — headless geofence self-heal');
+        await GeofenceMonitor.reRegisterFromHeadless();
         return true;
       }
 
@@ -334,10 +340,15 @@ class GeofenceScheduler {
 
     if (!now.isBefore(start) && now.isBefore(end)) {
       // Nothing to monitor that needs a live isolate — geofence-only users
-      // punch via the native headless path (no service, no alarms).  If the
-      // user enables wifi/tracking later, the next app open re-arms.
+      // punch via the native headless path (no service process).  The
+      // shift-start alarm stays armed as the reboot-safe heartbeat: after a
+      // reboot the native BootReceiver re-arms it, and on fire the headless
+      // callback re-registers the OS geofences (self-heal without opening
+      // the app).  Cost: one alarm wakeup per day — negligible vs the
+      // service it replaces.
       if (!await serviceRequired()) {
-        debugPrint('[GF_SCHED] Within window but no service-requiring feature enabled — skipping service start');
+        debugPrint('[GF_SCHED] Within window — geofence-only: alarm = self-heal heartbeat, no service');
+        await scheduleNextShift(shift);
         return;
       }
 
@@ -370,12 +381,12 @@ class GeofenceScheduler {
       debugPrint('[GF_SCHED] NOT within shift window — start=${start}, end=$end');
     }
 
-    // Geofence-only: nothing to arm — native geofences + headless punch need
-    // no alarms.  Re-armed on the next app open if a service-requiring
-    // feature gets enabled.
-    if (await serviceRequired()) {
-      await scheduleNextShift(shift);
-    }
+    // Always arm the next shift-start alarm.  For service users it starts
+    // the service; for geofence-only users it is the reboot-safe self-heal
+    // heartbeat that re-registers OS geofences headlessly (see the
+    // workmanager callback).  The restart safety-net is NOT armed for
+    // geofence-only (no service to revive).
+    await scheduleNextShift(shift);
   }
 
   /// Cancel any pending shift-start and restart alarms.

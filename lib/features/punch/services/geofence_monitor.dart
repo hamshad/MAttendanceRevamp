@@ -255,6 +255,25 @@ class GeofenceMonitor {
     } catch (_) {}
   }
 
+  /// Headless re-registration entry — runs inside the WorkManager shift-start
+  /// callback isolate (no riverpod, no UI engine).  The shift-start alarm is
+  /// the reboot-safe heartbeat: after a device reboot it is re-armed by the
+  /// native BootReceiver, and when it fires this re-registers every OS
+  /// geofence (idempotent wipe+recreate, self-guarding on
+  /// permission/enabled/token) so the native auto-punch path self-heals
+  /// without the app ever being opened.  Registration only needs prefs +
+  /// plugin channels — both available headless.
+  static Future<void> reRegisterFromHeadless() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    if (!(prefs.getBool('geofence_auto_enabled') ?? false)) {
+      debugPrint('[GF_MON] headless re-register: geofence disabled — skip');
+      return;
+    }
+    debugPrint('[GF_MON] headless re-register: arming OS geofences');
+    await registerZones(); // providedDio null → builds prefs-only dio internally
+  }
+
   static Future<void> _ensureInitialized() async {
     try {
       await NativeGeofenceManager.instance.initialize();
