@@ -887,7 +887,7 @@ class WifiBackgroundWorker {
     await prefs.reload();
     // Check the main isolate's Hive key via SharedPreferences mirror
     // Main isolate writes this when toggling WiFi auto-punch
-    return prefs.getBool('wifi_auto_punch_enabled_bg') ?? true;
+    return prefs.getBool('wifi_auto_punch_enabled_bg') ?? false;
   }
 
   // ── HTTP Helpers ───────────────────────────────────────────────────────────
