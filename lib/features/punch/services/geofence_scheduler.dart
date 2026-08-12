@@ -188,6 +188,12 @@ class ContainmentCheckWorker {
   static Future<bool> run() async {
     try {
       debugPrint('[GF_SCHED] Containment check fired (headless)');
+      // Self-heal OS geofences: the system drops registrations on force-stop,
+      // OEM memory cleanups, and reboots.  Re-registering every 15 min
+      // (initialTriggers: {} — no enter catch-up here; containment reconcile
+      // handles catch-up) ensures the native EXIT path fires at the boundary
+      // instead of waiting for this worker's stale GPS fix.
+      await GeofenceMonitor.registerZones(initialTriggers: const {});
       await GeofencePunchHandler.instance.reconcileContainment(confirmOut: true);
     } catch (e) {
       debugPrint('[GF_SCHED] Containment check failed: $e');

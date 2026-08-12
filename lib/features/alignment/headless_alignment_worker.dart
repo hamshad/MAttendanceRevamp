@@ -88,6 +88,10 @@ class HeadlessAlignmentWorker {
     // punched in.  reconcileContainment self-gates on
     // enable/permission/token/location-service, and its OUT path verifies
     // against the server before punching.
+    // Self-heal OS geofences first (initialTriggers: {} — no enter catch-up;
+    // containment reconcile handles catch-up) so the native EXIT fires at
+    // the boundary.
+    await GeofenceMonitor.registerZones(initialTriggers: const {});
     await GeofencePunchHandler.instance.reconcileContainment(confirmOut: true);
   }
 
