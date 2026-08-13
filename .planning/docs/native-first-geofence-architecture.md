@@ -88,6 +88,10 @@
   checks wifi bg/fg + field tracking only — NOT geofence auto or client sites.)
 - Keep-alive FGS is a separate, lightweight process-holder (aggressive OEMs
   only) — not the combined service.
+- **Every service start path honors `serviceRequired()`** — WorkManager
+  shift/restart tasks, the native `GeofenceAlarmReceiver` (0b729e3), and the
+  Dart entrypoint itself (self-heal + stopSelf when geofence-only). No path
+  may cold-start the combined service for a geofence-only user.
 - `wifi_auto_punch_enabled_bg` defaults **false** (0ddb03a). It used to default
   true, which forced the combined service to start on shift start for
   geofence-only users.
@@ -165,6 +169,7 @@
 | `0ddb03a` | `wifi_auto_punch_enabled_bg` default → false (fixes service start leak) |
 | `e6ce478` | snapOutToBoundary added (cosmetic boundary snap) |
 | `8b6329e` | **Snap removed** (honesty rule) + movement-gated keep-alive GPS stream; zone identity + server-truth gates preserved |
+| `0b729e3` | **Native shift-start alarm gated**: `GeofenceAlarmReceiver` no longer starts the combined service when `serviceRequired()` is false (geofence-only = headless self-heal); Dart entrypoint self-heal+stop defense-in-depth |
 
 ## Verification
 
