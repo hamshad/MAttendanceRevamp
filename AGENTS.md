@@ -21,11 +21,14 @@ Context for any agent working in this repo. Architecture docs live in
 3. Geofence-only users must NOT get the combined background service
    (`serviceRequired()` checks wifi bg/fg + field tracking only). The
    keep-alive FGS is separate and lightweight: **all Android devices,
-   time-gated** (punched in OR inside the shift window — Android
-   requires a persistent notification for any FGS, and the user spec is
-   no "Geofence Active" banner; time-gating keeps the banner out of
-   nights/weekends, commits `8dc7894`/`47130be`). Headless WorkManager
-   containment stays only as fallback when the FGS can't start.
+   only while punched IN** (Android requires a persistent notification
+   for any FGS; IN itself needs no service — OS geofence ENTER is
+   motion-assisted and fires even with a dead process, field-proven 12h+
+   without app open. The FGS exists for the walk-out only: movement
+   stream catches it, OUT punch closes the service instantly — banner
+   exists exactly while at work, commits `8dc7894`/`47130be`/`8787c56`).
+   Headless WorkManager containment (15-min alarm, armed at every shift
+   start + on IN) stays as fallback when the FGS can't start.
    Android 15+ (`VANILLA_ICE_CREAM`): never start the FGS from
    `BOOT_COMPLETED` — location-type FGS start is banned there; the
    exact-alarm revive path is exempt.

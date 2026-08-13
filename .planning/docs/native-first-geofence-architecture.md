@@ -65,23 +65,29 @@
   uses exact alarms (mode flag `gf_keep_alive_mode`). Non-aggressive OEMs:
   headless WorkManager task only — no foreground service, no banner.
 
-### Keep-alive service (process-holder, ALL Android devices)
+### Keep-alive service (process-holder, ALL Android devices, punched-IN only)
 
 - `OemKeepAliveService` FGS (ID 889) runs when no feature needs the combined
-  service, **all Android devices** (uniform behavior — user decision, no
-  headless-only OEM split: Android kills dormant processes on any ROM, so
-  every device gets the same process holder). Started/revived by main
-  isolate, containment alarm (exact alarm), BootReceiver (pre-Android 15
-  only).
-- **Time-gated (user spec: no "Geofence Active" banner outside work):**
-  punched in **OR** within the shift window — `keepAliveActive()`
-  (native) / `_withinShiftWindow()` (Dart, mirrors the native parser:
-  HH:mm start, local-ISO end, overnight rollover). Android legally forces
-  a persistent notification on any FGS, so running it only while
-  monitoring is actually needed keeps the banner out of
-  nights/weekends (commits `8dc7894`/`47130be`). The exact containment
-  alarm re-evaluates every 15 min and revives the FGS the moment work
-  hours start or the user punches in.
+  service, **all Android devices**, **ONLY while punched IN** (user
+  design, `8787c56`). Started on the IN punch and stopped the instant the
+  OUT punch persists — `_persistPunchState` drives it from ANY isolate
+  (headless punches included). Revived by containment alarm (exact alarm)
+  and BootReceiver (pre-Android 15 only) when a live process is needed
+  (punched in && process died).
+- **Why IN-only:** IN needs no service — OS geofence ENTER is
+  motion-assisted and fires instantly even with a dead process
+  (field-proven 12h+ without app open). OUT is the gap: delayed OS EXIT
+  needs the movement-gated stream, which needs a live process. The FGS is
+  exactly as big as the problem: banner exists while the user is at work,
+  gone the moment they leave (Android legally forces a persistent
+  notification on any FGS — punch-state gating is the user-spec answer).
+- **Movement-gated GPS stream while punched in** (`field_tracking_service.dart`
+  keep-alive branch): `getPositionStream` high accuracy,
+  `distanceFilter: 30` → stationary desk = zero fixes (no GPS churn); walking
+  out = fix every ~30m. First fix outside ALL office radii
+  (`isOutsideAllOffices`, fixed radius+25m band) → immediate
+  `reconcileContainment(confirmOut:true)` → honest OUT at the confirm fix.
+  Stream self-cancels once punched out.
 - **Android 15 (API 35)+:** never start the FGS from `BOOT_COMPLETED` —
   `location`-type FGS start is banned there (throws
   `ForegroundServiceStartNotAllowedException`); the exact-alarm revive
@@ -90,7 +96,10 @@
 - **Headless WorkManager containment is the FALLBACK only** (FGS start
   blocked / already running full service): one-shot containment check,
   no process holder, no banner — punch accuracy drops to alarm-interval
-  latency when the FGS is unavailable.
+  latency when the FGS is unavailable. Chain bootstrapped at every shift
+  start (GeofenceAlarmReceiver arms it while geofence auto is on —
+  headless ENTER punches can't reach the Dart MethodChannel), dies at the
+  first post-shift fire when nothing is needed.
 - **Movement-gated GPS stream while punched in** (`field_tracking_service.dart`
   keep-alive branch, aggressive devices): `getPositionStream` high accuracy,
   `distanceFilter: 30` → stationary desk = zero fixes (no GPS churn); walking
@@ -197,6 +206,7 @@
 | `72bf9d7` | **Keep-alive FGS = aggressive OEMs only** (user spec: no "Geofence Active" banner — Android requires a persistent notification for any FGS): non-aggressive OEMs run headless (OS geofence + 15-min containment alarm; OUT punches at the alarm fire with the fixed 45m band); movement-gated stream stays for aggressive devices |
 | `8dc7894` | **Keep-alive FGS time-gated** (user spec: no banner outside work): aggressive OEM AND (punched in OR within shift window) — `keepAliveActive()`/`_withinShiftWindow()`; night/weekend = zero banner, containment alarm revives the FGS within 15 min when needed. **Android 15+ fix**: BootReceiver no longer starts the FGS from `BOOT_COMPLETED` (location-type FGS start banned on API 35+ — exact-alarm revive path exempt); also stops `was_field_tracking` full-service start from being clobbered by the keep-alive mode flag |
 | `47130be` | **Keep-alive FGS on ALL devices** (user decision — uniform behavior, no headless-only OEM split): `AggressiveOem` gate dropped from Dart start + `keepAliveActive()`; headless WorkManager containment demoted to fallback when the FGS can't start; Android 15 boot guard now applies device-wide |
+| `8787c56` | **FGS punched-IN only (user design)**: time-gate (shift window) replaced by punch-state lifecycle — `_persistPunchState` starts the FGS on IN, stops it on OUT (banner exists exactly while at work; IN needs no service, field-proven). Keep-alive gate = armed && In; GeofenceAlarmReceiver arms the containment chain at every shift start while geofence auto is on (headless ENTER punch can't reach the Dart MethodChannel to bootstrap it); `_withinShiftWindow` (Dart) removed |
 
 ## Verification
 
