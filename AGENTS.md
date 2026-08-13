@@ -20,9 +20,10 @@ Context for any agent working in this repo. Architecture docs live in
    Never replace it with polling as the primary mechanism.
 3. Geofence-only users must NOT get the combined background service
    (`serviceRequired()` checks wifi bg/fg + field tracking only). The
-   keep-alive FGS is separate and lightweight: all OEMs while punched in
-   (movement-gated OUT monitor), aggressive OEMs additionally as process
-   holder regardless of punch state.
+   keep-alive FGS is separate and lightweight: **aggressive OEMs only**
+   (as process holder — Android requires a persistent notification for
+   any FGS, and the user spec is no "Geofence Active" banner). Other
+   OEMs run headless: OS geofence + the 15-min containment alarm.
 4. `wifi_auto_punch_enabled_bg` defaults **false**. A `?? true` here leaks a
    service start (commit `0ddb03a`).
 5. Containment alarm + alignment worker must call

@@ -62,28 +62,29 @@
   guard, honest confirm-fix location).
 - `HeadlessAlignmentWorker._runInner()` does the same heal+reconcile.
 - On aggressive OEMs the receiver additionally revives the keep-alive FGS and
-  uses exact alarms (mode flag `gf_keep_alive_mode`).
+  uses exact alarms (mode flag `gf_keep_alive_mode`). Non-aggressive OEMs:
+  headless WorkManager task only — no foreground service, no banner.
 
-### Keep-alive service (movement-gated OUT monitor; process-holder on aggressive OEMs)
+### Keep-alive service (process-holder on aggressive OEMs only)
 
 - `OemKeepAliveService` FGS (ID 889) runs when no feature needs the combined
-  service:
-  - **aggressive OEMs** (MIUI/Redmi/POCO/Honor/Oppo/Realme/OnePlus/Vivo):
-    always, as process holder — these ROMs won't spawn the app from
-    background, and the service holding the process is what makes geofence/
-    alarm/WorkManager work. Started/revived by main isolate, containment
-    alarm (exact alarm), BootReceiver.
-  - **all OEMs while punched in**: as the movement-gated OUT monitor — the
-    OS EXIT is unreliable in Doze, and waiting for the 15-min containment
-    alarm punches OUT far past the boundary (149m incidents). Started via
-    `OemKeepAliveService.startIfNeeded()`, revived headlessly by the native
-    containment alarm / BootReceiver when punched in.
+  service, **aggressive OEMs only** (MIUI/Redmi/POCO/Honor/Oppo/Realme/
+  OnePlus/Vivo): always, as process holder — these ROMs won't spawn the app
+  from background, and the service holding the process is what makes
+  geofence/alarm/WorkManager work. Started/revived by main isolate,
+  containment alarm (exact alarm), BootReceiver.
+- **Other OEMs NEVER get the keep-alive** (user spec: no "Geofence Active"
+  banner — Android requires a persistent notification for any foreground
+  service). Stock Android runs the OS geofence + the headless 15-min
+  containment alarm with no process holding; with the fixed 45m OUT band the
+  alarm punches at ~boundary+25m, worst-case one alarm interval late.
 - **Movement-gated GPS stream while punched in** (`field_tracking_service.dart`
-  keep-alive branch): `getPositionStream` high accuracy, `distanceFilter: 30`
-  → stationary desk = zero fixes (no GPS churn); walking out = fix every
-  ~30m. First fix outside ALL office radii (`isOutsideAllOffices`, accuracy
-  margin 2x clamped 10–250m) → immediate `reconcileContainment(confirmOut:true)`
-  → honest OUT at the confirm fix. Stream self-cancels once punched out.
+  keep-alive branch, aggressive devices): `getPositionStream` high accuracy,
+  `distanceFilter: 30` → stationary desk = zero fixes (no GPS churn); walking
+  out = fix every ~30m. First fix outside ALL office radii
+  (`isOutsideAllOffices`, fixed radius+25m band) → immediate
+  `reconcileContainment(confirmOut:true)` → honest OUT at the confirm fix.
+  Stream self-cancels once punched out.
 - No timers. Stops on `stopKeepAlive` / `stop`.
 - The combined service (tracking/wifi) is separate — `startIfWithinShiftWindow`
   stops keep-alive before starting it; never both.
@@ -180,6 +181,7 @@
 | `ef0ce33` | **Universal OUT monitor + tight IN band**: keep-alive FGS + movement stream now run on ALL OEMs while punched in (not just aggressive): Nothing/stock Android get boundary-accurate OUT too (was 15-min containment fallback at 149m); IN margin capped at `min(2×accuracy, radius)` — a 20m-radius office can no longer punch IN at 61m |
 | `77eb8af` | **IN band tightened to 1.5x radius**: IN margin cap `min(2×accuracy, radius)` → `min(2×accuracy, radius/2)` — 20m-radius office punches IN within 30m (user decision) |
 | `ab070de` | **Fixed punch bands (user spec)**: IN = `radius+5m` fixed (25m @ 20m office, 105m @ 100m office — never 150m), accuracy as trust floor (fixes claiming worse than the radius defer to the OS crossing point); OUT = `radius+25m` fixed (45m) with two-fix confirmation; stream trigger mirrors OUT band. Accuracy never widens either band — the 2×accuracy margins caused the 61m IN and the delayed 149m OUT |
+| `[keep-alive revert]` | **Keep-alive FGS = aggressive OEMs only** (user spec: no "Geofence Active" banner — Android requires a persistent notification for any FGS): non-aggressive OEMs run headless (OS geofence + 15-min containment alarm; OUT punches at the alarm fire with the fixed 45m band); movement-gated stream stays for aggressive devices |
 
 ## Verification
 
