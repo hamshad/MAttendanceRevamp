@@ -1,7 +1,8 @@
 # Native-First Geofence: Battery & Reliability Architecture
 
-> Status: implemented (commits below), pending field test by user
-> Date: 2026-08-11
+> Status: implemented, field-verified on user devices (446m / 104m / 80m
+> late-EXIT incidents all fixed)
+> Date: 2026-08-13 (updated; original 2026-08-11)
 > Scope: Android auto-punch (iOS intentionally out of scope — user decision)
 
 ## Goal
@@ -10,6 +11,8 @@
 - Background service kept only where a live isolate is genuinely required
 - Zero or near-zero battery cost while punches stay reliable
 - Reboot-safe self-healing without opening the app
+- **Honest data**: every punch records the REAL detection location. We do
+  NOT rewrite/snap coordinates (see "Honesty rule" below).
 
 ## Key architectural facts (verified in plugin source 2026-08-10/11)
 
@@ -27,31 +30,126 @@
 4. The punch pipeline (GPS gate → zone identity → server-truth coordinator →
    POST → notification) runs identically in the headless isolate.
 
-## Current architecture (post-changes)
+## Honesty rule (2026-08-13 — user decision, do not regress)
 
-### Punch paths
-| Path | When | Battery |
-|---|---|---|
-| OS geofence ENTER/EXIT → WorkManager headless punch | Always (primary) | ~0 (OS fused location, no polling) |
-| App resume: reconcile + registerZones (initialTriggers re-fires ENTER catch-up) | App opened | ~0 |
-| Shift-start alarm fires headless → reRegisterFromHeadless() | 1 wakeup/day | ~0 |
+- Punch locations are the truth: OS crossing point or the reconcile confirm
+  fix, **never snapped/rewritten**.
+- `snapOutToBoundary` was added (e6ce478) to make late-OS-exit punches read at
+  the boundary, then **removed** (8b6329e) when the user proved it lied: an
+  ~80m actual walk-out logged 20m. Inconsistency between logs and reality is
+  worse than an honest big number.
+- The accurate-EXIT problem is solved at the source instead: movement-gated
+  GPS in the keep-alive service catches the crossing itself (below).
 
-### Service process (`flutter_background_service`)
-Runs ONLY when `serviceRequired()`: wifi auto-punch (bg|fg) or field tracking.
-Geofence-only users: service never starts, restart safety-net never arms.
+## Punch paths (all of them)
 
-### Alarms
+| Path | When | Battery | Notes |
+|---|---|---|---|
+| OS geofence ENTER/EXIT → WorkManager headless punch | Always (primary) | ~0 (OS fused location, no polling) | OS EXIT can fire late in Doze/battery-saver — see containment loop + keep-alive stream |
+| App resume: reconcile + registerZones (initialTriggers re-fires ENTER catch-up) | App opened | ~0 | |
+| Shift-start alarm fires headless → reRegisterFromHeadless() | 1 wakeup/day | ~0 | |
+| **Containment loop** (below) | Every 15 min while armed | 1 native alarm wakeup / 15 min | Self-heals missed IN/OUT |
+| **Keep-alive stream** (aggressive OEMs only) | While punched in | GPS only while moving ≥30m (0 fixes at desk) | Catches the EXIT aggressive ROMs drop |
+
+### Containment loop (self-healing, all Android users)
+
+- Native `ContainmentAlarmReceiver` (REQUEST_CODE 902) fires every 15 min
+  while armed: armed = `gf_containment_alarm_armed` flag AND (punched In OR
+  in shift window). `_persistPunchState` flips the flag on every punch.
+- Alarm → WorkManager headless → `ContainmentCheckWorker.run()` →
+  `registerZones(initialTriggers: {})` (re-registers dropped OS fences) →
+  `reconcileContainment(confirmOut: true)` (two back-to-back fixes, jump
+  guard, honest confirm-fix location).
+- `HeadlessAlignmentWorker._runInner()` does the same heal+reconcile.
+- On aggressive OEMs the receiver additionally revives the keep-alive FGS and
+  uses exact alarms (mode flag `gf_keep_alive_mode`).
+
+### Keep-alive service (aggressive OEMs: MIUI/Redmi/POCO/Honor/Oppo/Realme/OnePlus/Vivo)
+
+- `OemKeepAliveService` FGS (ID 889) exists ONLY to hold the process so OS
+  geofence transitions, the containment alarm and WorkManager execute
+  in-process (these ROMs won't spawn the app from background).
+- `AggressiveOem` brand matcher (native channel `isAggressiveOem`, cached in
+  `gf_aggressive_oem`). BootReceiver revives it after reboot.
+- **Movement-gated GPS stream while punched in** (`field_tracking_service.dart`
+  keep-alive branch): `getPositionStream` high accuracy, `distanceFilter: 30`
+  → stationary desk = zero fixes (no GPS churn); walking out = fix every
+  ~30m. First fix outside ALL office radii (`isOutsideAllOffices`, accuracy
+  margin 2x clamped 10–250m) → immediate `reconcileContainment(confirmOut:true)`
+  → honest OUT at the confirm fix. Stream self-cancels once punched out.
+- No timers. Stops on `stopKeepAlive` / `stop`.
+- The combined service (tracking/wifi) is separate — `startIfWithinShiftWindow`
+  stops keep-alive before starting it; never both.
+
+## Service process (`flutter_background_service`, combined service)
+
+- Runs ONLY when `serviceRequired()`: wifi auto-punch (bg|fg) or field tracking.
+- **Geofence-only users: combined service never starts.** (`serviceRequired()`
+  checks wifi bg/fg + field tracking only — NOT geofence auto or client sites.)
+- Keep-alive FGS is a separate, lightweight process-holder (aggressive OEMs
+  only) — not the combined service.
+- `wifi_auto_punch_enabled_bg` defaults **false** (0ddb03a). It used to default
+  true, which forced the combined service to start on shift start for
+  geofence-only users.
+
+## Alarms
+
 - Shift-start alarm: armed for ALL users (service start for wifi/tracking;
   reboot-safe self-heal heartbeat for geofence-only). BootReceiver re-arms
   after reboot.
 - Restart safety-net (+15 min): service users only.
+- Containment alarm (15 min, REQUEST_CODE 902): all users while armed — see
+  containment loop. Native exact alarm + keep-alive revival on aggressive OEMs.
 
-### Battery budget in the 60s poll (wifi/tracking users)
-- One position reused for all offices (was one fresh fix per office per poll)
-- Last-known position reused when <10 min old (stationary = 0 GPS fixes)
-- 90s fix-budget window between fresh fixes
-- WiFi-proxy skip: on registered office AP, wifi worker owns IN, reconcile skips GPS
-- Stale-cache guard: >10 min old cache never trusted (can't fabricate visits)
+## Battery principles
+
+- OS fused geofence = primary detection (~0 cost). Never poll as primary.
+- Movement-gated streams (distanceFilter) instead of timers wherever possible.
+- One position reused for all offices; last-known reused when <10 min old;
+  90s fix-budget window; WiFi-proxy skip (on registered office AP, wifi worker
+  owns IN, reconcile skips GPS); stale-cache guard (>10 min never trusted).
+- Keep-alive stream: high accuracy but distanceFilter 30 → battery only while
+  walking.
+
+## Honest OEM limits
+
+| Barrier | Effect | Mitigation |
+|---|---|---|
+| Force-stop (Settings) | Geofences removed + broadcasts blocked until app reopened | OS design, uncodable; fg service running prevents it |
+| MIUI / aggressive OEM without autostart + battery exemption | Boot broadcasts blocked, alarms cleared, WorkManager throttled → nothing runs until app opened once | Autostart + battery-exemption onboarding (exists); after one open, heartbeat + resume re-register take over |
+| MIUI with exemptions | Everything works | Keep-alive FGS + exact containment alarm guarantee in-process execution |
+| Battery restrictions (tolerant OEMs) | Headless punch proven working (user device test) | — |
+| Late OS EXIT (Doze/battery-saver) | OUT punches far past boundary (446m/104m/80m incidents) | Containment loop + keep-alive movement-gated stream punch near the crossing; location stays honest either way |
+
+## Zone persistence & identity
+
+- Zones persisted as JSON under `gf_zone_ids` / `gf_zone_$id`
+  (`GeofenceZone.toJson/fromJson`). Registered from the main isolate by
+  MainShell, re-registered/healed by: resume, containment alarm, alignment
+  worker, keep-alive start, shift-start alarm.
+- OUT zone-identity gate: only the fence the user is actually punched into
+  may punch OUT (spurious batch exits when a provider drops).
+- Server-truth gate: `PunchCoordinator.check` runs FIRST in `_executePunch`
+  (server decides; local gate only when server unreachable; offline queue).
+
+## Key files
+
+- `lib/features/punch/services/geofence_monitor.dart` — event pipeline,
+  reconcile, `_executePunch`, zone persistence, `GeofenceZone`
+- `lib/features/punch/services/geofence_scheduler.dart` — alarms,
+  `serviceRequired()`, `ContainmentCheckWorker`
+- `lib/features/punch/services/wifi_background_worker.dart` — wifi IN,
+  `_isEnabled()` default false
+- `lib/features/tracking/services/field_tracking_service.dart` — combined
+  service + keep-alive branch, `keepAliveOfficeZones`/`isOutsideAllOffices`
+- `lib/features/punch/services/oem_keep_alive_service.dart` +
+  `lib/core/utils/aggressive_oem.dart` — keep-alive FGS + OEM matcher
+- `android/app/src/main/kotlin/com/mattendance/mattendance_mobile/` —
+  `ContainmentAlarmReceiver.kt`, `MainActivity.kt`, `BootReceiver.kt`
+- Tests: `test/features/punch/services/geofence_monitor_test.dart`,
+  `test/features/tracking/services/keep_alive_monitor_test.dart`,
+  `test/core/utils/aggressive_oem_test.dart`,
+  `test/features/punch/services/geofence_scheduler_test.dart`
 
 ## Change log
 
@@ -61,26 +159,17 @@ Geofence-only users: service never starts, restart safety-net never arms.
 | `d0e03ee` | GPS+ wakeup budget: single fix/offices, last-known-first, 90s budget, wifi-proxy skip, poll 15s→60s, BSSID confirm 30s→90s |
 | `d5dfcab` | Phase 2: geofence-only = no service process, no restart alarm (`serviceRequired()` gate) |
 | `7c61ebe` | Shift-start alarm = reboot-safe heartbeat: headless `reRegisterFromHeadless()` self-heal |
-
-## Honest OEM limits
-
-| Barrier | Effect | Mitigation |
-|---|---|---|
-| Force-stop (Settings) | Geofences removed + broadcasts blocked until app reopened | OS design, uncodable; fg service running prevents it |
-| MIUI / aggressive OEM without autostart + battery exemption | Boot broadcasts blocked, alarms cleared, WorkManager throttled → nothing runs until app opened once | Autostart + battery-exemption onboarding (exists); after one open, heartbeat + resume re-register take over |
-| MIUI with exemptions | Everything works | — |
-| Battery restrictions (tolerant OEMs) | Headless punch proven working (user device test) | — |
-
-## What geofence-only users lost (accepted tradeoffs)
-
-- Background alignment warnings (no-connectivity / hidden-BSSID) → foreground
-  only today; **Phase 5 restores natively**
-- Offline queue flush on connectivity return → syncs on next app open
-- Missed-IN/OUT GPS recovery via poll → covered by native events + resume
-  reconcile
+| `9abc3f7`/`16bddfc`/`45e0d96` | Notification hygiene, confirmOut recovery, containment alarm |
+| `6a1f670` | Keep-alive FGS + `AggressiveOem` matcher for MIUI & friends |
+| `68ce662` | Zone self-heal in containment alarm + alignment worker (`registerZones(initialTriggers: {})` before reconcile) |
+| `0ddb03a` | `wifi_auto_punch_enabled_bg` default → false (fixes service start leak) |
+| `e6ce478` | snapOutToBoundary added (cosmetic boundary snap) |
+| `8b6329e` | **Snap removed** (honesty rule) + movement-gated keep-alive GPS stream; zone identity + server-truth gates preserved |
 
 ## Verification
 
-- Full suite 119/119 (`flutter test`)
-- `flutter analyze`: 0 errors (pre-existing infos only)
-- Not yet field-tested (user testing now)
+- Full suite 159/159 (`flutter test`)
+- `flutter analyze`: 0 errors (pre-existing infos/warnings only)
+- Field-tested: 446m → ~20m (containment loop), 104m → boundary (snap, then
+  reverted), 80m-actual-vs-20m-logged inconsistency → snap removed + live
+  stream (in testing)
