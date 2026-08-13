@@ -3,23 +3,32 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../../../core/utils/aggressive_oem.dart';
 import '../../tracking/services/field_tracking_service.dart';
 
-/// Lightweight foreground service for aggressive OEMs (MIUI & friends).
+/// Lightweight foreground service for ALL Android devices (uniform
+/// behavior — user decision: no headless-only OEM split).
 ///
-/// WHY: on MIUI/HyperOS, ColorOS/OxygenOS, Funtouch/OriginOS and MagicOS,
-/// background work without user exemptions is unreliable — WorkManager
-/// tasks don't spawn the app process, alarm receivers get deferred, and
-/// geofence transitions land in a process that can't start.  A foreground
-/// service is the ONE thing these ROMs reliably keep alive (battery-saver
-/// tier; it survives backgrounding, screen-off, Doze).
+/// WHY: Android kills dormant processes on any ROM, and a killed process
+/// can't deliver WorkManager results, alarm receivers or geofence
+/// transitions from background.  A foreground service is the one thing
+/// Android reliably keeps alive (battery-saver tier; survives
+/// backgrounding, screen-off, Doze) — on aggressive ROMs (MIUI &
+/// friends) it is effectively required, on stock Android it removes the
+/// same exemptions.
+///
+/// TIME-GATED (user spec: no "Geofence Active" banner outside work):
+/// the FGS runs only while monitoring is actually needed — punched in,
+/// or within the shift window.  Android legally forces a persistent
+/// notification on any FGS, so the gate keeps the banner out of
+/// nights/weekends; the native containment alarm re-evaluates every
+/// 15 min and revives the FGS the moment it is needed.
 ///
 /// This service does almost NOTHING on purpose: no GPS streams, no timers,
 /// no polling.  It only holds the process alive so the OS geofence
 /// receiver, the containment alarm and WorkManager tasks all run in an
 /// already-alive process.  Battery cost ≈ idle process + visible
-/// notification (the trade every MIUI user implicitly accepts).
+/// notification (the trade every user implicitly accepts, limited to
+/// work hours).
 ///
 /// Lifecycle (no app-open dependency once started):
 ///   - started from the main isolate (init / resume / within shift window)
@@ -50,18 +59,16 @@ class OemKeepAliveService {
   /// Start the keep-alive foreground service when warranted: an auto
   /// feature enabled + no feature needing the full service.
   ///
-  /// Aggressive OEMs ONLY, and only while monitoring is actually needed
-  /// (punched in, or within the shift window).  The service holds the
-  /// process so geofence/alarm/WorkManager run without exemptions — but
-  /// Android legally requires a persistent notification for any
-  /// foreground service, so keeping it running at night / outside the
-  /// shift (nothing left to monitor) would show a pointless "Geofence
-  /// Active" banner (user spec: no banner).  The native containment
-  /// alarm revives it within 15 min whenever it is needed again.
-  ///
-  /// Other OEMs NEVER get the keep-alive: stock Android runs the OS
-  /// geofence + the headless 15-min containment alarm (WorkManager) with
-  /// no process holding.
+  /// ALL Android devices (uniform behavior — the OS is equally willing
+  /// to kill any dormant process, aggressive OEM or not), and only while
+  /// monitoring is actually needed: punched in, or within the shift
+  /// window.  The service holds the process so geofence/alarm/
+  /// WorkManager run without exemptions — but Android legally requires a
+  /// persistent notification for any foreground service, so keeping it
+  /// running at night / outside the shift (nothing left to monitor)
+  /// would show a pointless "Geofence Active" banner (user spec: no
+  /// banner outside work).  The native containment alarm revives it
+  /// within 15 min whenever it is needed again.
   /// Main isolate only (needs the plugin channel).
   static Future<void> startIfNeeded() async {
     if (!Platform.isAndroid) return;
@@ -78,7 +85,6 @@ class OemKeepAliveService {
     if (!anyAuto) return;
     if (await _serviceRequired()) return; // full service owns the process
 
-    if (!await AggressiveOem.isAggressive()) return; // headless for others
     // Banner gate: only while there is something to monitor.
     if (prefs.getString('gf_last_punch_type') != 'In' &&
         !_withinShiftWindow(prefs)) {

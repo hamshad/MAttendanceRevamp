@@ -39,16 +39,13 @@ class BootReceiver : BroadcastReceiver() {
         // The alarm self-perpetuates once its first fire is scheduled.
         ContainmentAlarmReceiver.armFromPrefsIfNeeded(context)
 
-        // Aggressive OEMs (MIUI & friends): revive the keep-alive
-        // foreground service after reboot.  Aggressive ROMs won't spawn
-        // the app from background at all (the service holding the process
-        // is what makes geofence/alarm/WorkManager work without
-        // exemptions).  Other OEMs stay headless — Android requires a
-        // persistent notification for any foreground service, and the
-        // user spec is no "Geofence Active" banner; their containment
-        // check is the self-perpetuating headless alarm.  Set the mode
-        // flag so the Dart entrypoint runs keep-alive (light), never the
-        // full GPS service, unless wifi/tracking genuinely need it (then
+        // All Android devices: revive the keep-alive foreground service after
+        // reboot.  The OS is equally willing to kill any dormant process —
+        // the FGS holding the process is what makes geofence/alarm/
+        // WorkManager work without exemptions everywhere (uniform
+        // behavior, user decision).  Set the mode flag so the Dart
+        // entrypoint runs keep-alive (light), never the full GPS service,
+        // unless wifi/tracking genuinely need it (then
         // `was_field_tracking` above already starts the full service).
         // The FGS also stays down outside work hours (not punched in AND
         // outside the shift window): no pointless banner at

@@ -254,10 +254,11 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
     return;
   }
 
-  // ── Keep-alive mode (aggressive OEMs: MIUI & friends) ─────────────────
+  // ── Keep-alive mode (all Android devices, uniform) ──────────────────
   // The service exists here ONLY to keep the process alive so OS geofence
   // transitions, the containment alarm and WorkManager run in a live
-  // process (these ROMs won't spawn the app from background otherwise).
+  // process (Android kills dormant processes on any ROM — the FGS
+  // holding the process removes exemptions everywhere).
   // Heal geofences, re-check containment once, then run a movement-gated
   // GPS stream while punched in (catches the EXIT aggressive OEMs drop).
   if (prefs.getBool(OemKeepAliveService.keepAliveModeKey) ?? false) {

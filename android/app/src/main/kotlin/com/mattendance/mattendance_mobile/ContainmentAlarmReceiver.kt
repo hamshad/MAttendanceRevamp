@@ -201,19 +201,31 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
         }
 
         /**
-         * Keep-alive FGS gate: aggressive OEM + punch/shift-window need.
-         * The FGS holds the process so geofence/alarm/WorkManager run
-         * without exemptions — but Android legally forces a persistent
-         * notification on any foreground service, and the user spec is
-         * NO "Geofence Active" banner.  Running it only while monitoring
-         * is actually needed (punched in, or inside the shift window)
+         * Keep-alive FGS gate: ALL Android devices, only while monitoring
+         * is actually needed (punched in, or inside the shift window).
+         * Android is equally willing to kill any dormant process — the
+         * FGS is what makes OS geofence/alarm/WorkManager work without
+         * exemptions everywhere, and giving every device the same
+         * mechanism keeps punch behavior uniform (user decision — no
+         * headless-only OEM split).  Android legally forces a persistent
+         * notification on any FGS, and the user spec is no "Geofence
+         * Active" banner outside work, so the punch/shift-window gate
          * keeps the banner out of nights/weekends entirely; the exact
          * containment alarm re-evaluates every 15 min and revives it the
          * moment work hours start or the user punches in.
          */
-        fun keepAliveActive(context: Context): Boolean {
-            if (!isAggressiveOem(context)) return false
-            return stillNeeded(context)
+        fun keepAliveActive(context: Context): Boolean = stillNeeded(context)
+
+        /** Headless containment check: WorkManager spawns a fresh engine, no FGS. */
+        private fun enqueueHeadlessContainment(context: Context) {
+            val input = Data.Builder()
+                .putString(BackgroundWorker.DART_TASK_KEY, TASK_NAME)
+                .build()
+            val request = OneTimeWorkRequest.Builder(BackgroundWorker::class.java)
+                .setInputData(input)
+                .build()
+            WorkManager.getInstance(context).enqueue(request)
+            Log.d(TAG, "Containment WorkManager task enqueued")
         }
     }
 
@@ -247,39 +259,40 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
                 // the mode flag so the Dart entrypoint runs keep-alive
                 // (heal geofences + one containment check + the
                 // movement-gated OUT monitor, NOT the full GPS service).
-                // Aggressive OEMs ONLY: geofence transitions, WorkManager
-                // and alarms need a live process on these ROMs.
-                // Other OEMs stay headless (WorkManager task below):
-                // Android requires a persistent notification for any
-                // foreground service, and the user spec is NO
-                // "Geofence Active" banner — their 15-min headless check
-                // punches OUT at the alarm fire (fixed 45m band), worst
-                // case one alarm interval late.
-                // The FGS also stays down outside work hours (not punched
-                // in AND outside the shift window): nothing left to
-                // monitor, so no pointless banner at night/weekend.
+                // ALL devices (uniform behavior — user decision): the FGS
+                // holds the process so geofence transitions, WorkManager
+                // and alarms run without exemptions on any ROM, and the
+                // movement-gated stream catches the EXIT near the boundary
+                // (no 15-min-alarm-late OUT).  The FGS stays down outside
+                // work hours (not punched in AND outside the shift
+                // window): nothing left to monitor, so no pointless
+                // banner at night/weekend.
                 prefs.edit()
                     .putBoolean("flutter.gf_keep_alive_mode", true)
                     .apply()
-                val serviceIntent = Intent(context, BackgroundService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(serviceIntent)
-                } else {
-                    context.startService(serviceIntent)
+                val started = try {
+                    val serviceIntent = Intent(context, BackgroundService::class.java)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(serviceIntent)
+                    } else {
+                        context.startService(serviceIntent)
+                    }
+                    true
+                } catch (e: Exception) {
+                    Log.w(TAG, "FGS start blocked — falling back to headless WorkManager: $e")
+                    false
                 }
-                Log.d(TAG, "Keep-alive foreground service revived")
+                if (started) {
+                    Log.d(TAG, "Keep-alive foreground service revived")
+                } else {
+                    enqueueHeadlessContainment(context)
+                }
             } else {
-                // Standard ROMs: headless WorkManager task is enough — the
-                // plugin's BackgroundWorker spawns a fresh engine, runs the
-                // Dart containment callback, no foreground service involved.
-                val input = Data.Builder()
-                    .putString(BackgroundWorker.DART_TASK_KEY, TASK_NAME)
-                    .build()
-                val request = OneTimeWorkRequest.Builder(BackgroundWorker::class.java)
-                    .setInputData(input)
-                    .build()
-                WorkManager.getInstance(context).enqueue(request)
-                Log.d(TAG, "Containment WorkManager task enqueued")
+                // Fallback (service already running full, or FGS denied):
+                // headless WorkManager task — the plugin's BackgroundWorker
+                // spawns a fresh engine, runs the Dart containment
+                // callback, no foreground service involved.
+                enqueueHeadlessContainment(context)
             }
 
             // Self-perpetuating: arm the next fire.
