@@ -344,6 +344,25 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
     return;
   }
 
+  // ── Geofence-only gate (defense in depth) ─────────────────────────────
+  // The combined service exists ONLY for wifi auto-punch and field
+  // tracking.  A geofence-only config is served headlessly by the OS
+  // geofence + WorkManager + containment alarm — no live isolate needed.
+  // A stray cold start (e.g. native shift-start alarm racing the prefs
+  // flags) must self-heal and stop, never run the full GPS stream all day.
+  if (!await GeofenceScheduler.serviceRequired()) {
+    debugPrint('[GF_BG_ENTRY] Geofence-only config — self-heal then stop, '
+        'no combined service');
+    try {
+      await GeofenceMonitor.registerZones();
+      await GeofencePunchHandler.instance.reconcileContainment(confirmOut: true);
+    } catch (e) {
+      debugPrint('[GF_BG_ENTRY] Pre-stop self-heal failed: $e');
+    }
+    if (service is AndroidServiceInstance) service.stopSelf();
+    return;
+  }
+
   // Mandatory PRECISE location. Approximate (coarse) fixes are 500m–2km off —
   // silently breaking geofence auto-punch and field tracking. If the user
   // downgraded to approximate while the service was running, stop immediately

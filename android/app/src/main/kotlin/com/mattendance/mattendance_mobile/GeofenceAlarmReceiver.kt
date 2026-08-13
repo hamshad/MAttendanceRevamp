@@ -109,6 +109,26 @@ class GeofenceAlarmReceiver : BroadcastReceiver() {
             alarmManager.cancel(pendingIntent)
             pendingIntent.cancel()
         }
+
+        /**
+         * True when a live isolate genuinely needs to run the FULL combined
+         * background service (wifi auto-punch bg/fg or field tracking).
+         * Geofence-only users punch headlessly (OS geofence ENTER/EXIT →
+         * WorkManager + the 15-min containment alarm) — starting the
+         * combined service for them would burn battery with a continuous
+         * GPS stream for no benefit.  Must mirror
+         * GeofenceScheduler.serviceRequired() (Dart) and
+         * ContainmentAlarmReceiver.serviceRequired() (native).
+         */
+        private fun serviceRequired(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(
+                "FlutterSharedPreferences",
+                Context.MODE_PRIVATE,
+            )
+            return prefs.getBoolean("flutter.wifi_auto_punch_enabled_bg", false) ||
+                prefs.getBoolean("flutter.wifi_auto_punch_enabled", false) ||
+                prefs.getBoolean("flutter.field_tracking_enabled", false)
+        }
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -125,6 +145,28 @@ class GeofenceAlarmReceiver : BroadcastReceiver() {
         wakeLock.acquire(10_000L)
 
         try {
+            val prefs = context.getSharedPreferences(
+                "FlutterSharedPreferences",
+                Context.MODE_PRIVATE,
+            )
+
+            // Geofence-only config (no wifi auto / field tracking): the
+            // combined service must NOT start — the native shift alarm is
+            // the reboot-safe heartbeat here, and the WorkManager shift
+            // task (gated by the same flags on the Dart side) handles the
+            // headless geofence self-heal.  Starting the FGS anyway would
+            // run a full GPS stream all day for a user who only needs
+            // native geofence punching.
+            if (!serviceRequired(context)) {
+                Log.i(TAG, "No service-requiring feature — headless self-heal only, skipping service start")
+                prefs.edit()
+                    .putBoolean("gf_alarm_fired", true)
+                    .putLong("gf_alarm_fired_at", System.currentTimeMillis())
+                    .apply()
+                scheduleNextShiftAlarmFromPrefs(context)
+                return
+            }
+
             // 1. Start the combined background service.
             val serviceIntent = Intent(context, BackgroundService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -137,10 +179,6 @@ class GeofenceAlarmReceiver : BroadcastReceiver() {
 
             // 2. Write a SharedPreferences flag so the Dart side can detect a missed
             //    alarm even if BackgroundService fails to start the Dart isolate.
-            val prefs = context.getSharedPreferences(
-                "FlutterSharedPreferences",
-                Context.MODE_PRIVATE,
-            )
             prefs.edit()
                 .putBoolean("gf_alarm_fired", true)
                 .putLong("gf_alarm_fired_at", System.currentTimeMillis())
