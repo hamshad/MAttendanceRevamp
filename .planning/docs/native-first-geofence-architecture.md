@@ -69,10 +69,24 @@
 
 - `OemKeepAliveService` FGS (ID 889) runs when no feature needs the combined
   service, **aggressive OEMs only** (MIUI/Redmi/POCO/Honor/Oppo/Realme/
-  OnePlus/Vivo): always, as process holder — these ROMs won't spawn the app
+  OnePlus/Vivo): as process holder — these ROMs won't spawn the app
   from background, and the service holding the process is what makes
   geofence/alarm/WorkManager work. Started/revived by main isolate,
-  containment alarm (exact alarm), BootReceiver.
+  containment alarm (exact alarm), BootReceiver (pre-Android 15 only).
+- **Time-gated (user spec: no "Geofence Active" banner outside work):**
+  aggressive OEM **AND** (punched in **OR** within the shift window) —
+  `keepAliveActive()` (native) / `_withinShiftWindow()` (Dart, mirrors the
+  native parser: HH:mm start, local-ISO end, overnight rollover). Android
+  legally forces a persistent notification on any FGS, so running it only
+  while monitoring is actually needed keeps the banner out of
+  nights/weekends (commit `8dc7894`). The exact containment alarm
+  re-evaluates every 15 min and revives the FGS the moment work hours
+  start or the user punches in.
+- **Android 15 (API 35)+:** never start the FGS from `BOOT_COMPLETED` —
+  `location`-type FGS start is banned there (throws
+  `ForegroundServiceStartNotAllowedException`); the exact-alarm revive
+  path is exempt, so BootReceiver skips the start and the containment
+  alarm brings the service up within 15 min.
 - **Other OEMs NEVER get the keep-alive** (user spec: no "Geofence Active"
   banner — Android requires a persistent notification for any foreground
   service). Stock Android runs the OS geofence + the headless 15-min
@@ -182,6 +196,7 @@
 | `77eb8af` | **IN band tightened to 1.5x radius**: IN margin cap `min(2×accuracy, radius)` → `min(2×accuracy, radius/2)` — 20m-radius office punches IN within 30m (user decision) |
 | `ab070de` | **Fixed punch bands (user spec)**: IN = `radius+5m` fixed (25m @ 20m office, 105m @ 100m office — never 150m), accuracy as trust floor (fixes claiming worse than the radius defer to the OS crossing point); OUT = `radius+25m` fixed (45m) with two-fix confirmation; stream trigger mirrors OUT band. Accuracy never widens either band — the 2×accuracy margins caused the 61m IN and the delayed 149m OUT |
 | `72bf9d7` | **Keep-alive FGS = aggressive OEMs only** (user spec: no "Geofence Active" banner — Android requires a persistent notification for any FGS): non-aggressive OEMs run headless (OS geofence + 15-min containment alarm; OUT punches at the alarm fire with the fixed 45m band); movement-gated stream stays for aggressive devices |
+| `8dc7894` | **Keep-alive FGS time-gated** (user spec: no banner outside work): aggressive OEM AND (punched in OR within shift window) — `keepAliveActive()`/`_withinShiftWindow()`; night/weekend = zero banner, containment alarm revives the FGS within 15 min when needed. **Android 15+ fix**: BootReceiver no longer starts the FGS from `BOOT_COMPLETED` (location-type FGS start banned on API 35+ — exact-alarm revive path exempt); also stops `was_field_tracking` full-service start from being clobbered by the keep-alive mode flag |
 
 ## Verification
 
