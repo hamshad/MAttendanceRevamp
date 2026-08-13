@@ -36,7 +36,7 @@ Context for any agent working in this repo. Architecture docs live in
    server unreachable.
 8. **IN acceptance band capped**: margin for IN = `min(2×accuracy, radius)` —
    a 20m-radius office must never punch IN from 61m away (margin cap landed
-   with the universal monitor, commit `c8d3e4a`). OUT keeps the wide margin
+   with the universal monitor, commit `ef0ce33`). OUT keeps the wide margin
    (2×accuracy, clamp 10–250) — OUT needs tolerance, IN must stay tight.
 
 ## Conventions
