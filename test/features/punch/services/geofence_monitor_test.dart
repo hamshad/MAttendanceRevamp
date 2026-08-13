@@ -482,6 +482,70 @@ void main() {
     });
   });
 
+  group('IN acceptance band (small radius)', () {
+    // Custom 20m-radius office (the user's real config): the IN margin is
+    // capped at the radius, so a 61m fix must NOT punch IN from outside.
+    final smallRadiusPrefs = {
+      'geofence_auto_enabled': true,
+      'bg_allow_geofence_auto': true,
+      'bg_access_token': 'token',
+      'bg_refresh_token': 'refresh',
+      'auth_session_id': 'sess',
+      'gf_zone_ids': [_officeId],
+      'gf_zone_office_1': jsonEncode({
+        'name': 'HQ',
+        'lat': _officeLat,
+        'lng': _officeLng,
+        'radius': 20.0,
+        'isClientSite': false,
+        'officeId': 1,
+        'clientSiteId': null,
+      }),
+    };
+
+    test('fix 61m out with 20m radius → rejected (no IN)', () async {
+      SharedPreferences.setMockInitialValues(smallRadiusPrefs);
+      fakeGeo.position = _fixAt(0.00055, 0.0); // ~61m from center
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+    });
+
+    test('fix 35m out with 20m radius → accepted (inside 20+20 band)',
+        () async {
+      SharedPreferences.setMockInitialValues(smallRadiusPrefs);
+      fakeGeo.position = _fixAt(0.000315, 0.0); // ~35m
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'In');
+    });
+
+    test('fix far + OS crossing at boundary → punches at crossing', () async {
+      // The rescue: fresh fix poor (61m) but the OS ENTER crossing itself
+      // sits at ~20m (boundary) → punch records the honest crossing, not
+      // the far fix.
+      SharedPreferences.setMockInitialValues(smallRadiusPrefs);
+      fakeGeo.position = _fixAt(0.00055, 0.0); // ~61m
+      const crossing = Location(
+        latitude: _officeLat + 0.00018, // ~20m — on the boundary circle
+        longitude: _officeLng,
+      );
+
+      await GeofencePunchHandler.forTest(_dioWith(mock)).handleEvent(
+          _params(_officeId, GeofenceEvent.enter, triggerLoc: crossing));
+
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'In');
+      final lat = double.parse(mock.lastPayload!['Latitude'] as String);
+      expect(lat, closeTo(crossing.latitude, 1e-6));
+    });
+  });
+
   group('Punch gates', () {
     test('server already punched in + local In → no duplicate IN', () async {
       SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'In'));

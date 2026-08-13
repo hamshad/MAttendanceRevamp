@@ -49,7 +49,7 @@
 | App resume: reconcile + registerZones (initialTriggers re-fires ENTER catch-up) | App opened | ~0 | |
 | Shift-start alarm fires headless → reRegisterFromHeadless() | 1 wakeup/day | ~0 | |
 | **Containment loop** (below) | Every 15 min while armed | 1 native alarm wakeup / 15 min | Self-heals missed IN/OUT |
-| **Keep-alive stream** (aggressive OEMs only) | While punched in | GPS only while moving ≥30m (0 fixes at desk) | Catches the EXIT aggressive ROMs drop |
+| **Keep-alive stream** | While punched in (all OEMs) | GPS only while moving ≥30m (0 fixes at desk) | Catches the EXIT OS/Doze drops |
 
 ### Containment loop (self-healing, all Android users)
 
@@ -64,13 +64,20 @@
 - On aggressive OEMs the receiver additionally revives the keep-alive FGS and
   uses exact alarms (mode flag `gf_keep_alive_mode`).
 
-### Keep-alive service (aggressive OEMs: MIUI/Redmi/POCO/Honor/Oppo/Realme/OnePlus/Vivo)
+### Keep-alive service (movement-gated OUT monitor; process-holder on aggressive OEMs)
 
-- `OemKeepAliveService` FGS (ID 889) exists ONLY to hold the process so OS
-  geofence transitions, the containment alarm and WorkManager execute
-  in-process (these ROMs won't spawn the app from background).
-- `AggressiveOem` brand matcher (native channel `isAggressiveOem`, cached in
-  `gf_aggressive_oem`). BootReceiver revives it after reboot.
+- `OemKeepAliveService` FGS (ID 889) runs when no feature needs the combined
+  service:
+  - **aggressive OEMs** (MIUI/Redmi/POCO/Honor/Oppo/Realme/OnePlus/Vivo):
+    always, as process holder — these ROMs won't spawn the app from
+    background, and the service holding the process is what makes geofence/
+    alarm/WorkManager work. Started/revived by main isolate, containment
+    alarm (exact alarm), BootReceiver.
+  - **all OEMs while punched in**: as the movement-gated OUT monitor — the
+    OS EXIT is unreliable in Doze, and waiting for the 15-min containment
+    alarm punches OUT far past the boundary (149m incidents). Started via
+    `OemKeepAliveService.startIfNeeded()`, revived headlessly by the native
+    containment alarm / BootReceiver when punched in.
 - **Movement-gated GPS stream while punched in** (`field_tracking_service.dart`
   keep-alive branch): `getPositionStream` high accuracy, `distanceFilter: 30`
   → stationary desk = zero fixes (no GPS churn); walking out = fix every
@@ -86,8 +93,8 @@
 - Runs ONLY when `serviceRequired()`: wifi auto-punch (bg|fg) or field tracking.
 - **Geofence-only users: combined service never starts.** (`serviceRequired()`
   checks wifi bg/fg + field tracking only — NOT geofence auto or client sites.)
-- Keep-alive FGS is a separate, lightweight process-holder (aggressive OEMs
-  only) — not the combined service.
+- Keep-alive FGS is a separate, lightweight service (all OEMs while punched
+  in; aggressive OEMs always as process holder) — not the combined service.
 - **Every service start path honors `serviceRequired()`** — WorkManager
   shift/restart tasks, the native `GeofenceAlarmReceiver` (0b729e3), and the
   Dart entrypoint itself (self-heal + stopSelf when geofence-only). No path
@@ -170,6 +177,7 @@
 | `e6ce478` | snapOutToBoundary added (cosmetic boundary snap) |
 | `8b6329e` | **Snap removed** (honesty rule) + movement-gated keep-alive GPS stream; zone identity + server-truth gates preserved |
 | `0b729e3` | **Native shift-start alarm gated**: `GeofenceAlarmReceiver` no longer starts the combined service when `serviceRequired()` is false (geofence-only = headless self-heal); Dart entrypoint self-heal+stop defense-in-depth |
+| `c8d3e4a` | **Universal OUT monitor + tight IN band**: keep-alive FGS + movement stream now run on ALL OEMs while punched in (not just aggressive): Nothing/stock Android get boundary-accurate OUT too (was 15-min containment fallback at 149m); IN margin capped at `min(2×accuracy, radius)` — a 20m-radius office can no longer punch IN at 61m |
 
 ## Verification
 

@@ -47,12 +47,17 @@ class OemKeepAliveService {
         (prefs.getBool('field_tracking_enabled') ?? false);
   }
 
-  /// Start the keep-alive foreground service when warranted: aggressive
-  /// OEM + token + an auto feature + no feature needing the full service.
+  /// Start the keep-alive foreground service when warranted: an auto
+  /// feature enabled + no feature needing the full service.
+  ///
+  /// Aggressive OEMs: service holds the process so geofence/alarm/
+  /// WorkManager run without exemptions — start regardless of punch state.
+  /// Other OEMs: the service is the movement-gated OUT monitor — start
+  /// only while punched in (a "Geofence Active" notification at home,
+  /// punched out, would be pointless).
   /// Main isolate only (needs the plugin channel).
   static Future<void> startIfNeeded() async {
     if (!Platform.isAndroid) return;
-    if (!await AggressiveOem.isAggressive()) return;
 
     final prefs = await SharedPreferences.getInstance();
     if (prefs.getString('bg_access_token') == null ||
@@ -65,6 +70,10 @@ class OemKeepAliveService {
         (prefs.getBool('field_tracking_enabled') ?? false);
     if (!anyAuto) return;
     if (await _serviceRequired()) return; // full service owns the process
+
+    final aggressive = await AggressiveOem.isAggressive();
+    final punchedIn = prefs.getString('gf_last_punch_type') == 'In';
+    if (!aggressive && !punchedIn) return;
 
     final svc = FlutterBackgroundService();
     if (await svc.isRunning()) return;

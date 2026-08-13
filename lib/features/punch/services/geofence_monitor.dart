@@ -519,8 +519,12 @@ class GeofencePunchHandler {
 
       final dist = geo.Geolocator.distanceBetween(
           fix.latitude, fix.longitude, zone.latitude, zone.longitude);
+      // IN margin capped at the radius itself (see _verifyTransition): a
+      // 20m-radius office must not punch IN from 61m away via a loose
+      // 2x-accuracy band.
       final margin = _gpsMargin(fix.accuracy);
-      if (dist > zone.radius + margin) continue; // user not inside this office
+      final inMargin = margin > zone.radius ? zone.radius : margin;
+      if (dist > zone.radius + inMargin) continue; // user not inside this office
 
       debugPrint('[GF_MON] reconcile: ${zone.id} contains user '
           '(${dist.toStringAsFixed(0)}m / r=${zone.radius}m) — punching IN');
@@ -940,8 +944,17 @@ class GeofencePunchHandler {
     final margin = fix != null ? _gpsMargin(fix.accuracy) : 10.0;
 
     if (direction == 'In') {
-      // Fresh fix inside (radius + accuracy margin) → confirmed.
-      if (fixDist != null && fixDist <= zone.radius + margin) return fix;
+      // Fresh fix inside (radius + IN margin) → confirmed.  The IN margin
+      // is capped at the radius itself: a 20m-radius office must not punch
+      // IN from 61m away just because a fix's stated accuracy is ~30m
+      // (radius 20 + 2x30 = 80m band was far too loose).  Genuine
+      // crossings are still rescued below via the OS trigger location.
+      final inMargin = fix != null && fix.accuracy > 0
+          ? (_gpsMargin(fix.accuracy) > zone.radius
+              ? zone.radius
+              : _gpsMargin(fix.accuracy))
+          : 10.0;
+      if (fixDist != null && fixDist <= zone.radius + inMargin) return fix;
       // No usable fix / contradictory fix → trust the OS trigger location
       // only when it confirms crossing into the boundary area.
       if (trigDist != null && trigDist <= zone.radius + 50) {

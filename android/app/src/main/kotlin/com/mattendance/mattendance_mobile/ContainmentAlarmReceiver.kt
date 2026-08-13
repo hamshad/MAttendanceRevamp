@@ -223,16 +223,23 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
         wakeLock.acquire(30_000L)
 
         try {
-            if (isAggressiveOem(context) && !serviceRequired(context)) {
+            val prefs =
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            if (!serviceRequired(context) &&
+                (isAggressiveOem(context) ||
+                    prefs.getString(PREF_LAST_PUNCH_TYPE, null) == "In")
+            ) {
                 // Revive the keep-alive foreground service directly (exact
                 // alarm ⇒ exempt from background start restrictions).  Set
                 // the mode flag so the Dart entrypoint runs keep-alive
-                // (heal geofences + one containment check + idle holding
-                // the process), not the full GPS service — which is exactly
-                // what MIUI-class ROMs need for everything else to work
-                // (geofence transitions, WorkManager, alarms).
-                val prefs =
-                    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                // (heal geofences + one containment check + the
+                // movement-gated OUT monitor, NOT the full GPS service).
+                // Two reasons to hold the process:
+                //  - aggressive OEMs (MIUI-class): geofence transitions,
+                //    WorkManager and alarms need a live process
+                //  - all OEMs while punched in: the movement-gated GPS
+                //    stream catches the EXIT the OS drops, so punch-out
+                //    lands near the boundary instead of 15 min later
                 prefs.edit()
                     .putBoolean("flutter.gf_keep_alive_mode", true)
                     .apply()
@@ -242,7 +249,7 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
                 } else {
                     context.startService(serviceIntent)
                 }
-                Log.d(TAG, "Keep-alive foreground service revived (aggressive OEM)")
+                Log.d(TAG, "Keep-alive foreground service revived")
             } else {
                 // Standard ROMs: headless WorkManager task is enough — the
                 // plugin's BackgroundWorker spawns a fresh engine, runs the

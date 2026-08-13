@@ -39,18 +39,21 @@ class BootReceiver : BroadcastReceiver() {
         // The alarm self-perpetuates once its first fire is scheduled.
         ContainmentAlarmReceiver.armFromPrefsIfNeeded(context)
 
-        // Aggressive OEMs (MIUI & friends): also revive the keep-alive
-        // foreground service after reboot — these ROMs won't spawn the app
-        // from background at all, and the service holding the process is
-        // what makes geofence/alarm/WorkManager work without exemptions.
-        // Set the mode flag so the Dart entrypoint runs keep-alive (light),
-        // never the full GPS service, unless wifi/tracking genuinely need it
-        // (then `was_field_tracking` above already starts the full service).
+        // Aggressive OEMs (MIUI & friends) + anyone punched in: revive the
+        // keep-alive foreground service after reboot.  Aggressive ROMs won't
+        // spawn the app from background at all (the service holding the
+        // process is what makes geofence/alarm/WorkManager work without
+        // exemptions); while punched in, all OEMs get the movement-gated
+        // OUT monitor the service runs.  Set the mode flag so the Dart
+        // entrypoint runs keep-alive (light), never the full GPS service,
+        // unless wifi/tracking genuinely need it (then `was_field_tracking`
+        // above already starts the full service).
         val serviceRequired = prefs.getBoolean("flutter.wifi_auto_punch_enabled_bg", false) ||
             prefs.getBoolean("flutter.wifi_auto_punch_enabled", false) ||
             prefs.getBoolean("flutter.field_tracking_enabled", false)
-        if (ContainmentAlarmReceiver.isAggressiveOem(context) &&
-            !serviceRequired &&
+        val punchedIn = prefs.getString("flutter.gf_last_punch_type", null) == "In"
+        if (!serviceRequired &&
+            (ContainmentAlarmReceiver.isAggressiveOem(context) || punchedIn) &&
             prefs.getBoolean("flutter.gf_containment_alarm_armed", false)
         ) {
             prefs.edit().putBoolean("flutter.gf_keep_alive_mode", true).apply()

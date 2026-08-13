@@ -20,7 +20,9 @@ Context for any agent working in this repo. Architecture docs live in
    Never replace it with polling as the primary mechanism.
 3. Geofence-only users must NOT get the combined background service
    (`serviceRequired()` checks wifi bg/fg + field tracking only). The
-   keep-alive FGS (aggressive OEMs) is separate and lightweight.
+   keep-alive FGS is separate and lightweight: all OEMs while punched in
+   (movement-gated OUT monitor), aggressive OEMs additionally as process
+   holder regardless of punch state.
 4. `wifi_auto_punch_enabled_bg` defaults **false**. A `?? true` here leaks a
    service start (commit `0ddb03a`).
 5. Containment alarm + alignment worker must call
@@ -32,6 +34,10 @@ Context for any agent working in this repo. Architecture docs live in
    → server-truth `PunchCoordinator` (FIRST in `_executePunch`) → POST →
    offline queue → `_persistPunchState`. Server decides; local gate only when
    server unreachable.
+8. **IN acceptance band capped**: margin for IN = `min(2×accuracy, radius)` —
+   a 20m-radius office must never punch IN from 61m away (margin cap landed
+   with the universal monitor, commit `c8d3e4a`). OUT keeps the wide margin
+   (2×accuracy, clamp 10–250) — OUT needs tolerance, IN must stay tight.
 
 ## Conventions
 
