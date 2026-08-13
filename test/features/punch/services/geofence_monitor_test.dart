@@ -220,6 +220,27 @@ Map<String, Object> _basePrefs({String? lastType}) => {
       ..._zoneMeta(_officeId),
     };
 
+/// Custom 20m-radius office (the user's real config) — the band tests
+/// exercise fixed-slack semantics: IN at radius+5=25m, OUT at radius+25=45m.
+Map<String, Object> _smallRadiusPrefs({String? lastType}) => {
+      'geofence_auto_enabled': true,
+      'bg_allow_geofence_auto': true,
+      'bg_access_token': 'token',
+      'bg_refresh_token': 'refresh',
+      'auth_session_id': 'sess',
+      'gf_zone_ids': [_officeId],
+      if (lastType != null) 'gf_last_punch_type': lastType,
+      'gf_zone_office_1': jsonEncode({
+        'name': 'HQ',
+        'lat': _officeLat,
+        'lng': _officeLng,
+        'radius': 20.0,
+        'isClientSite': false,
+        'officeId': 1,
+        'clientSiteId': null,
+      }),
+    };
+
 Dio _dioWith(_MockInterceptor mock) =>
     Dio(BaseOptions(baseUrl: 'https://api.mattendance.com'))
       ..interceptors.add(mock);
@@ -483,28 +504,13 @@ void main() {
   });
 
   group('IN acceptance band (small radius)', () {
-    // Custom 20m-radius office (the user's real config): the IN margin is
-    // capped at the radius, so a 61m fix must NOT punch IN from outside.
-    final smallRadiusPrefs = {
-      'geofence_auto_enabled': true,
-      'bg_allow_geofence_auto': true,
-      'bg_access_token': 'token',
-      'bg_refresh_token': 'refresh',
-      'auth_session_id': 'sess',
-      'gf_zone_ids': [_officeId],
-      'gf_zone_office_1': jsonEncode({
-        'name': 'HQ',
-        'lat': _officeLat,
-        'lng': _officeLng,
-        'radius': 20.0,
-        'isClientSite': false,
-        'officeId': 1,
-        'clientSiteId': null,
-      }),
-    };
+    // Custom 20m-radius office (the user's real config): the IN band is a
+    // FIXED 5m slack past the radius (accept at most radius+5 = 25m).
+    // Accuracy never widens the band — the old 2x-accuracy margin is what
+    // let a 61m fix punch IN from outside.
 
     test('fix 61m out with 20m radius → rejected (no IN)', () async {
-      SharedPreferences.setMockInitialValues(smallRadiusPrefs);
+      SharedPreferences.setMockInitialValues(_smallRadiusPrefs());
       fakeGeo.position = _fixAt(0.00055, 0.0); // ~61m from center
 
       await GeofencePunchHandler.forTest(_dioWith(mock))
@@ -513,10 +519,10 @@ void main() {
       expect(mock.punchCalls, 0);
     });
 
-    test('fix 35m out with 20m radius → rejected (30m = 1.5x band cap)',
+    test('fix 35m out with 20m radius → rejected (past 20+5=25m band)',
         () async {
-      SharedPreferences.setMockInitialValues(smallRadiusPrefs);
-      fakeGeo.position = _fixAt(0.000315, 0.0); // ~35m — past 20+10=30m
+      SharedPreferences.setMockInitialValues(_smallRadiusPrefs());
+      fakeGeo.position = _fixAt(0.000315, 0.0); // ~35m — past 25m
 
       await GeofencePunchHandler.forTest(_dioWith(mock))
           .handleEvent(_params(_officeId, GeofenceEvent.enter));
@@ -524,10 +530,21 @@ void main() {
       expect(mock.punchCalls, 0);
     });
 
-    test('fix 25m out with 20m radius → accepted (inside 30m band)',
+    test('fix 25.1m out with 20m radius → rejected (band edge)', () async {
+      SharedPreferences.setMockInitialValues(_smallRadiusPrefs());
+      fakeGeo.position = _fixAt(0.000226, 0.0); // ~25.1m — just over 25m
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+    });
+
+    test('fix ~24.5m out with 20m radius → accepted (inside 25m band)',
         () async {
-      SharedPreferences.setMockInitialValues(smallRadiusPrefs);
-      fakeGeo.position = _fixAt(0.000225, 0.0); // ~25m — within 20+10=30m
+      // User spec: "~20-25m close to office radius 20m → punch IN".
+      SharedPreferences.setMockInitialValues(_smallRadiusPrefs());
+      fakeGeo.position = _fixAt(0.00022, 0.0); // ~24.5m — within 20+5=25m
 
       await GeofencePunchHandler.forTest(_dioWith(mock))
           .handleEvent(_params(_officeId, GeofenceEvent.enter));
@@ -536,11 +553,68 @@ void main() {
       expect(mock.lastDirection, 'In');
     });
 
+    test('fix inside radius but poor accuracy → untrusted, no fix punch',
+        () async {
+      // Trust floor: a fix claiming ±200m cannot corroborate the 5m slack —
+      // it must NOT punch the fix location (would be the 61m lie again).
+      // With no OS crossing available → rejected (reconcile picks it up).
+      SharedPreferences.setMockInitialValues(_smallRadiusPrefs());
+      fakeGeo.position = geo.Position(
+        latitude: _officeLat + 0.000108, // ~12m from center — but ±200m
+        longitude: _officeLng,
+        timestamp: DateTime.now(),
+        accuracy: 200,
+        altitude: 0,
+        altitudeAccuracy: 0,
+        heading: 0,
+        headingAccuracy: 0,
+        speed: 0,
+        speedAccuracy: 0,
+      );
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+    });
+
+    test('untrusted fix + OS crossing at boundary → punches at crossing',
+        () async {
+      // Same untrusted fix, but the OS ENTER crossing is available — the
+      // REAL boundary detection wins: punch records the honest ~20m
+      // crossing, not the far/untrusted fix.
+      SharedPreferences.setMockInitialValues(_smallRadiusPrefs());
+      fakeGeo.position = geo.Position(
+        latitude: _officeLat + 0.000108,
+        longitude: _officeLng,
+        timestamp: DateTime.now(),
+        accuracy: 200, // untrusted
+        altitude: 0,
+        altitudeAccuracy: 0,
+        heading: 0,
+        headingAccuracy: 0,
+        speed: 0,
+        speedAccuracy: 0,
+      );
+      const crossing = Location(
+        latitude: _officeLat + 0.00018, // ~20m — on the boundary circle
+        longitude: _officeLng,
+      );
+
+      await GeofencePunchHandler.forTest(_dioWith(mock)).handleEvent(
+          _params(_officeId, GeofenceEvent.enter, triggerLoc: crossing));
+
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'In');
+      final lat = double.parse(mock.lastPayload!['Latitude'] as String);
+      expect(lat, closeTo(crossing.latitude, 1e-6));
+    });
+
     test('fix far + OS crossing at boundary → punches at crossing', () async {
       // The rescue: fresh fix poor (61m) but the OS ENTER crossing itself
       // sits at ~20m (boundary) → punch records the honest crossing, not
       // the far fix.
-      SharedPreferences.setMockInitialValues(smallRadiusPrefs);
+      SharedPreferences.setMockInitialValues(_smallRadiusPrefs());
       fakeGeo.position = _fixAt(0.00055, 0.0); // ~61m
       const crossing = Location(
         latitude: _officeLat + 0.00018, // ~20m — on the boundary circle
@@ -554,6 +628,122 @@ void main() {
       expect(mock.lastDirection, 'In');
       final lat = double.parse(mock.lastPayload!['Latitude'] as String);
       expect(lat, closeTo(crossing.latitude, 1e-6));
+    });
+  });
+
+  group('IN band never scales with radius', () {
+    // User's objection: a 1.5x-radius margin makes a 100m office accept IN
+    // at 150m.  Fixed 5m slack keeps a 100m office at most 105m.
+
+    test('fix 120m with 100m radius → rejected (no 150m band)', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs());
+      fakeGeo.position = _fixAt(0.00108, 0.0); // ~120m — past 100+5=105m
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+    });
+
+    test('fix 104m with 100m radius → accepted (100+5=105m)', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs());
+      fakeGeo.position = _fixAt(0.000935, 0.0); // ~104m — within 105m
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'In');
+    });
+  });
+
+  group('OUT band (fixed 25m slack)', () {
+    // User spec: "out of radius + 25-30m → punch OUT".  For the 20m office
+    // that is radius+25 = 45m.  Accuracy never widens the band — the old
+    // 2x-accuracy margin delayed OUT until dist > radius + up to 250m.
+
+    test('exit + fix 46m out of 20m office → OUT punches', () async {
+      SharedPreferences.setMockInitialValues(
+          _smallRadiusPrefs(lastType: 'In'));
+      mock.isPunchedIn = true;
+      // Two back-to-back fixes both beyond 20+25=45m → confirmed OUT.
+      fakeGeo.positionQueue = [_fixAt(0.000414, 0.0), _fixAt(0.000414, 0.0)];
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.exit));
+
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'Out');
+    });
+
+    test('exit + fix 44m out of 20m office → rejected (inside 45m band)',
+        () async {
+      // 44m is still within radius+25 → not confidently out → no punch.
+      SharedPreferences.setMockInitialValues(
+          _smallRadiusPrefs(lastType: 'In'));
+      mock.isPunchedIn = true;
+      fakeGeo.position = _fixAt(0.000396, 0.0); // ~44m
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.exit));
+
+      expect(mock.punchCalls, 0);
+    });
+
+    test('exit + fix 46m out with poor accuracy → still OUT (no widening)',
+        () async {
+      // The 149m-miss root cause: a 60m accuracy claim used to widen the
+      // inside band to radius+120 → OUT delayed until ~140m+.  Fixed band
+      // + two-fix confirmation handles the accuracy instead.
+      SharedPreferences.setMockInitialValues(
+          _smallRadiusPrefs(lastType: 'In'));
+      mock.isPunchedIn = true;
+      final poor = geo.Position(
+        latitude: _officeLat + 0.000414, // ~46m
+        longitude: _officeLng,
+        timestamp: DateTime.now(),
+        accuracy: 60, // poor claim — band unchanged
+        altitude: 0,
+        altitudeAccuracy: 0,
+        heading: 0,
+        headingAccuracy: 0,
+        speed: 0,
+        speedAccuracy: 0,
+      );
+      fakeGeo.positionQueue = [poor, poor];
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.exit));
+
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'Out');
+    });
+
+    test('confirmOut: 46m out of 20m office → OUT punches', () async {
+      SharedPreferences.setMockInitialValues(_smallRadiusPrefs(lastType: 'In'));
+      mock.isPunchedIn = true;
+      fakeGeo.positionQueue = [_fixAt(0.000414, 0.0), _fixAt(0.000414, 0.0)];
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment(confirmOut: true);
+
+      expect(punched, isTrue);
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'Out');
+    });
+
+    test('confirmOut: 44m out of 20m office → no OUT, no confirm fix',
+        () async {
+      SharedPreferences.setMockInitialValues(_smallRadiusPrefs(lastType: 'In'));
+      mock.isPunchedIn = true;
+      fakeGeo.position = _fixAt(0.000396, 0.0); // ~44m — inside 45m band
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment(confirmOut: true);
+
+      expect(punched, isFalse);
+      expect(mock.punchCalls, 0);
+      expect(fakeGeo.currentPositionCalls, 1); // no second fix needed
     });
   });
 

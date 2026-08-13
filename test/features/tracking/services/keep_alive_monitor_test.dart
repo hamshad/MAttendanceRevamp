@@ -84,8 +84,8 @@ void main() {
       expect(isOutsideAllOffices(fixAt(0.0001, 0.0), [zone]), isFalse);
     });
 
-    test('just outside radius → false (accuracy margin absorbs it)', () {
-      // ~27m from center, 20m radius, 10m accuracy → margin 20m → inside.
+    test('just outside radius → false (inside 45m OUT band)', () {
+      // ~27m from center, 20m radius → within radius+25=45m band → inside.
       expect(isOutsideAllOffices(fixAt(0.00024, 0.0), [zone]), isFalse);
     });
 
@@ -103,18 +103,29 @@ void main() {
         isClientSite: false,
         officeId: 2,
       );
-      // Fix at ~66m north: outside HQ's 20m radius (66 > 20+20) but inside
-      // `other`'s 100m radius (45m from its center, 45 < 100+20).
+      // Fix at ~66m north: outside HQ's 45m band (66 > 20+25) but inside
+      // `other`'s band (45m from its center, 45 < 100+25).
       expect(isOutsideAllOffices(fixAt(0.0006, 0.0), [zone, other]), isFalse);
     });
 
-    test('poor accuracy widens the margin', () {
-      // ~44m out, 20m radius, accuracy 60 → margin 120 → still inside.
-      expect(isOutsideAllOffices(fixAt(0.0004, 0.0, accuracy: 60), [zone]),
-          isFalse);
-      // Same fix, tight accuracy → outside.
-      expect(isOutsideAllOffices(fixAt(0.0004, 0.0, accuracy: 10), [zone]),
+    test('accuracy never widens the OUT band (fixed 25m slack)', () {
+      // 46m out, 20m radius: past the radius+25=45m band → outside
+      // REGARDLESS of a poor 60m accuracy claim.  (The old 2x-accuracy
+      // margin kept such fixes "inside" until ~140m — the root cause of
+      // the delayed 149m OUT punch.)
+      expect(
+          isOutsideAllOffices(fixAt(0.000414, 0.0, accuracy: 60), [zone]),
           isTrue);
+      expect(
+          isOutsideAllOffices(fixAt(0.000414, 0.0, accuracy: 10), [zone]),
+          isTrue);
+      // 44m out: still within the 45m band → inside, whatever accuracy.
+      expect(
+          isOutsideAllOffices(fixAt(0.0004, 0.0, accuracy: 60), [zone]),
+          isFalse);
+      expect(
+          isOutsideAllOffices(fixAt(0.0004, 0.0, accuracy: 10), [zone]),
+          isFalse);
     });
 
     test('no zones → false', () {

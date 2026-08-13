@@ -394,6 +394,20 @@ class GeofencePunchHandler {
   /// unrelated fence.
   static const double _outCrossingTolerance = 250.0;
 
+  /// How far beyond a zone's radius a fix may sit and still confirm an IN
+  /// punch — fixed slack, user spec "~20-25m close to a 20m-radius office →
+  /// punch IN".  NEVER scales with radius: a 100m-radius office accepts at
+  /// most 105m, not 150m (scaled margins were the 61m-IN bug).
+  static const double _inSlackM = 5.0;
+
+  /// How far beyond every office radius a fix must sit before the missed-
+  /// EXIT path may punch OUT — fixed slack, user spec "out of radius +
+  /// 25-30m → punch OUT".  Accuracy NEVER widens this band: the old
+  /// 2x-accuracy margin delayed OUT until dist exceeded radius + up to
+  /// 250m (the 149m miss).  Misleading-accuracy fixes are handled by the
+  /// two-fix confirmation instead of band widening.
+  static const double _outSlackM = 25.0;
+
   /// Reconcile GPS budget.  The background poll reconciles containment on
   /// every tick while the user is punched out; throttling fixes to one per
   /// window keeps the service's GPS-radio cost bounded (the dominant
@@ -519,12 +533,11 @@ class GeofencePunchHandler {
 
       final dist = geo.Geolocator.distanceBetween(
           fix.latitude, fix.longitude, zone.latitude, zone.longitude);
-      // IN margin capped at HALF the radius (accept at most 1.5x radius —
-      // see _verifyTransition): a 20m-radius office punches IN within 30m,
-      // never from 61m via a loose 2x-accuracy band.
-      final margin = _gpsMargin(fix.accuracy);
-      final inMargin = margin > zone.radius / 2 ? zone.radius / 2 : margin;
-      if (dist > zone.radius + inMargin) continue; // user not inside this office
+      // IN band: fixed 5m slack past the radius (user spec ~20-25m at a
+      // 20m office).  Accuracy never widens — the old 2x-accuracy band
+      // punched IN from 61m with a 20m radius.  This is the guarantee
+      // path (no OS event): band check only.
+      if (dist > zone.radius + _inSlackM) continue; // user not inside this office
 
       debugPrint('[GF_MON] reconcile: ${zone.id} contains user '
           '(${dist.toStringAsFixed(0)}m / r=${zone.radius}m) — punching IN');
@@ -565,7 +578,10 @@ class GeofencePunchHandler {
     for (final zone in zones) {
       final dist = geo.Geolocator.distanceBetween(
           fix.latitude, fix.longitude, zone.latitude, zone.longitude);
-      if (dist <= zone.radius + _gpsMargin(fix.accuracy)) {
+      // OUT band: fixed 25m slack past the radius (user spec "out of
+      // radius + 25-30m → punch OUT").  Accuracy never widens this check —
+      // the old 2x-accuracy margin is what delayed OUT until 149m.
+      if (dist <= zone.radius + _outSlackM) {
         insideAny = true;
         break;
       }
@@ -584,7 +600,7 @@ class GeofencePunchHandler {
       for (final zone in zones) {
         final d = geo.Geolocator.distanceBetween(
             fix2.latitude, fix2.longitude, zone.latitude, zone.longitude);
-        if (d <= zone.radius + _gpsMargin(fix2.accuracy)) {
+        if (d <= zone.radius + _outSlackM) {
           debugPrint('[GF_MON] reconcile: confirm fix inside office — no OUT');
           return false;
         }
@@ -941,40 +957,42 @@ class GeofencePunchHandler {
         ? geo.Geolocator.distanceBetween(
             fix.latitude, fix.longitude, zone.latitude, zone.longitude)
         : null;
-    final margin = fix != null ? _gpsMargin(fix.accuracy) : 10.0;
 
     if (direction == 'In') {
-      // Fresh fix inside (radius + IN margin) → confirmed.  The IN margin
-      // is capped at HALF the radius (accept at most 1.5x radius): a
-      // 20m-radius office punches IN only within 30m, not 61m away just
-      // because a fix's stated accuracy is ~30m (radius + 2x accuracy =
-      // 80m band was far too loose).  Genuine crossings are still rescued
-      // below via the OS trigger location.
-      final inMargin = fix != null && fix.accuracy > 0
-          ? (_gpsMargin(fix.accuracy) > zone.radius / 2
-              ? zone.radius / 2
-              : _gpsMargin(fix.accuracy))
-          : 10.0;
-      if (fixDist != null && fixDist <= zone.radius + inMargin) return fix;
-      // No usable fix / contradictory fix → trust the OS trigger location
-      // only when it confirms crossing into the boundary area.
+      // IN band: fixed 5m slack past the radius (user spec ~20-25m at a
+      // 20m office).  Accuracy never widens the band — the old 2x-accuracy
+      // margin punched IN from 61m with a 20m radius.  Trust floor: a fix
+      // whose stated accuracy exceeds the whole radius cannot corroborate
+      // the 5m slack, so it must defer to the OS crossing point — the REAL
+      // boundary detection (honest crossing location, not a far fix).
+      if (fixDist != null &&
+          fixDist <= zone.radius + _inSlackM &&
+          fix!.accuracy <= zone.radius) {
+        return fix;
+      }
+      // No usable fix / untrusted / contradictory fix → trust the OS
+      // trigger location only when it confirms crossing into the
+      // boundary area.
       if (trigDist != null && trigDist <= zone.radius + 50) {
         return _toPosition(triggerLoc!);
       }
       return null;
     } else {
       // OUT (no usable crossing location): require the fresh fix strictly
-      // outside the radius — AND a second confirmatory fix (jump guard:
-      // wifi-derived fixes can sit 300-500m off, a single outside fix must
-      // never punch the user out while they are still inside the office).
-      if (fixDist == null || fixDist <= zone.radius + margin) return null;
+      // beyond the OUT band (radius + fixed 25m — user spec "out of
+      // radius + 25-30m → punch OUT"; accuracy never widens, the old
+      // 2x-accuracy margin delayed OUT until dist > radius + up to 250m)
+      // — AND a second confirmatory fix (jump guard: wifi-derived fixes
+      // can sit 300-500m off, a single outside fix must never punch the
+      // user out while they are still inside the office).
+      if (fixDist == null || fixDist <= zone.radius + _outSlackM) return null;
       final f = fix!;
 
       final fix2 = await _freshFix();
       if (fix2 == null) return null; // can't confirm → conservative: no punch
       final fix2Dist = geo.Geolocator.distanceBetween(
           fix2.latitude, fix2.longitude, zone.latitude, zone.longitude);
-      if (fix2Dist <= zone.radius + margin) return null;
+      if (fix2Dist <= zone.radius + _outSlackM) return null;
 
       // Implausible displacement between the two fixes = noise, not movement.
       final moved = geo.Geolocator.distanceBetween(
@@ -999,9 +1017,6 @@ class GeofencePunchHandler {
         speed: 0,
         speedAccuracy: 0,
       );
-
-  double _gpsMargin(double accuracy) =>
-      (accuracy * 2.0).clamp(10.0, 250.0);
 
   /// iOS fires the first event twice after reboot; Android may re-deliver.
   bool _dedupe(SharedPreferences prefs, GeofenceZone zone, String direction) {

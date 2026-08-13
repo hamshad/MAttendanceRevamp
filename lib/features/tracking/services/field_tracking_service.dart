@@ -90,18 +90,22 @@ List<GeofenceZone> keepAliveOfficeZones(SharedPreferences prefs) {
   return zones;
 }
 
-/// True when [fix] is outside EVERY office radius, allowing for GPS
-/// accuracy (margin = 2x accuracy, clamped 10-250m — same rule as
-/// GeofenceMonitor's office containment check).
+/// True when [fix] is outside EVERY office radius by the OUT band
+/// (radius + fixed 25m — mirrors GeofencePunchHandler's OUT slack, user
+/// spec "out of radius + 25-30m → punch OUT").
+///
+/// Accuracy NEVER widens this check: the old 2x-accuracy margin delayed
+/// OUT punches until dist exceeded radius + up to 250m (the 149m miss on
+/// the Nothing 3a).  Misleading-accuracy fixes are handled downstream by
+/// reconcileContainment's two-fix confirmation, not by band widening.
 ///
 /// Pure function — unit-testable.
 bool isOutsideAllOffices(Position fix, List<GeofenceZone> zones) {
   if (zones.isEmpty) return false;
-  final margin = (fix.accuracy * 2).clamp(10.0, 250.0);
   for (final z in zones) {
     final dist = Geolocator.distanceBetween(
         fix.latitude, fix.longitude, z.latitude, z.longitude);
-    if (dist <= z.radius + margin) return false; // still inside this office
+    if (dist <= z.radius + 25.0) return false; // still inside this office
   }
   return true;
 }
