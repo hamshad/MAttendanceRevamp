@@ -168,7 +168,7 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
         }
 
         /** True when now is inside [today's shift start, shift end]. */
-        private fun withinShiftWindow(context: Context): Boolean {
+        fun withinShiftWindow(context: Context): Boolean {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val startTime = prefs.getString(PREF_SHIFT_START_TIME, null) ?: return false
             val endIso = prefs.getString(PREF_SHIFT_END, null) ?: return false
@@ -199,6 +199,22 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
             val lastType = prefs.getString(PREF_LAST_PUNCH_TYPE, null)
             return lastType == "In" || withinShiftWindow(context)
         }
+
+        /**
+         * Keep-alive FGS gate: aggressive OEM + punch/shift-window need.
+         * The FGS holds the process so geofence/alarm/WorkManager run
+         * without exemptions — but Android legally forces a persistent
+         * notification on any foreground service, and the user spec is
+         * NO "Geofence Active" banner.  Running it only while monitoring
+         * is actually needed (punched in, or inside the shift window)
+         * keeps the banner out of nights/weekends entirely; the exact
+         * containment alarm re-evaluates every 15 min and revives it the
+         * moment work hours start or the user punches in.
+         */
+        fun keepAliveActive(context: Context): Boolean {
+            if (!isAggressiveOem(context)) return false
+            return stillNeeded(context)
+        }
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -225,7 +241,7 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
         try {
             val prefs =
                 context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            if (!serviceRequired(context) && isAggressiveOem(context)) {
+            if (!serviceRequired(context) && keepAliveActive(context)) {
                 // Revive the keep-alive foreground service directly (exact
                 // alarm ⇒ exempt from background start restrictions).  Set
                 // the mode flag so the Dart entrypoint runs keep-alive
@@ -239,6 +255,9 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
                 // "Geofence Active" banner — their 15-min headless check
                 // punches OUT at the alarm fire (fixed 45m band), worst
                 // case one alarm interval late.
+                // The FGS also stays down outside work hours (not punched
+                // in AND outside the shift window): nothing left to
+                // monitor, so no pointless banner at night/weekend.
                 prefs.edit()
                     .putBoolean("flutter.gf_keep_alive_mode", true)
                     .apply()

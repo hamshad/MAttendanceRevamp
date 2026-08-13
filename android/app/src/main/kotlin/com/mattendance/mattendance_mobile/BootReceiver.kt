@@ -50,13 +50,26 @@ class BootReceiver : BroadcastReceiver() {
         // flag so the Dart entrypoint runs keep-alive (light), never the
         // full GPS service, unless wifi/tracking genuinely need it (then
         // `was_field_tracking` above already starts the full service).
+        // The FGS also stays down outside work hours (not punched in AND
+        // outside the shift window): no pointless banner at
+        // night/weekend — the exact containment alarm re-evaluates every
+        // 15 min (once the shift-start alarm re-arms it) and revives the
+        // FGS the moment it is needed.
+        //
+        // Android 15 (API 35)+ restriction: starting a `location`-type
+        // foreground service from BOOT_COMPLETED is banned — it throws
+        // ForegroundServiceStartNotAllowedException.  The exact alarm
+        // path is exempt, so instead of crashing at boot we let the
+        // containment alarm (revived below) bring the service up on its
+        // next 15-min fire.
         val serviceRequired = prefs.getBoolean("flutter.wifi_auto_punch_enabled_bg", false) ||
             prefs.getBoolean("flutter.wifi_auto_punch_enabled", false) ||
             prefs.getBoolean("flutter.field_tracking_enabled", false)
-        if (!serviceRequired &&
-            ContainmentAlarmReceiver.isAggressiveOem(context) &&
-            prefs.getBoolean("flutter.gf_containment_alarm_armed", false)
-        ) {
+        val trackingWentFirst = prefs.getBoolean("flutter.was_field_tracking", false)
+        val wearOuts = !serviceRequired &&
+            ContainmentAlarmReceiver.keepAliveActive(context) &&
+            !trackingWentFirst
+        if (wearOuts && Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
             prefs.edit().putBoolean("flutter.gf_keep_alive_mode", true).apply()
             startBackgroundService(context)
         }

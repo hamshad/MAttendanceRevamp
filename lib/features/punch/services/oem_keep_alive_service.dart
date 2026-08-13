@@ -50,15 +50,18 @@ class OemKeepAliveService {
   /// Start the keep-alive foreground service when warranted: an auto
   /// feature enabled + no feature needing the full service.
   ///
-  /// Aggressive OEMs ONLY.  The service holds the process so geofence/
-  /// alarm/WorkManager run without exemptions — start regardless of punch
-  /// state.  Other OEMs NEVER get the keep-alive: Android requires a
-  /// persistent notification for any foreground service, and the user
-  /// spec is no "Geofence Active" banner on top of auto-punch.  Stock
-  /// Android runs the OS geofence + the headless 15-min containment
-  /// alarm (WorkManager) with no process holding — OUT punches at the
-  /// alarm fire, ~45m out with the fixed band, worst-case delay one
-  /// alarm interval.
+  /// Aggressive OEMs ONLY, and only while monitoring is actually needed
+  /// (punched in, or within the shift window).  The service holds the
+  /// process so geofence/alarm/WorkManager run without exemptions — but
+  /// Android legally requires a persistent notification for any
+  /// foreground service, so keeping it running at night / outside the
+  /// shift (nothing left to monitor) would show a pointless "Geofence
+  /// Active" banner (user spec: no banner).  The native containment
+  /// alarm revives it within 15 min whenever it is needed again.
+  ///
+  /// Other OEMs NEVER get the keep-alive: stock Android runs the OS
+  /// geofence + the headless 15-min containment alarm (WorkManager) with
+  /// no process holding.
   /// Main isolate only (needs the plugin channel).
   static Future<void> startIfNeeded() async {
     if (!Platform.isAndroid) return;
@@ -76,6 +79,13 @@ class OemKeepAliveService {
     if (await _serviceRequired()) return; // full service owns the process
 
     if (!await AggressiveOem.isAggressive()) return; // headless for others
+    // Banner gate: only while there is something to monitor.
+    if (prefs.getString('gf_last_punch_type') != 'In' &&
+        !_withinShiftWindow(prefs)) {
+      debugPrint('[KEEP_ALIVE] Not punched in + outside shift window — '
+          'skipping FGS (no banner outside work hours)');
+      return;
+    }
 
     final svc = FlutterBackgroundService();
     if (await svc.isRunning()) return;
@@ -120,6 +130,39 @@ class OemKeepAliveService {
     } catch (e) {
       debugPrint('[KEEP_ALIVE] stop failed: $e');
     }
+  }
+
+  /// True when the current time is inside today's [shift start, shift end]
+  /// window — mirrors [ContainmentAlarmReceiver.withinShiftWindow] (Kotlin).
+  /// Overnight shifts (end < start today) roll the end to tomorrow.
+  /// Fail-safe: unknown/missing shift times → false (no FGS without a
+  /// known work window; the native containment alarm re-evaluates on
+  /// every fire and revives the service when needed).
+  static bool _withinShiftWindow(SharedPreferences prefs) {
+    final startRaw = prefs.getString('gf_cached_shift_start_time');
+    final endRaw = prefs.getString('gf_shift_end_time');
+    if (startRaw == null || endRaw == null) return false;
+    final startParts = startRaw.split(':');
+    if (startParts.length < 2) return false;
+    final hour = int.tryParse(startParts[0]);
+    final minute = int.tryParse(startParts[1]);
+    if (hour == null || minute == null) return false;
+    // gf_shift_end_time is a Dart toIso8601String() in LOCAL time; a
+    // trailing Z (shouldn't happen) must be stripped like the native
+    // parser does, never treated as UTC.
+    final cleaned = endRaw.endsWith('Z') ? endRaw.substring(0, endRaw.length - 1) : endRaw;
+    final end = DateTime.tryParse(cleaned);
+    if (end == null) return false;
+
+    final now = DateTime.now();
+    final start = DateTime(now.year, now.month, now.day, hour, minute);
+    final endToday = DateTime(now.year, now.month, now.day, end.hour, end.minute);
+    if (endToday.isBefore(start)) {
+      // Overnight shift: end belongs to tomorrow.
+      return !now.isBefore(start) &&
+          !now.isAfter(endToday.add(const Duration(days: 1)));
+    }
+    return !now.isBefore(start) && !now.isAfter(endToday);
   }
 
   static Future<bool> isRunning() async {
