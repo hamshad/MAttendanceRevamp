@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:device_info_plus/device_info_plus.dart';
@@ -60,6 +61,50 @@ const _kFieldTrackingEnabled = 'field_tracking_enabled';
 const _kPersistPunchType  = 'gf_last_punch_type';
 const _kPersistPunchTime  = 'gf_last_punch_time';
 const _kPersistPunchOffice = 'gf_last_punch_office';
+
+// ── Keep-alive punch monitor ────────────────────────────────────────────────
+
+/// Movement gate for the keep-alive GPS stream (metres).
+///
+/// High-accuracy fixes are only delivered when the phone moves >= this
+/// distance from the last fix.  A user sitting at the office desk receives
+/// no fixes at all (negligible battery); walking out of the office produces
+/// a fix every ~30m — dense enough to catch the boundary crossing without
+/// continuous GPS polling.
+const keepAliveDistanceFilterM = 30;
+
+/// Office (non client-site) zones persisted by [GeofenceMonitor] under
+/// `gf_zone_ids` / `gf_zone_$id`.
+List<GeofenceZone> keepAliveOfficeZones(SharedPreferences prefs) {
+  final ids = prefs.getStringList('gf_zone_ids') ?? const [];
+  final zones = <GeofenceZone>[];
+  for (final id in ids) {
+    final raw = prefs.getString('gf_zone_$id');
+    if (raw == null) continue;
+    try {
+      final zone =
+          GeofenceZone.fromJson(id, jsonDecode(raw) as Map<String, dynamic>);
+      if (zone != null && !zone.isClientSite) zones.add(zone);
+    } catch (_) {/* corrupt metadata — skip */}
+  }
+  return zones;
+}
+
+/// True when [fix] is outside EVERY office radius, allowing for GPS
+/// accuracy (margin = 2x accuracy, clamped 10-250m — same rule as
+/// GeofenceMonitor's office containment check).
+///
+/// Pure function — unit-testable.
+bool isOutsideAllOffices(Position fix, List<GeofenceZone> zones) {
+  if (zones.isEmpty) return false;
+  final margin = (fix.accuracy * 2).clamp(10.0, 250.0);
+  for (final z in zones) {
+    final dist = Geolocator.distanceBetween(
+        fix.latitude, fix.longitude, z.latitude, z.longitude);
+    if (dist <= z.radius + margin) return false; // still inside this office
+  }
+  return true;
+}
 
 // ── Service facade ────────────────────────────────────────────────────────────
 
@@ -209,9 +254,10 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
   // The service exists here ONLY to keep the process alive so OS geofence
   // transitions, the containment alarm and WorkManager run in a live
   // process (these ROMs won't spawn the app from background otherwise).
-  // No GPS, no timers — heal geofences, re-check containment once, idle.
+  // Heal geofences, re-check containment once, then run a movement-gated
+  // GPS stream while punched in (catches the EXIT aggressive OEMs drop).
   if (prefs.getBool(OemKeepAliveService.keepAliveModeKey) ?? false) {
-    debugPrint('[GF_BG_ENTRY] Keep-alive mode — no polling, holding process');
+    debugPrint('[GF_BG_ENTRY] Keep-alive mode — holding process');
     if (service is AndroidServiceInstance) {
       service.setForegroundNotificationInfo(
         title: 'Geofence Active',
@@ -227,12 +273,72 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
     } catch (e) {
       debugPrint('[GF_BG_ENTRY] Keep-alive init check failed: $e');
     }
-    // Idle: no streams, no timers.  Wait for a stop signal.
+    // ── Movement-gated punch monitor ────────────────────────────────────
+    // Only while punched in.  distanceFilter 30m → a stationary user at
+    // the desk gets ZERO fixes (no GPS radio churn); fixes arrive only as
+    // the user actually moves, so the inside→outside transition is the
+    // honest walk out of the office, not a late OS event.  On the first
+    // outside fix a containment reconcile runs immediately (confirming fix
+    // taken back-to-back, punch OUT records the REAL confirm location).
+    StreamSubscription<Position>? keepAliveSub;
+    var keepAliveWasOutside = false;
+    DateTime? keepAliveLastReconcile;
+    try {
+      final zones = keepAliveOfficeZones(prefs);
+      if (prefs.getString(_kPersistPunchType) == 'In' && zones.isNotEmpty) {
+        final settings = Platform.isAndroid
+            ? AndroidSettings(
+                accuracy: LocationAccuracy.high,
+                distanceFilter: keepAliveDistanceFilterM,
+              )
+            : AppleSettings(
+                accuracy: LocationAccuracy.high,
+                distanceFilter: keepAliveDistanceFilterM,
+                pauseLocationUpdatesAutomatically: false,
+                allowBackgroundLocationUpdates: true,
+              );
+        keepAliveSub = Geolocator.getPositionStream(locationSettings: settings)
+            .listen((fix) async {
+          final p = await SharedPreferences.getInstance();
+          // Punched OUT → nothing to monitor; OS EXIT / containment alarm /
+          // next ENTER take over.  Stop the GPS churn.
+          if (p.getString(_kPersistPunchType) != 'In') {
+            await keepAliveSub?.cancel();
+            keepAliveSub = null;
+            return;
+          }
+          final outside = isOutsideAllOffices(fix, zones);
+          final now = DateTime.now();
+          final cooledDown = keepAliveLastReconcile == null ||
+              now.difference(keepAliveLastReconcile!) >
+                  const Duration(seconds: 60);
+          if (outside && !keepAliveWasOutside && cooledDown) {
+            keepAliveWasOutside = true;
+            keepAliveLastReconcile = now;
+            debugPrint('[GF_BG_ENTRY] keep-alive stream: outside all offices'
+                ' — reconciling OUT');
+            try {
+              await GeofencePunchHandler.instance
+                  .reconcileContainment(confirmOut: true);
+            } catch (e) {
+              debugPrint('[GF_BG_ENTRY] keep-alive reconcile failed: $e');
+            }
+          } else if (!outside) {
+            keepAliveWasOutside = false;
+          }
+        }, onError: (_) {});
+      }
+    } catch (e) {
+      debugPrint('[GF_BG_ENTRY] keep-alive stream setup failed: $e');
+    }
+    // Idle: no timers — just the stream above + stop signals.
     service.on('stopKeepAlive').listen((_) async {
       debugPrint('[GF_BG_ENTRY] Keep-alive stop requested');
+      await keepAliveSub?.cancel();
       if (service is AndroidServiceInstance) service.stopSelf();
     });
     service.on('stop').listen((_) async {
+      await keepAliveSub?.cancel();
       if (service is AndroidServiceInstance) service.stopSelf();
     });
     return;
