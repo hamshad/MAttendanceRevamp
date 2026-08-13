@@ -50,11 +50,15 @@ class OemKeepAliveService {
   /// Start the keep-alive foreground service when warranted: an auto
   /// feature enabled + no feature needing the full service.
   ///
-  /// Aggressive OEMs: service holds the process so geofence/alarm/
-  /// WorkManager run without exemptions — start regardless of punch state.
-  /// Other OEMs: the service is the movement-gated OUT monitor — start
-  /// only while punched in (a "Geofence Active" notification at home,
-  /// punched out, would be pointless).
+  /// Aggressive OEMs ONLY.  The service holds the process so geofence/
+  /// alarm/WorkManager run without exemptions — start regardless of punch
+  /// state.  Other OEMs NEVER get the keep-alive: Android requires a
+  /// persistent notification for any foreground service, and the user
+  /// spec is no "Geofence Active" banner on top of auto-punch.  Stock
+  /// Android runs the OS geofence + the headless 15-min containment
+  /// alarm (WorkManager) with no process holding — OUT punches at the
+  /// alarm fire, ~45m out with the fixed band, worst-case delay one
+  /// alarm interval.
   /// Main isolate only (needs the plugin channel).
   static Future<void> startIfNeeded() async {
     if (!Platform.isAndroid) return;
@@ -71,9 +75,7 @@ class OemKeepAliveService {
     if (!anyAuto) return;
     if (await _serviceRequired()) return; // full service owns the process
 
-    final aggressive = await AggressiveOem.isAggressive();
-    final punchedIn = prefs.getString('gf_last_punch_type') == 'In';
-    if (!aggressive && !punchedIn) return;
+    if (!await AggressiveOem.isAggressive()) return; // headless for others
 
     final svc = FlutterBackgroundService();
     if (await svc.isRunning()) return;

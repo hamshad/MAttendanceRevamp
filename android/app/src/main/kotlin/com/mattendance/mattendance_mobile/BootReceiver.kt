@@ -39,21 +39,22 @@ class BootReceiver : BroadcastReceiver() {
         // The alarm self-perpetuates once its first fire is scheduled.
         ContainmentAlarmReceiver.armFromPrefsIfNeeded(context)
 
-        // Aggressive OEMs (MIUI & friends) + anyone punched in: revive the
-        // keep-alive foreground service after reboot.  Aggressive ROMs won't
-        // spawn the app from background at all (the service holding the
-        // process is what makes geofence/alarm/WorkManager work without
-        // exemptions); while punched in, all OEMs get the movement-gated
-        // OUT monitor the service runs.  Set the mode flag so the Dart
-        // entrypoint runs keep-alive (light), never the full GPS service,
-        // unless wifi/tracking genuinely need it (then `was_field_tracking`
-        // above already starts the full service).
+        // Aggressive OEMs (MIUI & friends): revive the keep-alive
+        // foreground service after reboot.  Aggressive ROMs won't spawn
+        // the app from background at all (the service holding the process
+        // is what makes geofence/alarm/WorkManager work without
+        // exemptions).  Other OEMs stay headless — Android requires a
+        // persistent notification for any foreground service, and the
+        // user spec is no "Geofence Active" banner; their containment
+        // check is the self-perpetuating headless alarm.  Set the mode
+        // flag so the Dart entrypoint runs keep-alive (light), never the
+        // full GPS service, unless wifi/tracking genuinely need it (then
+        // `was_field_tracking` above already starts the full service).
         val serviceRequired = prefs.getBoolean("flutter.wifi_auto_punch_enabled_bg", false) ||
             prefs.getBoolean("flutter.wifi_auto_punch_enabled", false) ||
             prefs.getBoolean("flutter.field_tracking_enabled", false)
-        val punchedIn = prefs.getString("flutter.gf_last_punch_type", null) == "In"
         if (!serviceRequired &&
-            (ContainmentAlarmReceiver.isAggressiveOem(context) || punchedIn) &&
+            ContainmentAlarmReceiver.isAggressiveOem(context) &&
             prefs.getBoolean("flutter.gf_containment_alarm_armed", false)
         ) {
             prefs.edit().putBoolean("flutter.gf_keep_alive_mode", true).apply()

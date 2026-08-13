@@ -225,21 +225,20 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
         try {
             val prefs =
                 context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            if (!serviceRequired(context) &&
-                (isAggressiveOem(context) ||
-                    prefs.getString(PREF_LAST_PUNCH_TYPE, null) == "In")
-            ) {
+            if (!serviceRequired(context) && isAggressiveOem(context)) {
                 // Revive the keep-alive foreground service directly (exact
                 // alarm ⇒ exempt from background start restrictions).  Set
                 // the mode flag so the Dart entrypoint runs keep-alive
                 // (heal geofences + one containment check + the
                 // movement-gated OUT monitor, NOT the full GPS service).
-                // Two reasons to hold the process:
-                //  - aggressive OEMs (MIUI-class): geofence transitions,
-                //    WorkManager and alarms need a live process
-                //  - all OEMs while punched in: the movement-gated GPS
-                //    stream catches the EXIT the OS drops, so punch-out
-                //    lands near the boundary instead of 15 min later
+                // Aggressive OEMs ONLY: geofence transitions, WorkManager
+                // and alarms need a live process on these ROMs.
+                // Other OEMs stay headless (WorkManager task below):
+                // Android requires a persistent notification for any
+                // foreground service, and the user spec is NO
+                // "Geofence Active" banner — their 15-min headless check
+                // punches OUT at the alarm fire (fixed 45m band), worst
+                // case one alarm interval late.
                 prefs.edit()
                     .putBoolean("flutter.gf_keep_alive_mode", true)
                     .apply()
