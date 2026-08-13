@@ -513,10 +513,21 @@ void main() {
       expect(mock.punchCalls, 0);
     });
 
-    test('fix 35m out with 20m radius → accepted (inside 20+20 band)',
+    test('fix 35m out with 20m radius → rejected (30m = 1.5x band cap)',
         () async {
       SharedPreferences.setMockInitialValues(smallRadiusPrefs);
-      fakeGeo.position = _fixAt(0.000315, 0.0); // ~35m
+      fakeGeo.position = _fixAt(0.000315, 0.0); // ~35m — past 20+10=30m
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+    });
+
+    test('fix 25m out with 20m radius → accepted (inside 30m band)',
+        () async {
+      SharedPreferences.setMockInitialValues(smallRadiusPrefs);
+      fakeGeo.position = _fixAt(0.000225, 0.0); // ~25m — within 20+10=30m
 
       await GeofencePunchHandler.forTest(_dioWith(mock))
           .handleEvent(_params(_officeId, GeofenceEvent.enter));

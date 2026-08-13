@@ -34,10 +34,11 @@ Context for any agent working in this repo. Architecture docs live in
    → server-truth `PunchCoordinator` (FIRST in `_executePunch`) → POST →
    offline queue → `_persistPunchState`. Server decides; local gate only when
    server unreachable.
-8. **IN acceptance band capped**: margin for IN = `min(2×accuracy, radius)` —
-   a 20m-radius office must never punch IN from 61m away (margin cap landed
-   with the universal monitor, commit `ef0ce33`). OUT keeps the wide margin
-   (2×accuracy, clamp 10–250) — OUT needs tolerance, IN must stay tight.
+8. **IN acceptance band capped at 1.5x radius**: margin for IN =
+   `min(2×accuracy, radius/2)` — a 20m-radius office punches IN only within
+   30m, never from 61m away (cap tightened from radius to radius/2,
+   commit `f3b9c17`). OUT keeps the wide margin (2×accuracy, clamp 10–250)
+   — OUT needs tolerance, IN must stay tight.
 
 ## Conventions
 

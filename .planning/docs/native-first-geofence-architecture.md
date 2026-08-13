@@ -178,6 +178,7 @@
 | `8b6329e` | **Snap removed** (honesty rule) + movement-gated keep-alive GPS stream; zone identity + server-truth gates preserved |
 | `0b729e3` | **Native shift-start alarm gated**: `GeofenceAlarmReceiver` no longer starts the combined service when `serviceRequired()` is false (geofence-only = headless self-heal); Dart entrypoint self-heal+stop defense-in-depth |
 | `ef0ce33` | **Universal OUT monitor + tight IN band**: keep-alive FGS + movement stream now run on ALL OEMs while punched in (not just aggressive): Nothing/stock Android get boundary-accurate OUT too (was 15-min containment fallback at 149m); IN margin capped at `min(2×accuracy, radius)` — a 20m-radius office can no longer punch IN at 61m |
+| `f3b9c17` | **IN band tightened to 1.5x radius**: IN margin cap `min(2×accuracy, radius)` → `min(2×accuracy, radius/2)` — 20m-radius office punches IN within 30m (user decision) |
 
 ## Verification
 

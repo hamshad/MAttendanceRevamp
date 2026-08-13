@@ -519,11 +519,11 @@ class GeofencePunchHandler {
 
       final dist = geo.Geolocator.distanceBetween(
           fix.latitude, fix.longitude, zone.latitude, zone.longitude);
-      // IN margin capped at the radius itself (see _verifyTransition): a
-      // 20m-radius office must not punch IN from 61m away via a loose
-      // 2x-accuracy band.
+      // IN margin capped at HALF the radius (accept at most 1.5x radius —
+      // see _verifyTransition): a 20m-radius office punches IN within 30m,
+      // never from 61m via a loose 2x-accuracy band.
       final margin = _gpsMargin(fix.accuracy);
-      final inMargin = margin > zone.radius ? zone.radius : margin;
+      final inMargin = margin > zone.radius / 2 ? zone.radius / 2 : margin;
       if (dist > zone.radius + inMargin) continue; // user not inside this office
 
       debugPrint('[GF_MON] reconcile: ${zone.id} contains user '
@@ -945,13 +945,14 @@ class GeofencePunchHandler {
 
     if (direction == 'In') {
       // Fresh fix inside (radius + IN margin) → confirmed.  The IN margin
-      // is capped at the radius itself: a 20m-radius office must not punch
-      // IN from 61m away just because a fix's stated accuracy is ~30m
-      // (radius 20 + 2x30 = 80m band was far too loose).  Genuine
-      // crossings are still rescued below via the OS trigger location.
+      // is capped at HALF the radius (accept at most 1.5x radius): a
+      // 20m-radius office punches IN only within 30m, not 61m away just
+      // because a fix's stated accuracy is ~30m (radius + 2x accuracy =
+      // 80m band was far too loose).  Genuine crossings are still rescued
+      // below via the OS trigger location.
       final inMargin = fix != null && fix.accuracy > 0
-          ? (_gpsMargin(fix.accuracy) > zone.radius
-              ? zone.radius
+          ? (_gpsMargin(fix.accuracy) > zone.radius / 2
+              ? zone.radius / 2
               : _gpsMargin(fix.accuracy))
           : 10.0;
       if (fixDist != null && fixDist <= zone.radius + inMargin) return fix;
