@@ -163,6 +163,19 @@ class GeofenceAlarmReceiver : BroadcastReceiver() {
                     .putBoolean("gf_alarm_fired", true)
                     .putLong("gf_alarm_fired_at", System.currentTimeMillis())
                     .apply()
+                // Bootstrap the 15-min containment chain: it dies when the
+                // user punches out (nothing to check after work hours) and
+                // the next-day ENTER punch sets the armed flag headless,
+                // where background isolates cannot reach the Dart
+                // MethodChannel.  Re-arm at every shift start while
+                // geofence auto-punch is on — chain lives through the
+                // workday (catches a killed-FGS + delayed OS EXIT within
+                // 15 min) and stops again at the first post-shift fire.
+                val gfAuto = prefs.getBoolean("flutter.geofence_auto_enabled", false)
+                val armedFlag = prefs.getBoolean("flutter.gf_containment_alarm_armed", false)
+                if (gfAuto || armedFlag) {
+                    ContainmentAlarmReceiver.armContainmentAlarm(context)
+                }
                 scheduleNextShiftAlarmFromPrefs(context)
                 return
             }

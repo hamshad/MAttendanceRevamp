@@ -20,6 +20,7 @@ import '../../../models/client_site.dart';
 import '../../../models/office.dart';
 import '../../../models/offline_punch.dart';
 import 'geofence_debug_bus.dart';
+import 'oem_keep_alive_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OS-native geofence auto-punch (native_geofence ^1.3.1)
@@ -1100,6 +1101,19 @@ class GeofencePunchHandler {
     // app ever being opened.
     await prefs.setBool(
         'gf_containment_alarm_armed', type == 'In');
+    // Foreground service lifecycle: FGS runs ONLY while punched IN (the
+    // movement-gated stream catches the walk-out instantly; the moment the
+    // OUT punch persists, the FGS is closed — banner gone until the next
+    // IN).  No-op on iOS / when nothing to hold (gates inside the service).
+    try {
+      if (type == 'In') {
+        await OemKeepAliveService.startIfNeeded();
+      } else {
+        await OemKeepAliveService.stop();
+      }
+    } catch (e) {
+      debugPrint('[GF_MON] keep-alive FGS lifecycle error: $e');
+    }
   }
 
   Future<void> _clearShiftEndedFlag(SharedPreferences prefs) async {

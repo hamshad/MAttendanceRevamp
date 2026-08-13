@@ -40,18 +40,14 @@ class BootReceiver : BroadcastReceiver() {
         ContainmentAlarmReceiver.armFromPrefsIfNeeded(context)
 
         // All Android devices: revive the keep-alive foreground service after
-        // reboot.  The OS is equally willing to kill any dormant process —
-        // the FGS holding the process is what makes geofence/alarm/
-        // WorkManager work without exemptions everywhere (uniform
-        // behavior, user decision).  Set the mode flag so the Dart
-        // entrypoint runs keep-alive (light), never the full GPS service,
-        // unless wifi/tracking genuinely need it (then
-        // `was_field_tracking` above already starts the full service).
-        // The FGS also stays down outside work hours (not punched in AND
-        // outside the shift window): no pointless banner at
-        // night/weekend — the exact containment alarm re-evaluates every
-        // 15 min (once the shift-start alarm re-arms it) and revives the
-        // FGS the moment it is needed.
+        // reboot — but ONLY while punched IN (keepAliveActive).  The FGS
+        // exists for exactly one job: the movement-gated stream catches
+        // the walk-out in real fixes; OUT closes the service immediately,
+        // next IN opens it again (banner exists only while actually at
+        // work — user design).  Set the mode flag so the Dart entrypoint
+        // runs keep-alive (light), never the full GPS service, unless
+        // wifi/tracking genuinely need it (then `was_field_tracking`
+        // above already starts the full service).
         //
         // Android 15 (API 35)+ restriction: starting a `location`-type
         // foreground service from BOOT_COMPLETED is banned — it throws

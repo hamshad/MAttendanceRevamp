@@ -201,20 +201,23 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
         }
 
         /**
-         * Keep-alive FGS gate: ALL Android devices, only while monitoring
-         * is actually needed (punched in, or inside the shift window).
-         * Android is equally willing to kill any dormant process — the
-         * FGS is what makes OS geofence/alarm/WorkManager work without
-         * exemptions everywhere, and giving every device the same
-         * mechanism keeps punch behavior uniform (user decision — no
-         * headless-only OEM split).  Android legally forces a persistent
-         * notification on any FGS, and the user spec is no "Geofence
-         * Active" banner outside work, so the punch/shift-window gate
-         * keeps the banner out of nights/weekends entirely; the exact
-         * containment alarm re-evaluates every 15 min and revives it the
-         * moment work hours start or the user punches in.
+         * Keep-alive FGS gate: ALL Android devices, ONLY while punched IN.
+         * The FGS exists for exactly one job — catching the walk-out before
+         * the OS EXIT broadcast can be delayed: it holds the process so the
+         * movement-gated GPS stream runs, and the instant the OUT punch
+         * persists the service is closed (banner gone until the next IN).
+         * IN needs no service (OS geofence ENTER is motion-assisted and
+         * fires even with a dead process — field-proven 12h+ without app
+         * open), so the punch-state gate keeps the banner out of
+         * nights/weekends entirely.  The exact containment alarm still
+         * revives the FGS on its 15-min fire whenever it is needed
+         * (punched in && process died).
          */
-        fun keepAliveActive(context: Context): Boolean = stillNeeded(context)
+        fun keepAliveActive(context: Context): Boolean {
+            val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return p.getString(PREF_LAST_PUNCH_TYPE, null) == "In" &&
+                p.getBoolean(PREF_ARMED, false)
+        }
 
         /** Headless containment check: WorkManager spawns a fresh engine, no FGS. */
         private fun enqueueHeadlessContainment(context: Context) {
@@ -259,14 +262,10 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
                 // the mode flag so the Dart entrypoint runs keep-alive
                 // (heal geofences + one containment check + the
                 // movement-gated OUT monitor, NOT the full GPS service).
-                // ALL devices (uniform behavior — user decision): the FGS
-                // holds the process so geofence transitions, WorkManager
-                // and alarms run without exemptions on any ROM, and the
-                // movement-gated stream catches the EXIT near the boundary
-                // (no 15-min-alarm-late OUT).  The FGS stays down outside
-                // work hours (not punched in AND outside the shift
-                // window): nothing left to monitor, so no pointless
-                // banner at night/weekend.
+                // Punched IN only (user design): the FGS exists for the
+                // walk-out — stream catches it in real fixes, OUT punch
+                // closes the service immediately (banner gone until next
+                // IN).  No FGS while punched out, ever.
                 prefs.edit()
                     .putBoolean("flutter.gf_keep_alive_mode", true)
                     .apply()

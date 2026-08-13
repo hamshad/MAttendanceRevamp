@@ -16,12 +16,11 @@ import '../../tracking/services/field_tracking_service.dart';
 /// friends) it is effectively required, on stock Android it removes the
 /// same exemptions.
 ///
-/// TIME-GATED (user spec: no "Geofence Active" banner outside work):
-/// the FGS runs only while monitoring is actually needed — punched in,
-/// or within the shift window.  Android legally forces a persistent
-/// notification on any FGS, so the gate keeps the banner out of
-/// nights/weekends; the native containment alarm re-evaluates every
-/// 15 min and revives the FGS the moment it is needed.
+/// TIME-GATED BY PUNCH STATE (user spec: no "Geofence Active" banner
+/// outside work): the FGS runs **only while punched IN** — the OUT
+/// punch closes it immediately, next IN opens it again.  IN itself needs
+/// no service (OS geofence ENTER is motion-assisted, fires even dead —
+/// field-proven 12h+ without app open).
 ///
 /// This service does almost NOTHING on purpose: no GPS streams, no timers,
 /// no polling.  It only holds the process alive so the OS geofence
@@ -37,8 +36,8 @@ import '../../tracking/services/field_tracking_service.dart';
 ///     start restrictions) — the alarm fires and revives the service
 ///   - restarted by the plugin's own WatchdogReceiver after swipe-away
 ///     (best-effort on MIUI, which blocks the watchdog without autostart)
-///   - stopped when punched out outside the shift window (receiver stops
-///     the service natively), on disable, or on logout
+///   - stopped the moment the OUT punch persists (receiver + Dart both
+///     stop the service natively), on disable, or on logout
 class OemKeepAliveService {
   OemKeepAliveService._();
 
@@ -60,16 +59,22 @@ class OemKeepAliveService {
   /// feature enabled + no feature needing the full service.
   ///
   /// ALL Android devices (uniform behavior — the OS is equally willing
-  /// to kill any dormant process, aggressive OEM or not), and only while
-  /// monitoring is actually needed: punched in, or within the shift
-  /// window.  The service holds the process so geofence/alarm/
-  /// WorkManager run without exemptions — but Android legally requires a
-  /// persistent notification for any foreground service, so keeping it
-  /// running at night / outside the shift (nothing left to monitor)
-  /// would show a pointless "Geofence Active" banner (user spec: no
-  /// banner outside work).  The native containment alarm revives it
-  /// within 15 min whenever it is needed again.
-  /// Main isolate only (needs the plugin channel).
+  /// to kill any dormant process, aggressive OEM or not), **and ONLY
+  /// while punched IN**.  The FGS exists for exactly one job: catching
+  /// the walk-out.  The movement-gated stream inside it sees the
+  /// office→outside transition in real fixes (~30m), the OUT punch then
+  /// closes the service immediately (banner gone until the next IN).
+  /// Android legally requires a persistent notification for any
+  /// foreground service, so IN-only gating means the banner exists
+  /// exactly while the user is actually at work — never at night,
+  /// never at weekend, never before the first IN.
+  ///
+  /// ENTER (the IN punch) needs NO service: OS geofence ENTER is
+  /// motion-assisted and fires instantly even with a dead process
+  /// (confirmed in the field, 12h+ without app open).
+  ///
+  /// Called from ANY isolate (headless punches include the main
+  /// isolate): `_persistPunchState` starts it on IN and stops on OUT.
   static Future<void> startIfNeeded() async {
     if (!Platform.isAndroid) return;
 
@@ -85,11 +90,9 @@ class OemKeepAliveService {
     if (!anyAuto) return;
     if (await _serviceRequired()) return; // full service owns the process
 
-    // Banner gate: only while there is something to monitor.
-    if (prefs.getString('gf_last_punch_type') != 'In' &&
-        !_withinShiftWindow(prefs)) {
-      debugPrint('[KEEP_ALIVE] Not punched in + outside shift window — '
-          'skipping FGS (no banner outside work hours)');
+    // Banner gate: ONLY while punched IN.
+    if (prefs.getString('gf_last_punch_type') != 'In') {
+      debugPrint('[KEEP_ALIVE] Not punched in — skipping FGS (no banner)');
       return;
     }
 
@@ -136,39 +139,6 @@ class OemKeepAliveService {
     } catch (e) {
       debugPrint('[KEEP_ALIVE] stop failed: $e');
     }
-  }
-
-  /// True when the current time is inside today's [shift start, shift end]
-  /// window — mirrors [ContainmentAlarmReceiver.withinShiftWindow] (Kotlin).
-  /// Overnight shifts (end < start today) roll the end to tomorrow.
-  /// Fail-safe: unknown/missing shift times → false (no FGS without a
-  /// known work window; the native containment alarm re-evaluates on
-  /// every fire and revives the service when needed).
-  static bool _withinShiftWindow(SharedPreferences prefs) {
-    final startRaw = prefs.getString('gf_cached_shift_start_time');
-    final endRaw = prefs.getString('gf_shift_end_time');
-    if (startRaw == null || endRaw == null) return false;
-    final startParts = startRaw.split(':');
-    if (startParts.length < 2) return false;
-    final hour = int.tryParse(startParts[0]);
-    final minute = int.tryParse(startParts[1]);
-    if (hour == null || minute == null) return false;
-    // gf_shift_end_time is a Dart toIso8601String() in LOCAL time; a
-    // trailing Z (shouldn't happen) must be stripped like the native
-    // parser does, never treated as UTC.
-    final cleaned = endRaw.endsWith('Z') ? endRaw.substring(0, endRaw.length - 1) : endRaw;
-    final end = DateTime.tryParse(cleaned);
-    if (end == null) return false;
-
-    final now = DateTime.now();
-    final start = DateTime(now.year, now.month, now.day, hour, minute);
-    final endToday = DateTime(now.year, now.month, now.day, end.hour, end.minute);
-    if (endToday.isBefore(start)) {
-      // Overnight shift: end belongs to tomorrow.
-      return !now.isBefore(start) &&
-          !now.isAfter(endToday.add(const Duration(days: 1)));
-    }
-    return !now.isBefore(start) && !now.isAfter(endToday);
   }
 
   static Future<bool> isRunning() async {
