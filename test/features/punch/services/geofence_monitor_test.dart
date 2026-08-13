@@ -421,6 +421,10 @@ void main() {
       // The 95m repro: OS fires exit at the boundary (~133m from center,
       // just outside the 100m radius) but deferred processing's fresh fix
       // is already ~300m away.  Punch must record the crossing, not the fix.
+      // The crossing is snapped ONTO the boundary circle (100m) — the OS
+      // detection point itself can sit far past the radius when background
+      // sampling is throttled, and the boundary point is the best estimate
+      // of the real exit location.
       SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'In'));
       mock.isPunchedIn = true; // punched in earlier today
       fakeGeo.position = _fixAt(0.0027, 0.0027); // ~300m — late processing fix
@@ -437,8 +441,13 @@ void main() {
       expect(mock.lastDirection, 'Out');
       final lat = double.parse(mock.lastPayload!['Latitude'] as String);
       final lng = double.parse(mock.lastPayload!['Longitude'] as String);
-      expect(lat, closeTo(crossing.latitude, 1e-6));
-      expect(lng, closeTo(crossing.longitude, 1e-6));
+      // Snapped onto the 100m boundary circle, still due north of the office
+      // (same bearing as the crossing point).
+      final snappedDist = geo.Geolocator.distanceBetween(
+          lat, lng, _officeLat, _officeLng);
+      expect(snappedDist, closeTo(_officeRadius, 1.0));
+      expect(lat, greaterThan(_officeLat));
+      expect(lng, closeTo(_officeLng, 1e-6));
     });
 
     test('exit with OS crossing outside + fix still inside → punches at crossing',
@@ -1221,6 +1230,58 @@ void main() {
 
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('gf_prompt_site_5'), isNotNull);
+    });
+  });
+
+  group('snapOutToBoundary', () {
+    const zone = GeofenceZone(
+      id: 'office_1',
+      name: 'HQ',
+      latitude: _officeLat,
+      longitude: _officeLng,
+      radius: 20.0,
+      isClientSite: false,
+      officeId: 1,
+    );
+
+    test('far OUT fix snapped onto the boundary circle (20m)', () {
+      // User was punched out at 104m (OS detected the exit late in the
+      // background).  The recorded location must read at the boundary.
+      final fix = _fixAt(0.001, 0.001); // ~104m SE of center
+      final snapped = GeofencePunchHandler.snapOutToBoundary(zone, fix);
+
+      final dist = geo.Geolocator.distanceBetween(
+          snapped.latitude, snapped.longitude, zone.latitude, zone.longitude);
+      expect(dist, closeTo(20.0, 0.5));
+      // Same bearing as the raw fix (still SE of the office).
+      expect(snapped.latitude, greaterThan(zone.latitude));
+      expect(snapped.longitude, greaterThan(zone.longitude));
+    });
+
+    test('bearing preserved exactly (pure-north fix stays north)', () {
+      final fix = _fixAt(0.002, 0.0); // ~222m due north
+      final snapped = GeofencePunchHandler.snapOutToBoundary(zone, fix);
+
+      final dist = geo.Geolocator.distanceBetween(
+          snapped.latitude, snapped.longitude, zone.latitude, zone.longitude);
+      expect(dist, closeTo(20.0, 0.5));
+      expect(snapped.latitude, greaterThan(zone.latitude));
+      expect(snapped.longitude, closeTo(zone.longitude, 1e-6));
+    });
+
+    test('inside fix unchanged (no snap)', () {
+      final fix = _fixAt(0.0001, 0.0001); // ~15m — inside the radius
+      final snapped = GeofencePunchHandler.snapOutToBoundary(zone, fix);
+      expect(snapped.latitude, fix.latitude);
+      expect(snapped.longitude, fix.longitude);
+    });
+
+    test('fix at exactly the boundary unchanged', () {
+      final fix = _fixAt(0.00018, 0.0); // ~20m due north
+      final snapped = GeofencePunchHandler.snapOutToBoundary(zone, fix);
+      final dist = geo.Geolocator.distanceBetween(
+          snapped.latitude, snapped.longitude, zone.latitude, zone.longitude);
+      expect(dist, closeTo(20.0, 1.0));
     });
   });
 }

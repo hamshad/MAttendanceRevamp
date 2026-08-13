@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:dio/dio.dart';
 import 'package:flutter/widgets.dart';
@@ -704,6 +705,58 @@ class GeofencePunchHandler {
   /// Punch-execution path shared by OS transition events and background
   /// containment recovery: local-state gate, server-truth gate
   /// (PunchCoordinator), offline queueing, and local punch-state persistence.
+  /// Snap an OUT position onto the zone's boundary circle — the closest
+  /// boundary point on the bearing from the office center to the recorded
+  /// fix.
+  ///
+  /// WHY: OS geofence EXIT detection runs late in the background (Android
+  /// throttles location sampling in Doze / battery saver, and OEM ROMs
+  /// defer delivery), so the trigger location can sit far past the
+  /// boundary — e.g. 100m+ beyond a 20m radius.  Punching OUT at the raw
+  /// detection point records a punch-out distance that looks broken even
+  /// though the exit itself was correctly detected.  The boundary point
+  /// (radius distance along the office→fix bearing) is the best estimate
+  /// of the actual crossing location, so the recorded punch-out reads at
+  /// the boundary instead of where the phone happened to be when
+  /// detection/recovery ran.
+  ///
+  /// IN punches are never snapped — the recorded position is the user's
+  /// actual location (inside the radius), which is what matters there.
+  ///
+  /// Pure function (haversine) — unit-testable, no plugin channels.
+  static geo.Position snapOutToBoundary(GeofenceZone zone, geo.Position fix) {
+    final dist = geo.Geolocator.distanceBetween(
+        fix.latitude, fix.longitude, zone.latitude, zone.longitude);
+    // Inside / at the boundary → nothing to snap.
+    if (dist <= zone.radius) return fix;
+
+    final bearing = geo.Geolocator.bearingBetween(
+        zone.latitude, zone.longitude, fix.latitude, fix.longitude);
+    const r = 6371000.0; // earth radius, m
+    final phi1 = zone.latitude * math.pi / 180;
+    final lambda1 = zone.longitude * math.pi / 180;
+    final theta = bearing * math.pi / 180;
+    final delta = zone.radius / r;
+    final phi2 = math.asin(
+        math.sin(phi1) * math.cos(delta) + math.cos(phi1) * math.sin(delta) * math.cos(theta));
+    final lambda2 = lambda1 +
+        math.atan2(math.sin(theta) * math.sin(delta) * math.cos(phi1),
+            math.cos(delta) - math.sin(phi1) * math.sin(phi2));
+
+    return geo.Position(
+      latitude: phi2 * 180 / math.pi,
+      longitude: lambda2 * 180 / math.pi,
+      timestamp: fix.timestamp,
+      accuracy: fix.accuracy,
+      altitude: fix.altitude,
+      altitudeAccuracy: fix.altitudeAccuracy,
+      heading: fix.heading,
+      headingAccuracy: fix.headingAccuracy,
+      speed: fix.speed,
+      speedAccuracy: fix.speedAccuracy,
+    );
+  }
+
   Future<void> _executePunch(
     GeofenceZone zone,
     geo.Position fix,
@@ -720,6 +773,15 @@ class GeofencePunchHandler {
       debugPrint('[GF_MON] ${zone.id}: no token — skipping $direction');
       return;
     }
+
+    // OUT punches record the boundary crossing point, not the raw
+    // detection/recovery location (OS geofence exits can be detected far
+    // past the boundary in the background).  See [snapOutToBoundary].
+    var punchFix = fix;
+    if (direction == 'Out') {
+      punchFix = snapOutToBoundary(zone, fix);
+    }
+    fix = punchFix;
 
     final now = DateTime.now();
     final verdict =
