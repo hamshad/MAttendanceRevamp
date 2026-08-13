@@ -179,10 +179,11 @@
 | `0b729e3` | **Native shift-start alarm gated**: `GeofenceAlarmReceiver` no longer starts the combined service when `serviceRequired()` is false (geofence-only = headless self-heal); Dart entrypoint self-heal+stop defense-in-depth |
 | `ef0ce33` | **Universal OUT monitor + tight IN band**: keep-alive FGS + movement stream now run on ALL OEMs while punched in (not just aggressive): Nothing/stock Android get boundary-accurate OUT too (was 15-min containment fallback at 149m); IN margin capped at `min(2×accuracy, radius)` — a 20m-radius office can no longer punch IN at 61m |
 | `77eb8af` | **IN band tightened to 1.5x radius**: IN margin cap `min(2×accuracy, radius)` → `min(2×accuracy, radius/2)` — 20m-radius office punches IN within 30m (user decision) |
+| `ab070de` | **Fixed punch bands (user spec)**: IN = `radius+5m` fixed (25m @ 20m office, 105m @ 100m office — never 150m), accuracy as trust floor (fixes claiming worse than the radius defer to the OS crossing point); OUT = `radius+25m` fixed (45m) with two-fix confirmation; stream trigger mirrors OUT band. Accuracy never widens either band — the 2×accuracy margins caused the 61m IN and the delayed 149m OUT |
 
 ## Verification
 
-- Full suite 159/159 (`flutter test`)
+- Full suite 173/173 (`flutter test`)
 - `flutter analyze`: 0 errors (pre-existing infos/warnings only)
 - Field-tested: 446m → ~20m (containment loop), 104m → boundary (snap, then
   reverted), 80m-actual-vs-20m-logged inconsistency → snap removed + live

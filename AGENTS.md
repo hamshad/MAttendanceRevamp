@@ -34,17 +34,19 @@ Context for any agent working in this repo. Architecture docs live in
    → server-truth `PunchCoordinator` (FIRST in `_executePunch`) → POST →
    offline queue → `_persistPunchState`. Server decides; local gate only when
    server unreachable.
-8. **IN acceptance band capped at 1.5x radius**: margin for IN =
-   `min(2×accuracy, radius/2)` — a 20m-radius office punches IN only within
-   30m, never from 61m away (cap tightened from radius to radius/2,
-   commit `77eb8af`). OUT keeps the wide margin (2×accuracy, clamp 10–250)
-   — OUT needs tolerance, IN must stay tight.
+8. **Fixed punch bands (user spec)**: IN accepts only within `radius+5m`
+   (25m at a 20m office); OUT requires beyond `radius+25m` (45m) with
+   two-fix confirmation. Accuracy NEVER widens either band — the old
+   2×accuracy margins caused the 61m IN and the delayed 149m OUT
+   (commit `ab070de`). IN trust floor: fixes claiming worse accuracy than
+   the radius defer to the OS crossing point; a fix at 61m must never
+   punch IN.
 
 ## Conventions
 
 - Commits: conventional (`fix(geofence): …`), one logical change, run
   `flutter analyze` + `flutter test` before committing. Full suite must stay
-  green (159 tests).
+  green (173 tests).
 - Zone metadata: persisted JSON `gf_zone_ids` / `gf_zone_$id`
   (`GeofenceZone.toJson/fromJson`). Native/Android pieces under
   `android/app/src/main/kotlin/com/mattendance/mattendance_mobile/`.
