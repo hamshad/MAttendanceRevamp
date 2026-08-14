@@ -1103,6 +1103,13 @@ class GeofencePunchHandler {
     await prefs.setBool(
         'gf_containment_alarm_armed',
         prefs.getBool('geofence_auto_enabled') ?? false);
+    // A server-accepted punch proves today is a workday — refresh the
+    // leave-day marker (native chain / keep-alive FGS gate).
+    final nowD = DateTime.now();
+    await prefs.setBool('gf_shift_today', true);
+    await prefs.setString(
+        'gf_shift_today_date',
+        '${nowD.year.toString().padLeft(4, '0')}-${nowD.month.toString().padLeft(2, '0')}-${nowD.day.toString().padLeft(2, '0')}');
     // Foreground service lifecycle: FGS runs while (punched IN OR within
     // the shift window) — no banner on non-work hours or leave days
     // (leave day has no shift window; the gates live inside the service).

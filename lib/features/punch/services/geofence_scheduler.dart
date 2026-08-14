@@ -19,6 +19,34 @@ const _kPrefNextShiftStart = 'gf_next_shift_start';
 const _kPrefShiftName = 'gf_cached_shift_name';
 const _kPrefShiftEnd = 'gf_shift_end_time';
 
+/// Leave-day marker, date-scoped: `gf_shift_today` (bool) is TRUE when
+/// today's shift list was loaded and contains a shift, FALSE when it was
+/// loaded EMPTY (leave day).  Written from the main isolate whenever the
+/// shift list is (re)fetched/reopened; the native receivers read it to
+/// keep the leave-day chain / keep-alive FGS off.  STALE marker (date
+/// mismatch — app not opened today) deliberately defaults to TRUE
+/// (workday): the daily shift-start alarm must keep self-healing the
+/// headless missed-ENTER/EXIT net even after days without app opens —
+/// correctness of the morning IN net beats leave-day banner suppression,
+/// which is inherently unavailable without the app learning today's
+/// state (server truth).  Explicit FALSE wins ONLY for the day it was
+/// written: the app learned today is a leave day.
+const _kPrefShiftToday = 'gf_shift_today';
+const _kPrefShiftTodayDate = 'gf_shift_today_date';
+
+/// Local "yyyy-MM-dd" — must match PREF_SHIFT_TODAY_DATE parsing native
+/// side (ContainmentAlarmReceiver.shiftToday / GeofenceAlarmReceiver).
+String _localDateKey(DateTime d) =>
+    '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+Future<void> _persistShiftTodayMarker(bool hasShiftToday) async {
+  final prefs = await SharedPreferences.getInstance();
+  final now = DateTime.now();
+  await prefs.setBool(_kPrefShiftToday, hasShiftToday);
+  await prefs.setString(_kPrefShiftTodayDate, _localDateKey(now));
+  debugPrint('[GF_SCHED] shift-today marker: $hasShiftToday for ${_localDateKey(now)}');
+}
+
 /// Dart-visible mirror of the native arm flag.  Written from ANY isolate
 /// (prefs work headless); read by the native [ContainmentAlarmReceiver]
 /// every fire to decide whether to keep self-arming.
@@ -450,7 +478,7 @@ class GeofenceScheduler {
         debugPrint('[GF_SCHED] Containment alarm cancelled');
       } catch (_) {}
     }
-    await OemKeepAliveService.stop();
+    await OemKeepAliveService.stop(force: true);
   }
 
   /// Start the combined background service immediately if we are within
@@ -459,8 +487,12 @@ class GeofenceScheduler {
   static Future<void> startIfWithinShiftWindow(List<Shift> shifts) async {
     if (shifts.isEmpty) {
       debugPrint('[GF_SCHED] startIfWithinShiftWindow — shifts empty, returning');
+      // Leave day (no shift today): record it so the native chain /
+      // keep-alive FGS stays off for THIS day (see _kPrefShiftToday).
+      await _persistShiftTodayMarker(false);
       return;
     }
+    await _persistShiftTodayMarker(true);
 
     Shift? shift;
     for (final s in shifts) {
@@ -497,7 +529,7 @@ class GeofenceScheduler {
       // Keep-alive mode would hold the process WITHOUT the full service —
       // never start the combined service on top of it.  Stop first, then
       // the configure+start below replaces it (mode flag cleared).
-      await OemKeepAliveService.stop();
+      await OemKeepAliveService.stop(force: true);
 
       if (alreadyRunning) {
         if (_hasForceRestartedThisSession) {

@@ -59,6 +59,8 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
         private const val PREF_LAST_PUNCH_TYPE = "flutter.gf_last_punch_type"
         private const val PREF_SHIFT_START_TIME = "flutter.gf_cached_shift_start_time"
         private const val PREF_SHIFT_END = "flutter.gf_shift_end_time"
+        private const val PREF_SHIFT_TODAY = "flutter.gf_shift_today"
+        private const val PREF_SHIFT_TODAY_DATE = "flutter.gf_shift_today_date"
 
         private const val TASK_NAME = "geofence_containment"
 
@@ -170,8 +172,31 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
             return cal.timeInMillis
         }
 
+        /** True when the shift list says TODAY is a workday (mirrors the
+         *  Dart `_kPrefShiftToday` marker semantics).  Explicit FALSE wins
+         *  ONLY for the day it was written — the app opened on this leave
+         *  day and the server returned no shift.  STALE/missing marker
+         *  (app not opened today) deliberately returns TRUE: the daily
+         *  shift-start alarm must keep self-healing the headless
+         *  missed-ENTER/EXIT net after days without app opens; morning-IN
+         *  correctness beats leave-day banner suppression, which is
+         *  inherently unavailable without fresh server truth. */
+        fun shiftToday(context: Context): Boolean {
+            val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val date = p.getString(PREF_SHIFT_TODAY_DATE, null) ?: return true
+            val now = Calendar.getInstance()
+            val todayKey = String.format(
+                "%04d-%02d-%02d",
+                now.get(Calendar.YEAR), now.get(Calendar.MONTH) + 1, now.get(Calendar.DAY_OF_MONTH),
+            )
+            if (date != todayKey) return true // stale → workday assumption
+            return p.getBoolean(PREF_SHIFT_TODAY, true)
+        }
+
         /** True when now is inside [today's shift start, shift end]. */
         fun withinShiftWindow(context: Context): Boolean {
+            // Leave day: no shift window → no FGS, no containment chain.
+            if (!shiftToday(context)) return false
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val startTime = prefs.getString(PREF_SHIFT_START_TIME, null) ?: return false
             val endIso = prefs.getString(PREF_SHIFT_END, null) ?: return false
@@ -210,9 +235,10 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
          * stream catches it in real fixes) and Android legally forces a
          * persistent notification on any FGS — so the punch/window gate
          * keeps the banner out of nights, weekends and leave days (a
-         * leave day has no shift window → gate off).  The exact
-         * containment alarm re-evaluates every 15 min and revives the
-         * FGS whenever it is needed.
+         * leave day has no shift window → gate off; the app must have
+         * opened that day and learned "no shift" — see [shiftToday]).
+         * The exact containment alarm re-evaluates every 15 min and
+         * revives the FGS whenever it is needed.
          */
         fun keepAliveActive(context: Context): Boolean {
             val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

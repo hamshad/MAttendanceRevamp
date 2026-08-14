@@ -173,17 +173,30 @@ class GeofenceAlarmReceiver : BroadcastReceiver() {
                 // chain self-perpetuates through the whole workday
                 // (missed-ENTER/missed-EXIT net, killed-FGS + delayed
                 // OS EXIT caught within 15 min) and rests again after
-                // the window passes.  Leave days: no shift alarm, no
-                // chain.
-                val gfAuto = prefs.getBoolean("flutter.geofence_auto_enabled", false)
-                val armedFlag = prefs.getBoolean("flutter.gf_containment_alarm_armed", false)
-                if (gfAuto || armedFlag) {
-                    if (gfAuto) {
-                        prefs.edit()
-                            .putBoolean("flutter.gf_containment_alarm_armed", true)
-                            .apply()
+                // the window passes.  Leave days: the arm itself is
+                // gated on the shift-today marker (see below) — no
+                // chain, no FGS, no banner.
+                // Leave-day gate: the app learned today has no shift
+                // (empty shift list → marker written FALSE today).  Don't
+                // lift the arm flag or start the chain — leave days must
+                // have no containment loop, no FGS, no banner.  STALE
+                // marker → workday assumption → arm as usual (the chain
+                // is the morning-IN missed-ENTER net; it must survive
+                // days without app opens).  Next day's shift alarm
+                // re-evaluates.
+                if (ContainmentAlarmReceiver.shiftToday(context)) {
+                    val gfAuto = prefs.getBoolean("flutter.geofence_auto_enabled", false)
+                    val armedFlag = prefs.getBoolean("flutter.gf_containment_alarm_armed", false)
+                    if (gfAuto || armedFlag) {
+                        if (gfAuto) {
+                            prefs.edit()
+                                .putBoolean("flutter.gf_containment_alarm_armed", true)
+                                .apply()
+                        }
+                        ContainmentAlarmReceiver.armContainmentAlarm(context)
                     }
-                    ContainmentAlarmReceiver.armContainmentAlarm(context)
+                } else {
+                    Log.i(TAG, "Leave day (no shift today) — skipping chain arm")
                 }
                 scheduleNextShiftAlarmFromPrefs(context)
                 return

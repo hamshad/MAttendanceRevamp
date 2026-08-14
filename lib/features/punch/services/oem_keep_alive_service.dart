@@ -95,7 +95,7 @@ class OemKeepAliveService {
     // Banner gate: work hours only — punched IN, or within the shift
     // window (leave days have no window → no banner).
     if (prefs.getString('gf_last_punch_type') != 'In' &&
-        !_withinShiftWindow(prefs)) {
+        !withinShiftWindow(prefs)) {
       debugPrint('[KEEP_ALIVE] Not punched in + outside shift window — '
           'skipping FGS (no banner outside work hours)');
       return;
@@ -130,17 +130,20 @@ class OemKeepAliveService {
     }
   }
 
-  /// Stop the keep-alive (full service takes over / disable / logout —
-  /// or OUT punch outside the shift window).
-  static Future<void> stop() async {
+  /// Stop the keep-alive (full service takes over / disable / logout).
+  ///
+  /// Smart by default: an OUT punch inside work hours keeps the idle FGS
+  /// so the next IN / walk-out lands in a live process (the native
+  /// receiver closes it at the first post-window fire).  [force] bypasses
+  /// the work-hours gate — MUST be used when the combined service takes
+  /// over (wifi/tracking) or on disable/logout: the keep-alive mode flag
+  /// must be cleared or the full service would start in keep-alive mode.
+  static Future<void> stop({bool force = false}) async {
     if (!Platform.isAndroid) return;
     final prefs = await SharedPreferences.getInstance();
-    // Stay up while punched in or within the shift window: an OUT punch
-    // inside work hours keeps the (idle, silent) FGS so the next IN /
-    // walk-out lands in a live process; the native containment receiver
-    // closes the service at its first fire after the window passes.
-    if (prefs.getString('gf_last_punch_type') == 'In' ||
-        _withinShiftWindow(prefs)) {
+    if (!force &&
+        (prefs.getString('gf_last_punch_type') == 'In' ||
+            withinShiftWindow(prefs))) {
       return;
     }
     await prefs.setBool(keepAliveModeKey, false);
@@ -155,13 +158,25 @@ class OemKeepAliveService {
     }
   }
 
-  /// True when the current time is inside today's [shift start, shift end]
-  /// window — mirrors [ContainmentAlarmReceiver.withinShiftWindow] (Kotlin).
+  /// True when [now] (defaults to wall clock) is inside today's
+  /// [shift start, shift end] window — mirrors
+  /// [ContainmentAlarmReceiver.withinShiftWindow] (Kotlin).
   /// Overnight shifts (end < start today) roll the end to tomorrow.
   /// Leave days have no shift window → false → no FGS, no containment.
   /// Fail-safe: unknown/missing shift times → false (nothing to gate on;
   /// the chain re-evaluates on every native fire).
-  static bool _withinShiftWindow(SharedPreferences prefs) {
+  static bool withinShiftWindow(SharedPreferences prefs, [DateTime? now]) {
+    // Leave-day gate: explicit FALSE wins only for the day it was
+    // written (app learned today is a leave day — empty shift list).
+    // STALE marker / never written → TRUE (workday assumption) so the
+    // headless self-heal keeps working after days without app opens.
+    final markerDate = prefs.getString('gf_shift_today_date');
+    final nowTime = now ?? DateTime.now();
+    final todayKey = '${nowTime.year.toString().padLeft(4, '0')}-${nowTime.month.toString().padLeft(2, '0')}-${nowTime.day.toString().padLeft(2, '0')}';
+    if (markerDate == todayKey &&
+        prefs.getBool('gf_shift_today') == false) {
+      return false;
+    }
     final startRaw = prefs.getString('gf_cached_shift_start_time');
     final endRaw = prefs.getString('gf_shift_end_time');
     if (startRaw == null || endRaw == null) return false;
@@ -178,16 +193,15 @@ class OemKeepAliveService {
     final end = DateTime.tryParse(cleaned);
     if (end == null) return false;
 
-    final now = DateTime.now();
-    final start = DateTime(now.year, now.month, now.day, hour, minute);
+    final start = DateTime(nowTime.year, nowTime.month, nowTime.day, hour, minute);
     final endToday =
-        DateTime(now.year, now.month, now.day, end.hour, end.minute);
+        DateTime(nowTime.year, nowTime.month, nowTime.day, end.hour, end.minute);
     if (endToday.isBefore(start)) {
       // Overnight shift: end belongs to tomorrow.
-      return !now.isBefore(start) &&
-          !now.isAfter(endToday.add(const Duration(days: 1)));
+      return !nowTime.isBefore(start) &&
+          !nowTime.isAfter(endToday.add(const Duration(days: 1)));
     }
-    return !now.isBefore(start) && !now.isAfter(endToday);
+    return !nowTime.isBefore(start) && !nowTime.isAfter(endToday);
   }
 
   static Future<bool> isRunning() async {
