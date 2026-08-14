@@ -27,9 +27,13 @@ Context for any agent working in this repo. Architecture docs live in
    dead process, field-proven 12h+ without app open. The FGS exists for
    the walk-out only: movement stream catches it, OUT punch keeps the
    idle service through work hours and the receiver closes it at the
-   first post-window fire — banner never shows on non-work hours, weekends
-   or leave days (leave days have no shift window), commits
-   `8dc7894`/`47130be`/`8787c56`/`82f2d0a`). Headless WorkManager
+    first post-window fire — banner never shows on non-work hours, weekends
+    or leave days (leave days have no shift window; the leave-day gate is
+    the date-scoped `gf_shift_today`/`gf_shift_today_date` marker — app
+    opened that day + empty shift list → false; stale marker defaults TRUE
+    so the headless morning-IN net survives days without app opens),
+    commits
+    `8dc7894`/`47130be`/`8787c56`/`82f2d0a`/`10197aa`). Headless WorkManager
    containment (15-min alarm) is the missed-ENTER/missed-EXIT net:
    `gf_containment_alarm_armed` is the MASTER ENABLE (geofence auto on,
    never cleared by punch state — cleared on disable/logout only), the
