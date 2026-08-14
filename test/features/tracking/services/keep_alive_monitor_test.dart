@@ -5,6 +5,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:mattendance_mobile/features/punch/services/geofence_monitor.dart';
+import 'package:mattendance_mobile/features/punch/services/oem_keep_alive_service.dart';
 import 'package:mattendance_mobile/features/tracking/services/field_tracking_service.dart';
 
 void main() {
@@ -130,6 +131,119 @@ void main() {
 
     test('no zones → false', () {
       expect(isOutsideAllOffices(fixAt(0.001, 0.001), []), isFalse);
+    });
+  });
+
+  group('isInsideAnyOffice', () {
+    const zone = GeofenceZone(
+      id: 'office_1',
+      name: 'HQ',
+      latitude: officeLat,
+      longitude: officeLng,
+      radius: 20.0,
+      isClientSite: false,
+      officeId: 1,
+    );
+
+    test('inside radius → true', () {
+      expect(isInsideAnyOffice(fixAt(0.0001, 0.0), [zone]), isTrue);
+    });
+
+    test('inside IN band (radius+5m) → true — the at-point IN gate', () {
+      // ~24m from center, 20m radius: within radius+5=25m IN band → true,
+      // so the return-IN reconcile fires AT POINT (~24m), like the
+      // Aug-8-proven 21m background IN.
+      expect(isInsideAnyOffice(fixAt(0.00022, 0.0), [zone]), isTrue);
+    });
+
+    test('past the IN band → false (OUT side — no reconcile)', () {
+      // ~27m from center: beyond 25m IN band → false; the OUT-band
+      // monitor (isOutsideAllOffices) owns this region instead.
+      expect(isInsideAnyOffice(fixAt(0.00024, 0.0), [zone]), isFalse);
+    });
+
+    test('inside ANY office → true (multi-office)', () {
+      const other = GeofenceZone(
+        id: 'office_2',
+        name: 'Remote',
+        latitude: officeLat + 0.001, // ~111m north of HQ
+        longitude: officeLng,
+        radius: 100.0,
+        isClientSite: false,
+        officeId: 2,
+      );
+      // ~66m north: outside HQ's 25m IN band, inside `other`'s 105m band.
+      expect(isInsideAnyOffice(fixAt(0.0006, 0.0), [zone, other]), isTrue);
+    });
+
+    test('accuracy never widens the IN band (fixed 5m slack)', () {
+      // 26m out, 20m radius: past radius+5=25m → NOT inside, regardless
+      // of the claimed accuracy (honesty rule — the old 2x-accuracy
+      // margin caused the 61m IN punch).
+      expect(
+          isInsideAnyOffice(fixAt(0.00023, 0.0, accuracy: 60), [zone]),
+          isFalse);
+      expect(
+          isInsideAnyOffice(fixAt(0.00023, 0.0, accuracy: 10), [zone]),
+          isFalse);
+    });
+
+    test('no zones → false', () {
+      expect(isInsideAnyOffice(fixAt(0.0001, 0.0001), []), isFalse);
+    });
+  });
+
+  group('OemKeepAliveService.shouldKeepAliveAfterOut', () {
+    test('geofence off → never keep (disable wins)', () {
+      expect(
+        OemKeepAliveService.shouldKeepAliveAfterOut(
+          geofenceAutoOn: false,
+          pastShiftEnd: false,
+          punchType: 'Out',
+        ),
+        isFalse,
+      );
+    });
+
+    test('OUT within shift window → keep (the at-point IN fix)', () {
+      expect(
+        OemKeepAliveService.shouldKeepAliveAfterOut(
+          geofenceAutoOn: true,
+          pastShiftEnd: false,
+          punchType: 'Out',
+        ),
+        isTrue,
+      );
+    });
+
+    test('OUT past shift end → stop (no banner at home)', () {
+      expect(
+        OemKeepAliveService.shouldKeepAliveAfterOut(
+          geofenceAutoOn: true,
+          pastShiftEnd: true,
+          punchType: 'Out',
+        ),
+        isFalse,
+      );
+    });
+
+    test('non-OUT punches → never keep (only the OUT branch calls this)', () {
+      expect(
+        OemKeepAliveService.shouldKeepAliveAfterOut(
+          geofenceAutoOn: true,
+          pastShiftEnd: false,
+          punchType: 'In',
+        ),
+        isFalse,
+      );
+      expect(
+        OemKeepAliveService.shouldKeepAliveAfterOut(
+          geofenceAutoOn: true,
+          pastShiftEnd: false,
+          punchType: null,
+        ),
+        isFalse,
+      );
     });
   });
 }

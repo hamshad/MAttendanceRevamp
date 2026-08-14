@@ -1183,9 +1183,11 @@ class GeofencePunchHandler {
     await prefs.setBool(
         'gf_containment_alarm_armed',
         prefs.getBool('geofence_auto_enabled') ?? false);
-    // Foreground service lifecycle: FGS runs ONLY while punched IN (the
-    // walk-out monitor; banner exists exactly at work).  OUT → FGS stops
-    // → back to headless IN (OS ENTER + the containment checker).
+    // Foreground service lifecycle (work-hours gate — banner exists
+    // exactly at work): IN → FGS up (walk-out monitor).  OUT → FGS keeps
+    // running (or starts) through the shift window so its stream punches
+    // the return-IN AT POINT (Nothing-class OEMs drop the headless OS
+    // ENTER); OUT past the shift end → FGS stops → back to headless.
     // No-op on iOS (gates inside the service).
     try {
       if (type == 'In') {

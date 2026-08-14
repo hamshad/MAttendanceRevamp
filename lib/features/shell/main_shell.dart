@@ -255,7 +255,7 @@ class _MainShellState extends ConsumerState<MainShell>
       if (await GeofenceScheduler.serviceRequired()) {
         if (!await FieldTrackingService.isRunning) {
           debugPrint('SHELL: Starting combined service (wifi/tracking enabled)');
-          await OemKeepAliveService.stop(); // keep-alive holds the process — stop it first
+          await OemKeepAliveService.stop(force: true); // keep-alive holds the process — stop it first
           await FieldTrackingService.start();
         } else {
           debugPrint('SHELL: Combined service already running');
@@ -289,7 +289,7 @@ class _MainShellState extends ConsumerState<MainShell>
         // everything).  Service only when wifi/tracking need a live isolate.
         if (await GeofenceScheduler.serviceRequired()) {
           debugPrint('SHELL_Toggle: starting combined service');
-          await OemKeepAliveService.stop(); // keep-alive holds the process — stop it first
+          await OemKeepAliveService.stop(force: true); // keep-alive holds the process — stop it first
           await FieldTrackingService.start();
         } else {
           debugPrint('SHELL_Toggle: geofence-only — service not started (native headless)');

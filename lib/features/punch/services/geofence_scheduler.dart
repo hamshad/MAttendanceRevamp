@@ -462,7 +462,7 @@ class GeofenceScheduler {
         debugPrint('[GF_SCHED] Containment alarm cancelled');
       } catch (_) {}
     }
-    await OemKeepAliveService.stop();
+    await OemKeepAliveService.stop(force: true);
   }
 
   /// Start the combined background service immediately if we are within
@@ -509,7 +509,7 @@ class GeofenceScheduler {
       // Keep-alive mode would hold the process WITHOUT the full service —
       // never start the combined service on top of it.  Stop first, then
       // the configure+start below replaces it (mode flag cleared).
-      await OemKeepAliveService.stop();
+      await OemKeepAliveService.stop(force: true);
 
       if (alreadyRunning) {
         if (_hasForceRestartedThisSession) {
