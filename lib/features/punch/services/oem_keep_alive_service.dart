@@ -40,9 +40,12 @@ import '../../tracking/services/field_tracking_service.dart';
 ///   - started on the IN punch from ANY isolate (headless IN punches
 ///     included) — `_persistPunchState` calls [startIfNeeded]
 ///   - stopped on the OUT punch ([stop]) — back to headless IN
-///   - revived by the native ContainmentAlarmReceiver on its 15-min
-///     alarm while still punched IN (exact alarm → exempt from
-///     background start restrictions)
+///   - NEVER auto-revived (user design): if the user closes the FGS it
+///     stays closed — the banner must not come back behind their back.
+///     Headless OUT keeps working: OS geofence EXIT is the primary
+///     headless OUT path; the 15-min containment checker (headless
+///     WorkManager reconcile, fixed 45m OUT band, two-fix confirm)
+///     guarantees the OUT within one interval at most.
 ///   - stopped on disable, or on logout
 class OemKeepAliveService {
   OemKeepAliveService._();

@@ -35,38 +35,22 @@ class BootReceiver : BroadcastReceiver() {
             startBackgroundService(context)
         }
 
-        // Re-arm the periodic containment check (punched-in auto-punch users).
+// Re-arm the periodic containment check (punched-in auto-punch users).
         // The alarm self-perpetuates once its first fire is scheduled.
         ContainmentAlarmReceiver.armFromPrefsIfNeeded(context)
 
-        // All Android devices: revive the keep-alive foreground service after
-        // reboot — but ONLY while punched IN (keepAliveActive).  The FGS
-        // exists for exactly one job: the movement-gated stream catches
-        // the walk-out in real fixes; OUT closes the service immediately,
-        // next IN opens it again (banner exists only while actually at
-        // work — user design).  Set the mode flag so the Dart entrypoint
-        // runs keep-alive (light), never the full GPS service, unless
-        // wifi/tracking genuinely need it (then `was_field_tracking`
-        // above already starts the full service).
-        //
-        // Android 15 (API 35)+ restriction: starting a `location`-type
-        // foreground service from BOOT_COMPLETED is banned — it throws
-        // ForegroundServiceStartNotAllowedException.  The exact alarm
-        // path is exempt, so instead of crashing at boot we let the
-        // containment alarm (revived below) bring the service up on its
-        // next 15-min fire.
-        val serviceRequired = prefs.getBoolean("flutter.wifi_auto_punch_enabled_bg", false) ||
-            prefs.getBoolean("flutter.wifi_auto_punch_enabled", false) ||
-            prefs.getBoolean("flutter.field_tracking_enabled", false)
-        val trackingWentFirst = prefs.getBoolean("flutter.was_field_tracking", false)
-        val wearOuts = !serviceRequired &&
-            ContainmentAlarmReceiver.keepAliveActive(context) &&
-            !trackingWentFirst
-        if (wearOuts && Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
-            prefs.edit().putBoolean("flutter.gf_keep_alive_mode", true).apply()
-            startBackgroundService(context)
-        }
+        // NOTE: no keep-alive FGS revival here.  The FGS is punch-state
+        // lifecycle (starts on the IN punch, stops on OUT) — if the user
+        // closed it, it stays closed: the banner must not come back
+        // behind their back.  Headless OUT keeps working after reboot
+        // (OS geofence EXIT + the 15-min headless reconcile).
+        // Android 15 (API 35)+ also bans `location`-type FGS starts from
+        // BOOT_COMPLETED — avoiding the revival sidesteps that entirely.
     }
+
+    /** Start the full combined background service (field tracking /
+     *  wifi auto-punch users after reboot — the geofence-only keep-alive
+     *  FGS deliberately never starts here, see above). */
 
     private fun startBackgroundService(context: Context) {
         val serviceIntent = Intent(context, BackgroundService::class.java)

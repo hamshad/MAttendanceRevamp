@@ -33,11 +33,13 @@ import java.util.Calendar
  *    and lifted by the native shift-start alarm every morning.
  *  - This receiver self-perpetuates: every fire re-arms the next one as
  *    long as the flag is set — it NEVER rests while geofence auto is
- *    on.  It is the 24/7 checker for the headless IN path: each fire
- *    enqueues a headless WorkManager task that re-registers the OS
- *    geofences (self-heal if an OEM dropped them — the headless ENTER
- *    punch depends on them) and re-checks containment.  The FGS is
- *    revived only while punched IN (banner = at work, walk-out monitor).
+ *    on.  It is the 24/7 checker for the headless IN/OUT paths: each
+ *    fire enqueues a headless WorkManager task that re-registers the OS
+ *    geofences (self-heal if an OEM dropped them) and re-checks
+ *    containment (missed-ENTER and missed-EXIT).  It never revives the
+ *    FGS — the keep-alive service is punch-state lifecycle only (starts
+ *    on the IN punch, stops on OUT; user-closed stays closed, no banner
+ *    behind the user's back; headless OUT covers it within one interval).
  *  - The FIRST alarm after install/boot is scheduled by the Dart
  *    main isolate (armContainmentAlarmIfNeeded), by the shift-start
  *    alarm, and by [BootReceiver].  Once it exists it never needs the
@@ -60,7 +62,6 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
         private const val PREFS_NAME = "FlutterSharedPreferences"
 
         private const val PREF_ARMED = "flutter.gf_containment_alarm_armed"
-        private const val PREF_LAST_PUNCH_TYPE = "flutter.gf_last_punch_type"
 
         private const val TASK_NAME = "geofence_containment"
 
@@ -80,21 +81,10 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
             return AGGRESSIVE_BRANDS.any { brand.contains(it) }
         }
 
-        /** True when a live isolate genuinely needs to run the FULL combined
-         *  service (wifi auto / field tracking) — that service is itself a
-         *  foreground service and owns the process; no keep-alive needed. */
-        private fun serviceRequired(context: Context): Boolean {
-            val prefs =
-                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            return prefs.getBoolean("flutter.wifi_auto_punch_enabled_bg", false) ||
-                prefs.getBoolean("flutter.wifi_auto_punch_enabled", false) ||
-                prefs.getBoolean("flutter.field_tracking_enabled", false)
-        }
-
         /** One-shot 15-min alarm.  Doze-tolerant; exact on aggressive OEMs
          *  (exact-alarm receivers are exempt from Android 12+ background
-         *  start restrictions, so the receiver can revive the keep-alive
-         *  foreground service without user exemptions). */
+         *  start restrictions, so the receiver can enqueue WorkManager
+         *  reliably). */
         fun armContainmentAlarm(context: Context) {
             val intent = Intent(context, ContainmentAlarmReceiver::class.java).apply {
                 action = ACTION_CONTAINMENT_CHECK
@@ -154,25 +144,12 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
             }
         }
 
-        /** Punch-state gate: does the keep-alive FGS need to run?
-         *  User design — banner ONLY while actually punched in: the FGS
-         *  exists to watch the walk-out (movement-gated stream, OUT at
-         *  the boundary with two-fix confirmation) and Android legally
-         *  forces a persistent notification on any FGS, so the
-         *  punch-state gate keeps the banner off nights, weekends and
-         *  leave days.  Punched OUT = headless (OS geofence ENTER for
-         *  IN + this alarm as the 24/7 checker). */
-        fun keepAliveActive(context: Context): Boolean {
-            val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            if (!p.getBoolean(PREF_ARMED, false)) return false
-            return p.getString(PREF_LAST_PUNCH_TYPE, null) == "In"
-        }
-
-        /** The 24/7 headless-IN checker: always continues while armed
-         *  (geofence auto on) — every 15-min fire re-registers the OS
-         *  geofences and re-queues the headless WorkManager task so the
-         *  ENTER punch survives whatever kills the app process, the
-         *  WorkManager queue or the OS geofence registration. */
+        /** The 24/7 headless-IN/OUT checker: always continues while armed
+         *  (geofence auto on) — every 15-min fire enqueues a headless
+         *  WorkManager task that re-registers the OS geofences AND
+         *  re-checks containment, so ENTER and EXIT punching survive
+         *  whatever kills the app process, the FGS, the WorkManager
+         *  queue or the OS geofence registration. */
         private fun stillNeeded(context: Context): Boolean {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             return prefs.getBoolean(PREF_ARMED, false)
@@ -213,44 +190,16 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
         wakeLock.acquire(30_000L)
 
         try {
-            val prefs =
-                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            if (!serviceRequired(context) && keepAliveActive(context)) {
-                // Revive the keep-alive foreground service directly (exact
-                // alarm ⇒ exempt from background start restrictions).  Set
-                // the mode flag so the Dart entrypoint runs keep-alive
-                // (heal geofences + one containment check + the
-                // movement-gated OUT monitor, NOT the full GPS service).
-                // Punched IN only (user design): the banner shows exactly
-                // while at work; the OUT punch closes the service and we
-                // are back to headless IN + this 24/7 checker.
-                prefs.edit()
-                    .putBoolean("flutter.gf_keep_alive_mode", true)
-                    .apply()
-                val started = try {
-                    val serviceIntent = Intent(context, BackgroundService::class.java)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        context.startForegroundService(serviceIntent)
-                    } else {
-                        context.startService(serviceIntent)
-                    }
-                    true
-                } catch (e: Exception) {
-                    Log.w(TAG, "FGS start blocked — falling back to headless WorkManager: $e")
-                    false
-                }
-                if (started) {
-                    Log.d(TAG, "Keep-alive foreground service revived")
-                } else {
-                    enqueueHeadlessContainment(context)
-                }
-            } else {
-                // Fallback (service already running full, or FGS denied):
-                // headless WorkManager task — the plugin's BackgroundWorker
-                // spawns a fresh engine, runs the Dart containment
-                // callback, no foreground service involved.
-                enqueueHeadlessContainment(context)
-            }
+            // Headless only (user design): the FGS is punch-state
+            // lifecycle (starts on the IN punch, stops on OUT).  If the
+            // user closed it, we NEVER auto-revive it — the banner must
+            // not come back behind their back.  Headless OUT keeps
+            // working instead: the task below re-registers the OS
+            // geofences and re-checks containment — a closed FGS costs
+            // at most one 15-min interval before the OUT punches (OS
+            // geofence EXIT is the primary headless OUT path; this
+            // reconcile is the guarantee with the fixed 45m band).
+            enqueueHeadlessContainment(context)
 
             // Self-perpetuating: arm the next fire.
             armContainmentAlarm(context)
