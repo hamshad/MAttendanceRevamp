@@ -50,10 +50,16 @@ Context for any agent working in this repo. Architecture docs live in
 4. `wifi_auto_punch_enabled_bg` defaults **false**. A `?? true` here leaks a
    service start (commit `0ddb03a`).
 5. Containment alarm + alignment worker must call
-   `reRegisterZonesFromCache(initialTriggers: {})` (cache-only, no
-   network) BEFORE `reconcileContainment()` — zones self-heal or missed
-   punches recur (commit `68ce662`; `e624167` made the checker 24/7 and
-   switched it to cache-only re-registration).
+    `reRegisterZonesFromCache(initialTriggers: {enter})` (cache-only, no
+    network) BEFORE `reconcileContainment()` — zones self-heal AND the
+    catch-up ENTER re-fires for an already-inside punched-OUT phone
+    (fix-independent headless IN recovery when the OS ENTER is
+    OEM-dropped/deferred — Nothing-class missed-IN). Own-source duplicates
+    persist silently (no notification spam for a punched-IN user sitting
+    inside). Catch-up ENTER only fires when genuinely inside the geofence
+    radius — cannot fabricate a far-away IN (commit `68ce662`; `e624167`
+    made the checker 24/7 and switched it to cache-only re-registration;
+    the `{enter}` catch-up was restored in the Nothing 3a fix).
 6. Keep-alive branch: no timers. Only the movement-gated GPS stream
    (distanceFilter 30m) while punched in. Stationary = zero fixes.
 7. Punch pipeline order is sacred: fresh-fix GPS gate → OUT zone-identity gate
