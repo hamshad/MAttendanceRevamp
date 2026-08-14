@@ -248,6 +248,87 @@ class GeofenceMonitor {
     }
   }
 
+  /// Re-register OS geofences from the PERSISTED zone metadata
+  /// (`gf_zone_ids` / `gf_zone_$id`) — NO network.  Used by the
+  /// high-frequency headless self-heal path (the 24/7 containment
+  /// checker, the 30-min alignment worker): a network fetch there would
+  /// hammer the API every 15 min forever.  Fresh zone data comes from
+  /// the app-open/toggle paths, which call [registerZones] (network).
+  /// Falls back to nothing (log) when no metadata exists — registration
+  /// will be refreshed the next time the app fetches zones.
+  static Future<void> reRegisterZonesFromCache({
+    Set<GeofenceEvent> initialTriggers = const {},
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+
+    // Same gates as registerZones (no dio needed for the cache path).
+    if (prefs.getBool('bg_allow_geofence_auto') == false) {
+      debugPrint('[GF_MON] (cache) Backend denied geofence auto — unregistering');
+      await unregisterAll();
+      return;
+    }
+    if (!isEnabled) {
+      debugPrint('[GF_MON] (cache) Geofence disabled — unregistering');
+      await unregisterAll();
+      return;
+    }
+    final token = prefs.getString('bg_access_token');
+    if (token == null || token.isEmpty) {
+      debugPrint('[GF_MON] (cache) No auth token — unregistering');
+      await unregisterAll();
+      return;
+    }
+
+    final ids = prefs.getStringList(_zoneIdsKey) ?? const [];
+    if (ids.isEmpty) {
+      debugPrint('[GF_MON] (cache) No persisted zones — skipping re-register');
+      return;
+    }
+    final zones = <GeofenceZone>[];
+    for (final id in ids) {
+      final raw = prefs.getString('gf_zone_$id');
+      if (raw == null) continue;
+      try {
+        final zone = GeofenceZone.fromJson(id, jsonDecode(raw) as Map<String, dynamic>);
+        if (zone != null) zones.add(zone);
+      } catch (e) {
+        debugPrint('[GF_MON] (cache) Corrupt zone metadata $id: $e');
+      }
+    }
+    if (zones.isEmpty) {
+      debugPrint('[GF_MON] (cache) All zone metadata corrupt — skipping');
+      return;
+    }
+
+    await _ensureInitialized();
+    try {
+      await NativeGeofenceManager.instance.removeAllGeofences();
+    } catch (e) {
+      debugPrint('[GF_MON] (cache) removeAll failed (continuing): $e');
+    }
+
+    for (final z in zones) {
+      final gf = Geofence(
+        id: z.id,
+        location: Location(latitude: z.latitude, longitude: z.longitude),
+        radiusMeters: z.radius,
+        triggers: {GeofenceEvent.enter, GeofenceEvent.exit},
+        iosSettings: IosGeofenceSettings(initialTrigger: true),
+        androidSettings: AndroidGeofenceSettings(
+          initialTriggers: initialTriggers,
+          notificationResponsiveness: const Duration(seconds: 30),
+        ),
+      );
+      try {
+        await NativeGeofenceManager.instance.createGeofence(gf, geofenceTriggered);
+        debugPrint('[GF_MON] (cache) Registered ${z.id} (${z.name}, r=${z.radius}m)');
+      } on NativeGeofenceException catch (e) {
+        debugPrint('[GF_MON] (cache) createGeofence ${z.id} failed: ${e.code} ${e.message}');
+      }
+    }
+  }
+
   /// Remove every geofence (geofence disabled / permission revoked / logout).
   static Future<void> unregisterAll() async {
     try {
@@ -1095,25 +1176,16 @@ class GeofencePunchHandler {
       await prefs.setString('gf_last_punch_zone_id', zoneId);
     }
     // Containment alarm keep-alive: the armed flag is the MASTER ENABLE
-    // (geofence auto on), NOT the punch state.  The receiver self-
-    // perpetuates while (punched IN OR within the shift window) — OUT +
-    // outside window = nothing to monitor = chain rests until the next
-    // shift-start alarm re-arms it.  Written from ANY isolate — headless
-    // punches arm/disarm without the app ever being opened.
+    // (geofence auto on), NOT the punch state — the receiver stays armed
+    // 24/7 as the headless-IN checker (re-registers OS geofences every
+    // 15 min so OS ENTER keeps delivering).  Written from ANY isolate —
+    // headless punches arm/disarm without the app ever being opened.
     await prefs.setBool(
         'gf_containment_alarm_armed',
         prefs.getBool('geofence_auto_enabled') ?? false);
-    // A server-accepted punch proves today is a workday — refresh the
-    // leave-day marker (native chain / keep-alive FGS gate).
-    final nowD = DateTime.now();
-    await prefs.setBool('gf_shift_today', true);
-    await prefs.setString(
-        'gf_shift_today_date',
-        '${nowD.year.toString().padLeft(4, '0')}-${nowD.month.toString().padLeft(2, '0')}-${nowD.day.toString().padLeft(2, '0')}');
-    // Foreground service lifecycle: FGS runs while (punched IN OR within
-    // the shift window) — no banner on non-work hours or leave days
-    // (leave day has no shift window; the gates live inside the service).
-    // On OUT the service only stops itself once the window also passed.
+    // Foreground service lifecycle: FGS runs ONLY while punched IN (the
+    // walk-out monitor; banner exists exactly at work).  OUT → FGS stops
+    // → back to headless IN (OS ENTER + the containment checker).
     // No-op on iOS (gates inside the service).
     try {
       if (type == 'In') {

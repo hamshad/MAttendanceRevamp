@@ -318,23 +318,6 @@ void main() {
     });
   });
 
-  group('Shift-today (leave-day) marker', () {
-    test('empty shift list → marker FALSE written for today', () async {
-      SharedPreferences.setMockInitialValues({
-        'gf_shift_today': true, // stale from yesterday
-        'gf_shift_today_date': '2026-08-13',
-      });
-
-      await GeofenceScheduler.startIfWithinShiftWindow([]);
-
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getBool('gf_shift_today'), isFalse);
-      final now = DateTime.now();
-      final todayKey = '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
-      expect(prefs.getString('gf_shift_today_date'), todayKey);
-    });
-  });
-
   group('ScheduleNextShift', () {
     test('persists shift name and next start time', () async {
       SharedPreferences.setMockInitialValues({});

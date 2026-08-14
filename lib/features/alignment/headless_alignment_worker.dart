@@ -90,8 +90,9 @@ class HeadlessAlignmentWorker {
     // against the server before punching.
     // Self-heal OS geofences first (initialTriggers: {} — no enter catch-up;
     // containment reconcile handles catch-up) so the native EXIT fires at
-    // the boundary.
-    await GeofenceMonitor.registerZones(initialTriggers: const {});
+    // the boundary.  Cache-only re-register: no network on this periodic
+    // path (fresh zones come from app-open fetches).
+    await GeofenceMonitor.reRegisterZonesFromCache();
     await GeofencePunchHandler.instance.reconcileContainment(confirmOut: true);
   }
 

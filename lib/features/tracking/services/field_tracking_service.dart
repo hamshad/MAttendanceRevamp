@@ -140,11 +140,10 @@ class FieldTrackingService {
 
   /// Start the background tracking service.
   static Future<void> start() async {
-    // Keep-alive holds the process — force-stop it first, or the
-    // combined service would start with the keep-alive mode flag still
-    // set (and run light instead of full).  Force bypasses the
-    // work-hours gate: the combined service owns the process now.
-    await OemKeepAliveService.stop(force: true);
+    // Keep-alive holds the process — stop it first (mode flag cleared),
+    // or the combined service would start with the keep-alive mode flag
+    // still set (and run light instead of full).
+    await OemKeepAliveService.stop();
     try {
       await _svc.startService();
     } catch (e) {

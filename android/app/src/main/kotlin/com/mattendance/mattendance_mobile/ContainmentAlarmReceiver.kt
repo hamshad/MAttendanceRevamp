@@ -32,10 +32,12 @@ import java.util.Calendar
  *    auto on) — written by the Dart main isolate on arm/disable/logout
  *    and lifted by the native shift-start alarm every morning.
  *  - This receiver self-perpetuates: every fire re-arms the next one as
- *    long as the flag is set AND the state still needs checking
- *    (punched IN, or punched OUT but within the shift window — the
- *    missed-ENTER case).  Out + outside window → chain rests until the
- *    next shift-start alarm.
+ *    long as the flag is set — it NEVER rests while geofence auto is
+ *    on.  It is the 24/7 checker for the headless IN path: each fire
+ *    enqueues a headless WorkManager task that re-registers the OS
+ *    geofences (self-heal if an OEM dropped them — the headless ENTER
+ *    punch depends on them) and re-checks containment.  The FGS is
+ *    revived only while punched IN (banner = at work, walk-out monitor).
  *  - The FIRST alarm after install/boot is scheduled by the Dart
  *    main isolate (armContainmentAlarmIfNeeded), by the shift-start
  *    alarm, and by [BootReceiver].  Once it exists it never needs the
@@ -44,7 +46,9 @@ import java.util.Calendar
  * BATTERY: at the office (punched in, stationary) the Dart side reuses
  * the OS-cached last-known position and does NOT turn on GPS — each fire
  * is a brief CPU wakeup + prefs read.  GPS (≤2 short fixes) only when the
- * cache says the user has moved outside an office radius.
+ * cache says the user has moved outside an office radius.  Punched out +
+ * away = prefs read only (cheap).  Cost: ~96 light wakeups/day while
+ * geofence auto is on — the price of the always-available headless IN.
  */
 class ContainmentAlarmReceiver : BroadcastReceiver() {
     companion object {
@@ -57,10 +61,6 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
 
         private const val PREF_ARMED = "flutter.gf_containment_alarm_armed"
         private const val PREF_LAST_PUNCH_TYPE = "flutter.gf_last_punch_type"
-        private const val PREF_SHIFT_START_TIME = "flutter.gf_cached_shift_start_time"
-        private const val PREF_SHIFT_END = "flutter.gf_shift_end_time"
-        private const val PREF_SHIFT_TODAY = "flutter.gf_shift_today"
-        private const val PREF_SHIFT_TODAY_DATE = "flutter.gf_shift_today_date"
 
         private const val TASK_NAME = "geofence_containment"
 
@@ -154,97 +154,28 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
             }
         }
 
-        private fun parseIsoLocal(iso: String): Long? {
-            val cleaned = iso
-                .replace(Regex("[Zz]$"), "")
-                .replace(Regex("\\.\\d+"), "")
-            val parts = cleaned.split(Regex("[-T:]"))
-            if (parts.size < 6) return null
-            val year = parts[0].toIntOrNull() ?: return null
-            val month = parts[1].toIntOrNull() ?: return null
-            val day = parts[2].toIntOrNull() ?: return null
-            val hour = parts[3].toIntOrNull() ?: return null
-            val min = parts[4].toIntOrNull() ?: return null
-            val sec = parts[5].toIntOrNull() ?: return null
-            val cal = Calendar.getInstance(java.util.TimeZone.getDefault())
-            cal.set(year, month - 1, day, hour, min, sec)
-            cal.set(Calendar.MILLISECOND, 0)
-            return cal.timeInMillis
-        }
-
-        /** True when the shift list says TODAY is a workday (mirrors the
-         *  Dart `_kPrefShiftToday` marker semantics).  Explicit FALSE wins
-         *  ONLY for the day it was written — the app opened on this leave
-         *  day and the server returned no shift.  STALE/missing marker
-         *  (app not opened today) deliberately returns TRUE: the daily
-         *  shift-start alarm must keep self-healing the headless
-         *  missed-ENTER/EXIT net after days without app opens; morning-IN
-         *  correctness beats leave-day banner suppression, which is
-         *  inherently unavailable without fresh server truth. */
-        fun shiftToday(context: Context): Boolean {
-            val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val date = p.getString(PREF_SHIFT_TODAY_DATE, null) ?: return true
-            val now = Calendar.getInstance()
-            val todayKey = String.format(
-                "%04d-%02d-%02d",
-                now.get(Calendar.YEAR), now.get(Calendar.MONTH) + 1, now.get(Calendar.DAY_OF_MONTH),
-            )
-            if (date != todayKey) return true // stale → workday assumption
-            return p.getBoolean(PREF_SHIFT_TODAY, true)
-        }
-
-        /** True when now is inside [today's shift start, shift end]. */
-        fun withinShiftWindow(context: Context): Boolean {
-            // Leave day: no shift window → no FGS, no containment chain.
-            if (!shiftToday(context)) return false
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val startTime = prefs.getString(PREF_SHIFT_START_TIME, null) ?: return false
-            val endIso = prefs.getString(PREF_SHIFT_END, null) ?: return false
-            val parts = startTime.split(":")
-            if (parts.size < 2) return false
-            val hour = parts[0].toIntOrNull() ?: return false
-            val minute = parts[1].toIntOrNull() ?: return false
-            val endMs = parseIsoLocal(endIso) ?: return false
-
-            val now = Calendar.getInstance()
-            val start = Calendar.getInstance()
-            start.set(Calendar.HOUR_OF_DAY, hour)
-            start.set(Calendar.MINUTE, minute)
-            start.set(Calendar.SECOND, 0)
-            start.set(Calendar.MILLISECOND, 0)
-            // Overnight shift: end < start today → end belongs to tomorrow.
-            return (now.timeInMillis >= start.timeInMillis &&
-                now.timeInMillis <= endMs) ||
-                (endMs < start.timeInMillis &&
-                    now.timeInMillis <= endMs + 24L * 60L * 60L * 1000L &&
-                    now.timeInMillis >= start.timeInMillis)
-        }
-
-        /** Punch-state gate: still need containment checks? */
-        private fun stillNeeded(context: Context): Boolean {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            if (!prefs.getBoolean(PREF_ARMED, false)) return false
-            val lastType = prefs.getString(PREF_LAST_PUNCH_TYPE, null)
-            return lastType == "In" || withinShiftWindow(context)
-        }
-
-        /**
-         * Keep-alive FGS gate: ALL Android devices, work hours only —
-         * armed (geofence auto on) AND (punched IN OR within the shift
-         * window).  The FGS exists for the walk-out (movement-gated
-         * stream catches it in real fixes) and Android legally forces a
-         * persistent notification on any FGS — so the punch/window gate
-         * keeps the banner out of nights, weekends and leave days (a
-         * leave day has no shift window → gate off; the app must have
-         * opened that day and learned "no shift" — see [shiftToday]).
-         * The exact containment alarm re-evaluates every 15 min and
-         * revives the FGS whenever it is needed.
-         */
+        /** Punch-state gate: does the keep-alive FGS need to run?
+         *  User design — banner ONLY while actually punched in: the FGS
+         *  exists to watch the walk-out (movement-gated stream, OUT at
+         *  the boundary with two-fix confirmation) and Android legally
+         *  forces a persistent notification on any FGS, so the
+         *  punch-state gate keeps the banner off nights, weekends and
+         *  leave days.  Punched OUT = headless (OS geofence ENTER for
+         *  IN + this alarm as the 24/7 checker). */
         fun keepAliveActive(context: Context): Boolean {
             val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             if (!p.getBoolean(PREF_ARMED, false)) return false
-            val lastType = p.getString(PREF_LAST_PUNCH_TYPE, null)
-            return lastType == "In" || withinShiftWindow(context)
+            return p.getString(PREF_LAST_PUNCH_TYPE, null) == "In"
+        }
+
+        /** The 24/7 headless-IN checker: always continues while armed
+         *  (geofence auto on) — every 15-min fire re-registers the OS
+         *  geofences and re-queues the headless WorkManager task so the
+         *  ENTER punch survives whatever kills the app process, the
+         *  WorkManager queue or the OS geofence registration. */
+        private fun stillNeeded(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(PREF_ARMED, false)
         }
 
         /** Headless containment check: WorkManager spawns a fresh engine, no FGS. */
@@ -268,9 +199,9 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
         Log.i(TAG, "CONTAINMENT_ALARM_FIRED aggressive=${isAggressiveOem(context)}")
 
         if (!stillNeeded(context)) {
-            Log.d(TAG, "Containment no longer needed — not re-arming")
-            // Also drop the keep-alive foreground service (punched out
-            // outside the shift window): the process must not linger.
+            Log.d(TAG, "Containment disarmed — not re-arming")
+            // Also drop the keep-alive foreground service (geofence
+            // disabled / logged out): the process must not linger.
             try {
                 context.stopService(Intent(context, BackgroundService::class.java))
             } catch (_: Exception) {}
@@ -290,10 +221,9 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
                 // the mode flag so the Dart entrypoint runs keep-alive
                 // (heal geofences + one containment check + the
                 // movement-gated OUT monitor, NOT the full GPS service).
-                // Work hours only (user design): punched IN OR within the
-                // shift window — banner never shows at night, on weekends
-                // or on leave days.  The OUT punch closes the service once
-                // the window also passed.
+                // Punched IN only (user design): the banner shows exactly
+                // while at work; the OUT punch closes the service and we
+                // are back to headless IN + this 24/7 checker.
                 prefs.edit()
                     .putBoolean("flutter.gf_keep_alive_mode", true)
                     .apply()
