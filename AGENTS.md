@@ -21,14 +21,22 @@ Context for any agent working in this repo. Architecture docs live in
 3. Geofence-only users must NOT get the combined background service
    (`serviceRequired()` checks wifi bg/fg + field tracking only). The
    keep-alive FGS is separate and lightweight: **all Android devices,
-   only while punched IN** (Android requires a persistent notification
-   for any FGS; IN itself needs no service — OS geofence ENTER is
-   motion-assisted and fires even with a dead process, field-proven 12h+
-   without app open. The FGS exists for the walk-out only: movement
-   stream catches it, OUT punch closes the service instantly — banner
-   exists exactly while at work, commits `8dc7894`/`47130be`/`8787c56`).
-   Headless WorkManager containment (15-min alarm, armed at every shift
-   start + on IN) stays as fallback when the FGS can't start.
+   gated to work hours** (punched IN OR within shift window — Android
+   requires a persistent notification for any FGS; IN itself needs no
+   service — OS geofence ENTER is motion-assisted and fires even with a
+   dead process, field-proven 12h+ without app open. The FGS exists for
+   the walk-out only: movement stream catches it, OUT punch keeps the
+   idle service through work hours and the receiver closes it at the
+   first post-window fire — banner never shows on non-work hours, weekends
+   or leave days (leave days have no shift window), commits
+   `8dc7894`/`47130be`/`8787c56`/`82f2d0a`). Headless WorkManager
+   containment (15-min alarm) is the missed-ENTER/missed-EXIT net:
+   `gf_containment_alarm_armed` is the MASTER ENABLE (geofence auto on,
+   never cleared by punch state — cleared on disable/logout only), the
+   chain self-perpetuates while (In OR within shift window) and rests
+   outside the window until the next shift-start alarm re-arms it
+   (GeofenceAlarmReceiver lifts the flag + arms while geofence auto is
+   on). Leave days: no shift alarm → no chain, no banner.
    Android 15+ (`VANILLA_ICE_CREAM`): never start the FGS from
    `BOOT_COMPLETED` — location-type FGS start is banned there; the
    exact-alarm revive path is exempt.
