@@ -21,18 +21,20 @@ Context for any agent working in this repo. Architecture docs live in
 3. Geofence-only users must NOT get the combined background service
    (`serviceRequired()` checks wifi bg/fg + field tracking only). The
    keep-alive FGS is separate and lightweight: **all Android devices,
-   gated to the punched-IN state only** (Android requires a persistent
-   notification for any FGS; IN itself needs no service — OS geofence
-   ENTER is motion-assisted and fires even with a dead process,
-   field-proven 12h+ without app open. The FGS exists for the walk-out
-   only: the movement stream catches it, OUT punches at the boundary and
-   stops the service — back to headless IN. Banner shows exactly while
-   at work: never at night, weekends or leave days (punch-state gate —
-   leave days never punch). The FGS is NEVER auto-revived (sticky
+   gated to WORK HOURS, not punch state** (Android requires a persistent
+   notification for any FGS). The FGS runs punched IN (the walk-out
+   monitor: movement stream catches the EXIT, OUT punches at the
+   boundary) AND stays up after an OUT punch while the shift window is
+   still open — its stream then punches the RETURN-IN at point (~radius
+   +5m, first honest inside fix; Nothing-class OEMs drop the headless OS
+   geofence ENTER, field-proven). Past the shift end the FGS stops (banner
+   must never show at home, nights, weekends or leave days — work-hours
+   gate; leave days never punch). The FGS is NEVER auto-revived (sticky
    close, user design): closed stays closed — no banner behind the
    user's back; headless OUT covers it (OS geofence EXIT primary +
    15-min headless reconcile guarantee). Commits
-   `8dc7894`/`47130be`/`8787c56`/`82f2d0a`/`10197aa`/`e624167`/`0c1ec2c`). The
+   `8dc7894`/`47130be`/`8787c56`/`82f2d0a`/`10197aa`/`e624167`/`0c1ec2c`/
+   `f5a53dd`). The
    15-min AlarmManager containment alarm is the **24/7 headless-IN
    checker**: `gf_containment_alarm_armed` is the MASTER ENABLE
    (geofence auto on, never cleared by punch state — cleared on
@@ -61,7 +63,12 @@ Context for any agent working in this repo. Architecture docs live in
     made the checker 24/7 and switched it to cache-only re-registration;
     the `{enter}` catch-up was restored in the Nothing 3a fix).
 6. Keep-alive branch: no timers. Only the movement-gated GPS stream
-   (distanceFilter 30m) while punched in. Stationary = zero fixes.
+   (distanceFilter 30m) while punched in OR punched out within the open
+   shift window (the return-IN monitor — punches IN at point on the
+   first honest fix inside `radius+5m`; Nothing-class OS-ENTER drops
+   make the stream the at-point IN guarantee, the Aug-8-proven 21m IN).
+   Past the shift end the stream (or a containment check) closes the
+   FGS — banner never outside work. Stationary = zero fixes.
 7. Punch pipeline order is sacred: fresh-fix GPS gate → OUT zone-identity gate
    → server-truth `PunchCoordinator` (FIRST in `_executePunch`) → POST →
    offline queue → `_persistPunchState`. Server decides; local gate only when
