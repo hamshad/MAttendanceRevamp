@@ -49,7 +49,7 @@
 | App resume: reconcile + registerZones (initialTriggers re-fires ENTER catch-up) | App opened | ~0 | |
 | Shift-start alarm fires headless → reRegisterFromHeadless() | 1 wakeup/day | ~0 | |
 | **Containment loop** (below) | Every 15 min while armed | 1 native alarm wakeup / 15 min | Self-heals missed IN/OUT |
-| **Keep-alive stream** | Work hours: punched IN (walk-out) or punched OUT within shift window (return-IN) | GPS only while moving ≥30m (0 fixes at desk) | Catches the EXIT OS/Doze drops + punches the return-IN AT POINT on Nothing-class OEMs (OS ENTER dropped headless) |
+| **Keep-alive stream** | While punched in (all OEMs) | GPS only while moving ≥30m (0 fixes at desk) | Catches the EXIT OS/Doze drops |
 
 ### Containment loop (self-healing, all Android users)
 
@@ -69,42 +69,38 @@
   uses exact alarms (mode flag `gf_keep_alive_mode`). Non-aggressive OEMs:
   headless WorkManager task only — no foreground service, no banner.
 
-### Keep-alive service (process-holder, ALL Android devices, work-hours gated)
+### Keep-alive service (process-holder, ALL Android devices, punched-IN gated)
 
 - `OemKeepAliveService` FGS (ID 889) runs when no feature needs the combined
-  service, **all Android devices**, **gated to work hours** (user spec:
-  no banner on non-working hours/leave days): punched IN **OR** punched OUT
-  within the open shift window (leave days have no shift window → no FGS).
-  Lifecycle is punch-driven from ANY isolate (`_persistPunchState`):
-  IN punch → start; OUT punch within the window → keep/start (the FGS
-  waits for the walk back); OUT past the shift end → the smart gate in
-  `OemKeepAliveService.stop()` closes it; first stream fix or containment
-  check past the end → self-close. Disable/logout/takeover → `stop(force)`.
-  The banner therefore shows exactly during work hours — never at home,
-  nights, weekends or leave days.
-- **Why the FGS survives the OUT punch (the at-point IN fix, `f5a53dd`+
-  follow-ups):** aggression-class OEMs like Nothing drop or defer the
-  headless OS geofence ENTER even inside the office (field-proven
-  missed-IN). The FGS's movement-gated stream is the IN guarantee that
-  still works there: it catches the walk back in fix-by-fix and reconciles
-  IN at ~radius+5m (the Aug-8 flawless 21m IN, 3-4 min, background).
-  `8787c56` had restricted the FGS to punched-IN only, killing exactly
-  that path — the regression that turned at-point IN into a 15-min wait.
-  The OS ENTER + 15-min containment catch-up (`{enter}` re-register, also
-  `f5a53dd`) remain the dead-process backup net.
+  service, **all Android devices**, **gated to the punched-IN state**
+  (user design: no banner outside actual work — Android requires a
+  persistent notification on any FGS). Lifecycle is punch-driven from
+  ANY isolate (`_persistPunchState`): IN punch → start; OUT punch →
+  unconditional stop → back to headless (OS ENTER for IN, OS EXIT +
+  15-min net for OUT). Disable/logout/takeover → same stop.
+- **Why IN needs no service:** OS geofence ENTER is motion-assisted,
+  fires even with a dead process (field-proven 12h+ without app open) —
+  IN has ALWAYS been the headless path and stays that way; the 15-min
+  containment catch-up (`{enter}` re-register, `f5a53dd`) is the
+  dead-process backup for OEM-dropped ENTERs. The FGS exists for
+  exactly ONE job — the walk-out monitor: OUT was chronically late
+  because OS EXIT fires late in Doze/battery-saver AND the reconcile
+  needed a fresh GPS fix at the right moment (indoor/poor GPS = no fix
+  = wait). The stream delivers fixes continuously while walking, so the
+  OUT decision has data at the boundary: honest OUT at ~radius+25m
+  (fixed band, two-fix confirm), within ~a minute of leaving.
 - **Movement-gated GPS stream** (`field_tracking_service.dart` keep-alive
   branch): `getPositionStream` high accuracy, `distanceFilter: 30` →
   stationary = zero fixes (no GPS churn); moving = fix every ~30m.
-  - punched IN → walk-out monitor: first fix outside ALL office radii
-    (`isOutsideAllOffices`, fixed radius+25m band) → immediate
-    `reconcileContainment(confirmOut:true)` → honest OUT at the confirm
-    fix.
-  - punched OUT within window → return-IN monitor: first fix inside ANY
-    office radius (`isInsideAnyOffice`, fixed radius+5m IN band — accuracy
-    never widens, honesty rule) → `reconcileContainment()` → IN at point.
-  - past the shift end (`gf_shift_end_time`, stale/absent = past — fail-
-    safe): cancel stream, clear keep-alive mode flag, `stopSelf` → banner
-    never outside work.
+  First fix outside ALL office radii (`isOutsideAllOffices`, fixed
+  radius+25m band) → immediate `reconcileContainment(confirmOut:true)`
+  → honest OUT at the confirm fix. Stream self-cancels once punched out.
+  (An IN-side "return monitor" was tried — `18f3e45` — and REVERTED:
+  IN was always headless-at-point; the return-IN stream added battery
+  without fixing anything. Anti-fake layers stay: Android fused
+  locations blend wifi/cell positions (the 300-500m single-fix jump
+  class), and the plugin exposes no provider — the layers are the only
+  defense, and they cost an honest user nothing.)
 - **Android 15 (API 35)+:** never start the FGS from `BOOT_COMPLETED` —
   `location`-type FGS start is banned there (throws
   `ForegroundServiceStartNotAllowedException`); the exact-alarm revive
@@ -126,9 +122,8 @@
 - Runs ONLY when `serviceRequired()`: wifi auto-punch (bg|fg) or field tracking.
 - **Geofence-only users: combined service never starts.** (`serviceRequired()`
   checks wifi bg/fg + field tracking only — NOT geofence auto or client sites.)
-- Keep-alive FGS is a separate, lightweight service (all OEMs, work-hours
-  gated: punched IN or punched OUT within the shift window) — not the
-  combined service.
+- Keep-alive FGS is a separate, lightweight service (all OEMs while punched
+  in) — not the combined service.
 - **Every service start path honors `serviceRequired()`** — WorkManager
   shift/restart tasks, the native `GeofenceAlarmReceiver` (0b729e3), and the
   Dart entrypoint itself (self-heal + stopSelf when geofence-only). No path
@@ -223,11 +218,12 @@
 | `e624167` | **Headless-IN-anytime + 24/7 checker (user design)**: IN is the always-available headless path (OS geofence ENTER, dead-process-safe) — no FGS, no window, no shift dependency. The 15-min containment chain NEVER rests while armed (master enable): every fire re-registers the OS geofences from PERSISTED zone metadata — NEW `reRegisterZonesFromCache()` (no network; `registerZones` fetches offices via API and is banned from 15-min cadence — would be 96 requests/day) — and re-checks containment (last-known-first + fix budget; no GPS when away). Permanently closes the morning-IN-miss class (the pre-`e624167` chain rested Out+outside-window, leaving the missed-ENTER net dead). FGS is punched-IN ONLY (walk-out monitor): `startIfNeeded` gate = In, native `keepAliveActive` = armed && In, OUT punch stops the service unconditionally (`stop()` force/work-hours semantics dropped) → back to headless IN. Banner exactly at work. Alignment warnings already In-gated. Leave-day marker (10197aa) removed — dead under punch-state gating (leave days never punch server-side). Battery honesty: ~96 light prefs-read wakeups/day while geofence auto on. Tests 189→173 (window/marker tests removed), analyze 0 errors |
 | `0c1ec2c` | **Sticky-close FGS (user design)**: if the user closes the keep-alive FGS it stays closed — no banner behind their back — and headless OUT covers it. Removed the checker's FGS-revival branch (was: `startForegroundService` every 15-min fire while In; headless task only as fallback) and BootReceiver's post-reboot revival. Checker now always enqueues the headless task: OS geofence EXIT is the primary headless OUT path, the 15-min reconcile guarantees OUT within one interval (fixed 45m band, two-fix confirm). FGS lifecycle purely punch-state: starts on IN punch, stops on OUT/disable/logout. Bonus: no more close→revive→banner loop or its engine-spawn battery cost; also sidesteps the API 35+ boot FGS ban entirely |
 | `f5a53dd` | **Headless catch-up ENTER restored on the containment + alignment workers** (Nothing 3a missed-IN fix): both workers now `reRegisterZonesFromCache(initialTriggers: {enter})` — re-registering re-fires OS ENTER for a phone already inside a zone, so a punched-OUT user whose ENTER was OEM-dropped/deferred gets a fix-independent headless IN within one 15-min interval (the reconcile alone was fix-dependent — indoor high-accuracy GPS fails on the Nothing — and the app-open IN came from foreground reconcile). Own-source duplicates persist silently (no notification spam for a punched-IN user inside; the resume-path `{}` rationale predates the silent-echo handling). Catch-up ENTER fires only when genuinely inside the radius — no far-away IN class (honesty rule, `ab070de`). Also added `nothing` to `AGGRESSIVE_BRANDS` (Dart + native): Nothing defers inexact alarms, so the checker's alarm is now exact-alarm on Nothing (falls back to inexact if the permission is revoked). Debug: `.planning/debug/resolved/nothing-fgs-not-stop-in-missed.md` |
-| `18f3e45` | **At-point background IN restored (user spec: "IN should work at point")** — the Nothing-class fix on top of `f5a53dd`'s 15-min net: the keep-alive FGS + movement-gated stream are back after an OUT punch while the shift window is open, so the return-IN punches AT POINT (~radius+5m, first honest inside fix — the Aug-8-proven 21m IN). `8787c56` had restricted the FGS to punched-IN only, killing the stream exactly when the return-IN needed it. Changes: `startIfNeeded` banner gate = (In OR within window); `_persistPunchState` OUT → smart `stop()` keeps/starts the FGS within the window (covers the headless-OUT case — process dead — by (re)starting it), closes past the window; keep-alive stream dual-mode: walk-out monitor (In) + return-IN monitor (Out, `isInsideAnyOffice` radius+5m band → `reconcileContainment()`); past `gf_shift_end_time` (stale/absent = past, fail-safe) the stream closes the FGS — banner never outside work. Takeover/disable/logout still `stop(force:true)`. OS ENTER + the 15-min catch-up net remain the dead-process backup. Unit tests: `isInsideAnyOffice` (IN band never widened by accuracy), `shouldKeepAliveAfterOut` (geofence off / window / punch-type gates). Tests 173→183, analyze 0 errors. Debug: `.planning/debug/nothing-in-at-point.md` |
+| `18f3e45` | **At-point background IN restored (user spec: "IN should work at point")** — the Nothing-class fix on top of `f5a53dd`'s 15-min net: the keep-alive FGS + movement-gated stream are back after an OUT punch while the shift window is open, so the return-IN punches AT POINT (~radius+5m, first honest inside fix — the Aug-8-proven 21m IN). `8787c56` had restricted the FGS to punched-IN only, killing the stream exactly when the return-IN needed it. Changes: `startIfNeeded` banner gate = (In OR within window); `_persistPunchState` OUT → smart `stop()` keeps/starts the FGS within the window (covers the headless-OUT case — process dead — by (re)starting it), closes past the window; keep-alive stream dual-mode: walk-out monitor (In) + return-IN monitor (Out, `isInsideAnyOffice` radius+5m band → `reconcileContainment()`); past `gf_shift_end_time` (stale/absent = past, fail-safe) the stream closes the FGS — banner never outside work. Takeover/disable/logout still `stop(force:true)`. OS ENTER + the 15-min catch-up net remain the dead-process backup. Unit tests: `isInsideAnyOffice` (IN band never widened by accuracy), `shouldKeepAliveAfterOut` (geofence off / window / punch-type gates). Tests 173→183, analyze 0 errors. Debug: `.planning/debug/nothing-in-at-point.md` — **REVERTED by `835c2a7`**: the stream-return-IN premise was false (IN was always headless-at-point on the Nothing; the FGS never carried IN), it added battery (stream ran while away) without fixing anything |
+| `835c2a7` | **Revert of `18f3e45` — IN stays headless (user correction, premise falsified)**: the at-point IN never came from the FGS stream — IN was always the straightforward headless OS ENTER path (accurate, dead-process safe) and OUT the late one; the FGS exists ONLY as the walk-out monitor (OUT-accelerator: stream delivers fixes at the boundary → honest OUT ~radius+25m within a minute). Restored: `startIfNeeded` In-only gate, unconditional `stop()` on OUT, In-only stream self-cancelling on OUT, plain `stop()` on takeover/disable/logout. Kept from `f5a53dd`: catch-up ENTER net + Nothing exact alarm (zero-battery dead-process IN insurance). Anti-fake layers stay — Android fused fixes blend wifi/cell (300-500m jump class), plugin exposes no provider, so bands + two-fix + zone-identity are the only defense and cost honest users nothing. Tests 183→173, analyze 0 errors. Debug: `.planning/debug/resolved/nothing-in-at-point.md` |
 
 ## Verification
 
-- Full suite 183/183 (`flutter test`)
+- Full suite 173/173 (`flutter test`)
 - `flutter analyze`: 0 errors (pre-existing infos/warnings only)
 - Field-tested: 446m → ~20m (containment loop), 104m → boundary (snap, then
   reverted), 80m-actual-vs-20m-logged inconsistency → snap removed + live
