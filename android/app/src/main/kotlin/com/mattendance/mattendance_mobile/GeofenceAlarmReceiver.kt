@@ -163,17 +163,26 @@ class GeofenceAlarmReceiver : BroadcastReceiver() {
                     .putBoolean("gf_alarm_fired", true)
                     .putLong("gf_alarm_fired_at", System.currentTimeMillis())
                     .apply()
-                // Bootstrap the 15-min containment chain: it dies when the
-                // user punches out (nothing to check after work hours) and
-                // the next-day ENTER punch sets the armed flag headless,
-                // where background isolates cannot reach the Dart
-                // MethodChannel.  Re-arm at every shift start while
-                // geofence auto-punch is on — chain lives through the
-                // workday (catches a killed-FGS + delayed OS EXIT within
-                // 15 min) and stops again at the first post-shift fire.
+                // Bootstrap the 15-min containment chain: it dies at the first fire
+                // after the shift window passes (punched out + outside
+                // window = nothing to monitor) and the next-day ENTER
+                // punch sets the armed flag headless, where background
+                // isolates cannot reach the Dart MethodChannel to arm
+                // the alarm.  Every shift start: re-arm the chain while
+                // geofence auto-punch is on and lift the armed flag —
+                // chain self-perpetuates through the whole workday
+                // (missed-ENTER/missed-EXIT net, killed-FGS + delayed
+                // OS EXIT caught within 15 min) and rests again after
+                // the window passes.  Leave days: no shift alarm, no
+                // chain.
                 val gfAuto = prefs.getBoolean("flutter.geofence_auto_enabled", false)
                 val armedFlag = prefs.getBoolean("flutter.gf_containment_alarm_armed", false)
                 if (gfAuto || armedFlag) {
+                    if (gfAuto) {
+                        prefs.edit()
+                            .putBoolean("flutter.gf_containment_alarm_armed", true)
+                            .apply()
+                    }
                     ContainmentAlarmReceiver.armContainmentAlarm(context)
                 }
                 scheduleNextShiftAlarmFromPrefs(context)

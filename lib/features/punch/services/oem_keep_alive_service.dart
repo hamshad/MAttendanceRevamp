@@ -16,11 +16,12 @@ import '../../tracking/services/field_tracking_service.dart';
 /// friends) it is effectively required, on stock Android it removes the
 /// same exemptions.
 ///
-/// TIME-GATED BY PUNCH STATE (user spec: no "Geofence Active" banner
-/// outside work): the FGS runs **only while punched IN** — the OUT
-/// punch closes it immediately, next IN opens it again.  IN itself needs
-/// no service (OS geofence ENTER is motion-assisted, fires even dead —
-/// field-proven 12h+ without app open).
+/// GATED TO WORK HOURS (user spec: no "Geofence Active" banner on
+/// non-working hours or leave days): the FGS runs only while punched IN
+/// or within the shift window — leave days have no shift window, so the
+/// banner never shows outside real work.  IN itself needs no service
+/// (OS geofence ENTER is motion-assisted, fires even dead — field-
+/// proven 12h+ without app open); the FGS exists for the walk-out.
 ///
 /// This service does almost NOTHING on purpose: no GPS streams, no timers,
 /// no polling.  It only holds the process alive so the OS geofence
@@ -36,8 +37,9 @@ import '../../tracking/services/field_tracking_service.dart';
 ///     start restrictions) — the alarm fires and revives the service
 ///   - restarted by the plugin's own WatchdogReceiver after swipe-away
 ///     (best-effort on MIUI, which blocks the watchdog without autostart)
-///   - stopped the moment the OUT punch persists (receiver + Dart both
-///     stop the service natively), on disable, or on logout
+///   - stopped when punched out AND outside the shift window (OUT punch
+///     keeps the idle service through work hours; the receiver stops it
+///     natively at the first post-window fire), on disable, or on logout
 class OemKeepAliveService {
   OemKeepAliveService._();
 
@@ -59,15 +61,15 @@ class OemKeepAliveService {
   /// feature enabled + no feature needing the full service.
   ///
   /// ALL Android devices (uniform behavior — the OS is equally willing
-  /// to kill any dormant process, aggressive OEM or not), **and ONLY
-  /// while punched IN**.  The FGS exists for exactly one job: catching
-  /// the walk-out.  The movement-gated stream inside it sees the
-  /// office→outside transition in real fixes (~30m), the OUT punch then
-  /// closes the service immediately (banner gone until the next IN).
-  /// Android legally requires a persistent notification for any
-  /// foreground service, so IN-only gating means the banner exists
-  /// exactly while the user is actually at work — never at night,
-  /// never at weekend, never before the first IN.
+  /// to kill any dormant process, aggressive OEM or not), **gated to work
+  /// hours only**: runs while (punched IN OR within the shift window).
+  /// The FGS exists for exactly one job — catching the walk-out — and
+  /// Android legally requires a persistent notification on any FGS, so
+  /// the gate means the banner shows ONLY during work hours / while
+  /// punched in, never at night, never on weekends, never on leave days
+  /// (a leave day has no shift window).  The movement-gated stream
+  /// inside it sees the office→outside transition in real fixes (~30m),
+  /// and the OUT punch closes the service once the window also passed.
   ///
   /// ENTER (the IN punch) needs NO service: OS geofence ENTER is
   /// motion-assisted and fires instantly even with a dead process
@@ -90,9 +92,12 @@ class OemKeepAliveService {
     if (!anyAuto) return;
     if (await _serviceRequired()) return; // full service owns the process
 
-    // Banner gate: ONLY while punched IN.
-    if (prefs.getString('gf_last_punch_type') != 'In') {
-      debugPrint('[KEEP_ALIVE] Not punched in — skipping FGS (no banner)');
+    // Banner gate: work hours only — punched IN, or within the shift
+    // window (leave days have no window → no banner).
+    if (prefs.getString('gf_last_punch_type') != 'In' &&
+        !_withinShiftWindow(prefs)) {
+      debugPrint('[KEEP_ALIVE] Not punched in + outside shift window — '
+          'skipping FGS (no banner outside work hours)');
       return;
     }
 
@@ -125,10 +130,19 @@ class OemKeepAliveService {
     }
   }
 
-  /// Stop the keep-alive (full service takes over / disable / logout).
+  /// Stop the keep-alive (full service takes over / disable / logout —
+  /// or OUT punch outside the shift window).
   static Future<void> stop() async {
     if (!Platform.isAndroid) return;
     final prefs = await SharedPreferences.getInstance();
+    // Stay up while punched in or within the shift window: an OUT punch
+    // inside work hours keeps the (idle, silent) FGS so the next IN /
+    // walk-out lands in a live process; the native containment receiver
+    // closes the service at its first fire after the window passes.
+    if (prefs.getString('gf_last_punch_type') == 'In' ||
+        _withinShiftWindow(prefs)) {
+      return;
+    }
     await prefs.setBool(keepAliveModeKey, false);
     final svc = FlutterBackgroundService();
     try {
@@ -139,6 +153,41 @@ class OemKeepAliveService {
     } catch (e) {
       debugPrint('[KEEP_ALIVE] stop failed: $e');
     }
+  }
+
+  /// True when the current time is inside today's [shift start, shift end]
+  /// window — mirrors [ContainmentAlarmReceiver.withinShiftWindow] (Kotlin).
+  /// Overnight shifts (end < start today) roll the end to tomorrow.
+  /// Leave days have no shift window → false → no FGS, no containment.
+  /// Fail-safe: unknown/missing shift times → false (nothing to gate on;
+  /// the chain re-evaluates on every native fire).
+  static bool _withinShiftWindow(SharedPreferences prefs) {
+    final startRaw = prefs.getString('gf_cached_shift_start_time');
+    final endRaw = prefs.getString('gf_shift_end_time');
+    if (startRaw == null || endRaw == null) return false;
+    final startParts = startRaw.split(':');
+    if (startParts.length < 2) return false;
+    final hour = int.tryParse(startParts[0]);
+    final minute = int.tryParse(startParts[1]);
+    if (hour == null || minute == null) return false;
+    // gf_shift_end_time is a Dart toIso8601String() in LOCAL time; a
+    // trailing Z (shouldn't happen) must be stripped like the native
+    // parser does, never treated as UTC.
+    final cleaned =
+        endRaw.endsWith('Z') ? endRaw.substring(0, endRaw.length - 1) : endRaw;
+    final end = DateTime.tryParse(cleaned);
+    if (end == null) return false;
+
+    final now = DateTime.now();
+    final start = DateTime(now.year, now.month, now.day, hour, minute);
+    final endToday =
+        DateTime(now.year, now.month, now.day, end.hour, end.minute);
+    if (endToday.isBefore(start)) {
+      // Overnight shift: end belongs to tomorrow.
+      return !now.isBefore(start) &&
+          !now.isAfter(endToday.add(const Duration(days: 1)));
+    }
+    return !now.isBefore(start) && !now.isAfter(endToday);
   }
 
   static Future<bool> isRunning() async {

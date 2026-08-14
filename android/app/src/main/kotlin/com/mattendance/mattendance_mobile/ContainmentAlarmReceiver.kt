@@ -28,15 +28,18 @@ import java.util.Calendar
  * and punches OUT/IN if the user is on the wrong side of the boundary.
  *
  * ARMING MODEL (no app-open dependency):
- *  - Dart (any isolate — prefs writes work headless) flips
- *    `flutter.gf_containment_alarm_armed` on punch-in / punch-out.
+ *  - `flutter.gf_containment_alarm_armed` is the MASTER ENABLE (geofence
+ *    auto on) — written by the Dart main isolate on arm/disable/logout
+ *    and lifted by the native shift-start alarm every morning.
  *  - This receiver self-perpetuates: every fire re-arms the next one as
  *    long as the flag is set AND the state still needs checking
  *    (punched IN, or punched OUT but within the shift window — the
- *    missed-ENTER case).
+ *    missed-ENTER case).  Out + outside window → chain rests until the
+ *    next shift-start alarm.
  *  - The FIRST alarm after install/boot is scheduled by the Dart
- *    main isolate (armContainmentAlarmIfNeeded) and by [BootReceiver].
- *    Once it exists it never needs the app again.
+ *    main isolate (armContainmentAlarmIfNeeded), by the shift-start
+ *    alarm, and by [BootReceiver].  Once it exists it never needs the
+ *    app again.
  *
  * BATTERY: at the office (punched in, stationary) the Dart side reuses
  * the OS-cached last-known position and does NOT turn on GPS — each fire
@@ -201,22 +204,21 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
         }
 
         /**
-         * Keep-alive FGS gate: ALL Android devices, ONLY while punched IN.
-         * The FGS exists for exactly one job — catching the walk-out before
-         * the OS EXIT broadcast can be delayed: it holds the process so the
-         * movement-gated GPS stream runs, and the instant the OUT punch
-         * persists the service is closed (banner gone until the next IN).
-         * IN needs no service (OS geofence ENTER is motion-assisted and
-         * fires even with a dead process — field-proven 12h+ without app
-         * open), so the punch-state gate keeps the banner out of
-         * nights/weekends entirely.  The exact containment alarm still
-         * revives the FGS on its 15-min fire whenever it is needed
-         * (punched in && process died).
+         * Keep-alive FGS gate: ALL Android devices, work hours only —
+         * armed (geofence auto on) AND (punched IN OR within the shift
+         * window).  The FGS exists for the walk-out (movement-gated
+         * stream catches it in real fixes) and Android legally forces a
+         * persistent notification on any FGS — so the punch/window gate
+         * keeps the banner out of nights, weekends and leave days (a
+         * leave day has no shift window → gate off).  The exact
+         * containment alarm re-evaluates every 15 min and revives the
+         * FGS whenever it is needed.
          */
         fun keepAliveActive(context: Context): Boolean {
             val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            return p.getString(PREF_LAST_PUNCH_TYPE, null) == "In" &&
-                p.getBoolean(PREF_ARMED, false)
+            if (!p.getBoolean(PREF_ARMED, false)) return false
+            val lastType = p.getString(PREF_LAST_PUNCH_TYPE, null)
+            return lastType == "In" || withinShiftWindow(context)
         }
 
         /** Headless containment check: WorkManager spawns a fresh engine, no FGS. */
@@ -262,10 +264,10 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
                 // the mode flag so the Dart entrypoint runs keep-alive
                 // (heal geofences + one containment check + the
                 // movement-gated OUT monitor, NOT the full GPS service).
-                // Punched IN only (user design): the FGS exists for the
-                // walk-out — stream catches it in real fixes, OUT punch
-                // closes the service immediately (banner gone until next
-                // IN).  No FGS while punched out, ever.
+                // Work hours only (user design): punched IN OR within the
+                // shift window — banner never shows at night, on weekends
+                // or on leave days.  The OUT punch closes the service once
+                // the window also passed.
                 prefs.edit()
                     .putBoolean("flutter.gf_keep_alive_mode", true)
                     .apply()

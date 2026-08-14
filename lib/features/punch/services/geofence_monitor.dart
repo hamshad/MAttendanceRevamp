@@ -1094,17 +1094,20 @@ class GeofencePunchHandler {
     if (zoneId != null) {
       await prefs.setString('gf_last_punch_zone_id', zoneId);
     }
-    // Containment alarm keep-alive: punched IN → the native receiver keeps
-    // self-arming the 15-min check (guaranteed OUT even when the OS misses
-    // the geofence exit).  Punched OUT → receiver stops on its next fire.
-    // Written from ANY isolate — headless punches arm/disarm without the
-    // app ever being opened.
+    // Containment alarm keep-alive: the armed flag is the MASTER ENABLE
+    // (geofence auto on), NOT the punch state.  The receiver self-
+    // perpetuates while (punched IN OR within the shift window) — OUT +
+    // outside window = nothing to monitor = chain rests until the next
+    // shift-start alarm re-arms it.  Written from ANY isolate — headless
+    // punches arm/disarm without the app ever being opened.
     await prefs.setBool(
-        'gf_containment_alarm_armed', type == 'In');
-    // Foreground service lifecycle: FGS runs ONLY while punched IN (the
-    // movement-gated stream catches the walk-out instantly; the moment the
-    // OUT punch persists, the FGS is closed — banner gone until the next
-    // IN).  No-op on iOS / when nothing to hold (gates inside the service).
+        'gf_containment_alarm_armed',
+        prefs.getBool('geofence_auto_enabled') ?? false);
+    // Foreground service lifecycle: FGS runs while (punched IN OR within
+    // the shift window) — no banner on non-work hours or leave days
+    // (leave day has no shift window; the gates live inside the service).
+    // On OUT the service only stops itself once the window also passed.
+    // No-op on iOS (gates inside the service).
     try {
       if (type == 'In') {
         await OemKeepAliveService.startIfNeeded();

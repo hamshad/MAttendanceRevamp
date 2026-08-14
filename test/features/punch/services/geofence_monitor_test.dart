@@ -1152,8 +1152,10 @@ void main() {
       expect(mock.lastDirection, 'Out');
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('gf_last_punch_type'), 'Out');
-      // Punched OUT → containment alarm flag cleared (receiver stops).
-      expect(prefs.getBool('gf_containment_alarm_armed'), isFalse);
+      // Punched OUT → armed flag stays true while geofence auto is on
+      // (master enable; the receiver rests on its own via the shift-window
+      // gate, and the next shift-start alarm re-arms the chain).
+      expect(prefs.getBool('gf_containment_alarm_armed'), isTrue);
     });
 
     test('confirmOut: cached outside position → GPS only for confirm fix',
