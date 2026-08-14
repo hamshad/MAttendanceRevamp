@@ -74,6 +74,12 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
         private val AGGRESSIVE_BRANDS = listOf(
             "xiaomi", "redmi", "poco", "honor",
             "oppo", "realme", "oneplus", "vivo",
+            // Nothing OS aggressively defers inexact alarms and background
+            // WorkManager (field-proven: the 15-min checker + OS ENTER were
+            // delayed past the walk-back-in window on the Nothing 3a —
+            // missed-IN until app open).  Exact alarm keeps the checker on
+            // schedule; falls back to inexact if the permission is revoked.
+            "nothing",
         )
 
         fun isAggressiveOem(context: Context): Boolean {

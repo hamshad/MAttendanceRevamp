@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:native_geofence/native_geofence.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
@@ -193,7 +194,18 @@ class ContainmentCheckWorker {
       // PERSISTED metadata (no network — a fetch here would hit the API 96×
       // a day; fresh zones come from app-open paths) keeps the headless
       // ENTER/EXIT path alive no matter what killed the registration.
-      await GeofenceMonitor.reRegisterZonesFromCache();
+      //
+      // initialTriggers: {enter} ALSO re-arms the catch-up ENTER: when the
+      // phone is already inside a zone, re-registration re-fires ENTER —
+      // the fix-independent headless IN recovery for a punched-OUT user
+      // whose OS ENTER was dropped/deferred (aggressive OEMs; the Nothing
+      // 3a missed-IN class).  Safe for a punched-IN user sitting inside:
+      // the punch path persists own-source duplicates SILENTLY (no
+      // notification), and catch-up ENTER only fires when genuinely inside
+      // the geofence radius — it cannot fabricate a far-away IN.
+      await GeofenceMonitor.reRegisterZonesFromCache(
+        initialTriggers: const {GeofenceEvent.enter},
+      );
       await GeofencePunchHandler.instance.reconcileContainment(confirmOut: true);
     } catch (e) {
       debugPrint('[GF_SCHED] Containment check failed: $e');

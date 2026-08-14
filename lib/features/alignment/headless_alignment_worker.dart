@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:mattendance_mobile/features/punch/services/geofence_monitor.dart';
+import 'package:native_geofence/native_geofence.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -88,11 +89,18 @@ class HeadlessAlignmentWorker {
     // punched in.  reconcileContainment self-gates on
     // enable/permission/token/location-service, and its OUT path verifies
     // against the server before punching.
-    // Self-heal OS geofences first (initialTriggers: {} — no enter catch-up;
-    // containment reconcile handles catch-up) so the native EXIT fires at
-    // the boundary.  Cache-only re-register: no network on this periodic
-    // path (fresh zones come from app-open fetches).
-    await GeofenceMonitor.reRegisterZonesFromCache();
+    // Self-heal OS geofences first (cache-only re-register — no network on
+    // this periodic path; fresh zones come from app-open fetches) so the
+    // native EXIT fires at the boundary, AND re-arm the ENTER catch-up:
+    // re-registering with initialTriggers: {enter} re-fires ENTER when the
+    // phone is already inside a zone — the fix-independent headless IN
+    // recovery for a punched-OUT user whose OS ENTER was dropped or
+    // deferred (aggressive OEMs).  Own-source duplicates are silent
+    // (GeofencePunchHandler persists echoes without notifying), so an
+    // already-punched-IN user sitting inside gets no notification spam.
+    await GeofenceMonitor.reRegisterZonesFromCache(
+      initialTriggers: const {GeofenceEvent.enter},
+    );
     await GeofencePunchHandler.instance.reconcileContainment(confirmOut: true);
   }
 

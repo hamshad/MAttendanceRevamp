@@ -30,6 +30,9 @@ class AggressiveOem {
     'realme',
     'oneplus',
     'vivo',
+    // Nothing OS defers inexact alarms + background WorkManager like the
+    // aggressive family (Nothing 3a field test: missed-IN until app open).
+    'nothing',
   ];
 
   /// Pure matcher — unit-testable.
