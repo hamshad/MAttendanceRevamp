@@ -1,8 +1,9 @@
 # Native-First Geofence: Battery & Reliability Architecture
 
-> Status: implemented, field-verified on user devices (446m / 104m / 80m
-> late-EXIT incidents all fixed)
-> Date: 2026-08-13 (updated; original 2026-08-11)
+> Status: **CONTRACTED 2026-08-14 (user decisions — we only make it
+> STRONGER, never redesign)**; field-verified on user devices (446m /
+> 104m / 80m late-EXIT incidents all fixed)
+> Date: 2026-08-14 (updated; original 2026-08-11)
 > Scope: Android auto-punch (iOS intentionally out of scope — user decision)
 
 ## Goal
@@ -41,6 +42,59 @@
 - The accurate-EXIT problem is solved at the source instead: movement-gated
   GPS in the keep-alive service catches the crossing itself (below).
 
+## Design contract (user decisions — we only make it STRONGER, never "better")
+
+Decided 2026-08-14 (Nothing 3a field session, after the `18f3e45`
+mistake and its revert `835c2a7`). This is the agreed shape of the
+geofence feature. Do NOT renegotiate, do NOT re-architect. All future
+work = hardening within these decisions ("stronger"), never redesign
+("better"). Any proposed shape change needs the user explicitly.
+
+1. **IN = the simple headless path, permanently.** OS geofence ENTER
+   fires at the crossing, dead-process safe → headless punch at the
+   crossing point. IN was ALWAYS accurate this way (21m; even the one-off
+   61m fused artifact was acceptable — close to radius). No service, no
+   stream, no shift-window logic ever participates in IN again.
+2. **OUT = FGS + movement stream while punched In (the walk-out
+   monitor).** The FGS exists for exactly ONE job: deliver fixes at the
+   boundary so OUT punches early and honest (~radius+25m fixed band,
+   two-fix confirm, ≤ ~1 min after leaving). OUT was chronically late
+   because OS EXIT fires late in Doze AND the reconcile had no fix at the
+   right moment — the stream is the fix-delivery pipeline, not a faster
+   process.
+3. **FGS gated to punched-IN only.** OUT → unconditional stop → headless.
+   Banner shows exactly while at work — never at home, nights, weekends
+   or leave days. No timers in the service; movement-gated stream
+   (distanceFilter 30m); stationary = zero fixes.
+4. **Anti-fake layers stay — they are the only defense.** Android fused
+   fixes blend GPS + wifi + cell (the 300-500m single-fix jump class) and
+   geolocator exposes no provider → pure-GPS filtering is impossible.
+   Fixed bands (IN radius+5m, OUT radius+25m), two-fix confirm,
+   zone-identity gate, server-truth coordinator, accuracy trust floor.
+   These cost an honest user nothing — they only delay fake crossings.
+   Never strip, loosen or accuracy-widen them.
+5. **Battery floor is the design, not a target.** OS geofence primary
+   (~0); movement-gated streams, never timers; 15-min containment alarm
+   (1 native wakeup / 15 min); FGS only while In; last-known-first +
+   90s fix budget + wifi-proxy skip. Any change RAISING the floor needs
+   user sign-off with measured numbers.
+6. **The 15-min containment chain never rests while armed** (master
+   enable = geofence auto on, punch-state independent — `82f2d0a`) and
+   re-registers with `{enter}` catch-up (`f5a53dd`) = dead-process
+   insurance for BOTH directions.
+7. **Rejected designs — do not resurrect without the user:**
+   - stream-based return-IN (premise falsified — IN never used the FGS
+     stream; battery while away; `18f3e45` reverted `835c2a7`)
+   - FGS surviving the OUT punch through the shift window (banner +
+     battery outside punch state; same revert)
+   - stripping/loosening the anti-fake layers ("jumps only happen on
+     wifi, mobile data is clean") — fused-provider reality kills it
+   - polling as the primary mechanism (rejected since day one)
+
+Strengthening = defense depth, edge cases, battery efficiency inside
+these shapes — verified by field evidence (logcat) before adding
+machinery. Evidence first, always.
+
 ## Punch paths (all of them)
 
 | Path | When | Battery | Notes |
@@ -54,8 +108,11 @@
 ### Containment loop (self-healing, all Android users)
 
 - Native `ContainmentAlarmReceiver` (REQUEST_CODE 902) fires every 15 min
-  while armed: armed = `gf_containment_alarm_armed` flag AND (punched In OR
-  in shift window). `_persistPunchState` flips the flag on every punch.
+  while armed. Armed = `gf_containment_alarm_armed` — the MASTER ENABLE
+  (geofence auto on), written by `_persistPunchState` on every punch,
+  lifted at every shift start by `GeofenceAlarmReceiver`, cleared on
+  disable/logout ONLY. Punch state never disarms it (the missed-IN net
+  must stay alive exactly when Out+window).
 - Alarm → WorkManager headless → `ContainmentCheckWorker.run()` →
   `reRegisterZonesFromCache(initialTriggers: {enter})` (re-registers dropped
   OS fences AND re-arms the catch-up ENTER — a punched-OUT phone already
@@ -65,9 +122,11 @@
   `reconcileContainment(confirmOut: true)` (two back-to-back fixes, jump
   guard, honest confirm-fix location).
 - `HeadlessAlignmentWorker._runInner()` does the same heal+reconcile.
-- On aggressive OEMs the receiver additionally revives the keep-alive FGS and
-  uses exact alarms (mode flag `gf_keep_alive_mode`). Non-aggressive OEMs:
-  headless WorkManager task only — no foreground service, no banner.
+- Aggressive OEMs (`aggressive_oem.dart` Dart + native list; `nothing`
+  included `f5a53dd`): the alarm runs as an EXACT alarm (falls back to
+  inexact if the permission is revoked); NO FGS revival — the FGS is
+  sticky-close (`0c1ec2c`), the checker always enqueues the headless task.
+  Non-aggressive OEMs: same headless WorkManager task.
 
 ### Keep-alive service (process-holder, ALL Android devices, punched-IN gated)
 

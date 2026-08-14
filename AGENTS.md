@@ -6,10 +6,16 @@ Context for any agent working in this repo. Architecture docs live in
 ## Must-read before geofence/punch/tracking changes
 
 - `.planning/docs/native-first-geofence-architecture.md` — the canonical
-  architecture: punch paths, containment loop, keep-alive service, battery
-  principles, honest-OEM limits, change log.
+  architecture: §Design contract (CONTRACTED user decisions — we only make
+  it STRONGER, never redesign; rejected designs listed there), punch paths,
+  containment loop, keep-alive service, battery principles, honest-OEM
+  limits, change log.
 - `.planning/docs/device-gps-accuracy-plan.md` — accuracy/uncertainty model.
 - Debug incident records: `.planning/debug/` (resolved → `resolved/`).
+
+> Geofence shape is CONTRACTED (2026-08-14). IN = headless OS ENTER only.
+> OUT = In-only FGS walk-out stream. Anti-fake layers NEVER stripped.
+> New machinery only with field evidence (logcat) + user sign-off.
 
 ## Hard invariants (do not regress)
 
@@ -79,6 +85,9 @@ Context for any agent working in this repo. Architecture docs live in
 - Commits: conventional (`fix(geofence): …`), one logical change, run
   `flutter analyze` + `flutter test` before committing. Full suite must stay
   green (173 tests).
+- Geofence changes: only make the contracted design STRONGER (defense
+  depth, edge cases, battery efficiency inside the shapes) — never
+  redesign. Shape changes need user sign-off (see §Design contract).
 - Zone metadata: persisted JSON `gf_zone_ids` / `gf_zone_$id`
   (`GeofenceZone.toJson/fromJson`). Native/Android pieces under
   `android/app/src/main/kotlin/com/mattendance/mattendance_mobile/`.
