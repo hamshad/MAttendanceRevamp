@@ -124,7 +124,7 @@ class OemKeepAliveService {
         ),
       );
       await svc.startService();
-      debugPrint('[KEEP_ALIVE] Foreground service started (aggressive OEM)');
+      debugPrint('[KEEP_ALIVE] Foreground service started (work-hours keep-alive)');
     } catch (e) {
       debugPrint('[KEEP_ALIVE] start failed: $e');
     }
