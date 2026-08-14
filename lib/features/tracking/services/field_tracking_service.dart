@@ -110,29 +110,6 @@ bool isOutsideAllOffices(Position fix, List<GeofenceZone> zones) {
   return true;
 }
 
-/// True when [fix] is inside ANY office radius by the IN band (radius +
-/// fixed 5m — mirrors GeofencePunchHandler's IN slack, user spec "IN
-/// accepts within radius+5m").  This is the at-point return-IN detector
-/// for the keep-alive stream: on an aggressive OEM (Nothing-class) the
-/// headless OS ENTER is dropped/deferred, so the stream's first honest
-/// inside fix triggers the reconciliation that punches IN ~25m from the
-/// office centre (the Aug-8 flawless 21m IN).
-///
-/// Accuracy NEVER widens this check (honesty rule): the true containment
-/// decide happens downstream (reconcileContainment's IN branch uses the
-/// same fixed band + the accuracy trust floor).  This gate just starts
-/// the reconcile — it can never punch a far-away IN by itself.
-///
-/// Pure function — unit-testable.
-bool isInsideAnyOffice(Position fix, List<GeofenceZone> zones) {
-  for (final z in zones) {
-    final dist = Geolocator.distanceBetween(
-        fix.latitude, fix.longitude, z.latitude, z.longitude);
-    if (dist <= z.radius + 5.0) return true; // inside this office (IN band)
-  }
-  return false;
-}
-
 // ── Service facade ────────────────────────────────────────────────────────────
 
 class FieldTrackingService {
@@ -166,7 +143,7 @@ class FieldTrackingService {
     // Keep-alive holds the process — stop it first (mode flag cleared),
     // or the combined service would start with the keep-alive mode flag
     // still set (and run light instead of full).
-    await OemKeepAliveService.stop(force: true);
+    await OemKeepAliveService.stop();
     try {
       await _svc.startService();
     } catch (e) {
@@ -306,29 +283,18 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
       debugPrint('[GF_BG_ENTRY] Keep-alive init check failed: $e');
     }
     // ── Movement-gated punch monitor ────────────────────────────────────
-    // Runs while the FGS is up (punched IN XOR punched OUT within the
-    // open shift window):
-    //   - punched IN  → the walk-out monitor: fixes arrive only as the
-    //     user moves (distanceFilter 30m, zero when stationary), the
-    //     inside→outside transition reconciles OUT immediately (honest
-    //     OUT at the boundary with the confirm fix).
-    //   - punched OUT + workday open → the RETURN-IN monitor: aggressive
-    //     OEMs (Nothing-class) drop or defer the headless OS geofence
-    //     ENTER — the stream's first honest INSIDE fix (IN band, radius
-    //     +5m) reconciles IN AT POINT (~25m from the office centre, the
-    //     Aug-8-proven 21m IN).  This is the at-point IN guarantee; the
-    //     OS ENTER + 15-min catch-up net remain the dead-process backup.
-    //   - past the shift end → nothing left to monitor (no banner at
-    //     home): cancel the stream, clear the keep-alive mode flag and
-    //     stopSelf.  The headless EXIT + containment worker still cover
-    //     the punched-IN case.
+    // Only while punched in.  distanceFilter 30m → a stationary user at
+    // the desk gets ZERO fixes (no GPS radio churn); fixes arrive only as
+    // the user actually moves, so the inside→outside transition is the
+    // honest walk out of the office, not a late OS event.  On the first
+    // outside fix a containment reconcile runs immediately (confirming fix
+    // taken back-to-back, punch OUT records the REAL confirm location).
     StreamSubscription<Position>? keepAliveSub;
     var keepAliveWasOutside = false;
-    var keepAliveWasInside = false;
     DateTime? keepAliveLastReconcile;
     try {
       final zones = keepAliveOfficeZones(prefs);
-      if (zones.isNotEmpty) {
+      if (prefs.getString(_kPersistPunchType) == 'In' && zones.isNotEmpty) {
         final settings = Platform.isAndroid
             ? AndroidSettings(
                 accuracy: LocationAccuracy.high,
@@ -343,55 +309,31 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
         keepAliveSub = Geolocator.getPositionStream(locationSettings: settings)
             .listen((fix) async {
           final p = await SharedPreferences.getInstance();
-          // Past the workday end: nothing to come back to, and the banner
-          // must not linger beyond work hours (immutable user design).
-          // Headless OUT (OS EXIT / containment worker) covers the IN case.
-          if (OemKeepAliveService.isPastShiftEnd(p)) {
-            debugPrint('[GF_BG_ENTRY] keep-alive stream: past shift end — '
-                'closing FGS');
-            await p.setBool(OemKeepAliveService.keepAliveModeKey, false);
+          // Punched OUT → nothing to monitor; OS EXIT / containment alarm /
+          // next ENTER take over.  Stop the GPS churn.
+          if (p.getString(_kPersistPunchType) != 'In') {
             await keepAliveSub?.cancel();
             keepAliveSub = null;
-            if (service is AndroidServiceInstance) service.stopSelf();
             return;
           }
-          final punchType = p.getString(_kPersistPunchType) ?? 'Out';
+          final outside = isOutsideAllOffices(fix, zones);
           final now = DateTime.now();
           final cooledDown = keepAliveLastReconcile == null ||
               now.difference(keepAliveLastReconcile!) >
                   const Duration(seconds: 60);
-          if (punchType == 'In') {
-            final outside = isOutsideAllOffices(fix, zones);
-            if (outside && !keepAliveWasOutside && cooledDown) {
-              keepAliveWasOutside = true;
-              keepAliveLastReconcile = now;
-              debugPrint('[GF_BG_ENTRY] keep-alive stream: outside all offices'
-                  ' — reconciling OUT');
-              try {
-                await GeofencePunchHandler.instance
-                    .reconcileContainment(confirmOut: true);
-              } catch (e) {
-                debugPrint('[GF_BG_ENTRY] keep-alive reconcile failed: $e');
-              }
-            } else if (!outside) {
-              keepAliveWasOutside = false;
+          if (outside && !keepAliveWasOutside && cooledDown) {
+            keepAliveWasOutside = true;
+            keepAliveLastReconcile = now;
+            debugPrint('[GF_BG_ENTRY] keep-alive stream: outside all offices'
+                ' — reconciling OUT');
+            try {
+              await GeofencePunchHandler.instance
+                  .reconcileContainment(confirmOut: true);
+            } catch (e) {
+              debugPrint('[GF_BG_ENTRY] keep-alive reconcile failed: $e');
             }
-          } else {
-            // Punched OUT, workday open → at-point return-IN monitor.
-            final inside = isInsideAnyOffice(fix, zones);
-            if (inside && !keepAliveWasInside && cooledDown) {
-              keepAliveWasInside = true;
-              keepAliveLastReconcile = now;
-              debugPrint('[GF_BG_ENTRY] keep-alive stream: inside office '
-                  'radius — reconciling IN at point');
-              try {
-                await GeofencePunchHandler.instance.reconcileContainment();
-              } catch (e) {
-                debugPrint('[GF_BG_ENTRY] keep-alive IN reconcile failed: $e');
-              }
-            } else if (!inside) {
-              keepAliveWasInside = false;
-            }
+          } else if (!outside) {
+            keepAliveWasOutside = false;
           }
         }, onError: (_) {});
       }
