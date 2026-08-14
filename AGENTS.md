@@ -28,8 +28,11 @@ Context for any agent working in this repo. Architecture docs live in
    only: the movement stream catches it, OUT punches at the boundary and
    stops the service — back to headless IN. Banner shows exactly while
    at work: never at night, weekends or leave days (punch-state gate —
-   leave days never punch). Commits
-   `8dc7894`/`47130be`/`8787c56`/`82f2d0a`/`10197aa`/`e624167`). The
+   leave days never punch). The FGS is NEVER auto-revived (sticky
+   close, user design): closed stays closed — no banner behind the
+   user's back; headless OUT covers it (OS geofence EXIT primary +
+   15-min headless reconcile guarantee). Commits
+   `8dc7894`/`47130be`/`8787c56`/`82f2d0a`/`10197aa`/`e624167`/`0c1ec2c`). The
    15-min AlarmManager containment alarm is the **24/7 headless-IN
    checker**: `gf_containment_alarm_armed` is the MASTER ENABLE
    (geofence auto on, never cleared by punch state — cleared on
