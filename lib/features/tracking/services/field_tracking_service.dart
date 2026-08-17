@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
@@ -12,6 +13,7 @@ import 'package:geolocator/geolocator.dart';
 
 import '../../../core/utils/geo_bands.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:network_info_plus/network_info_plus.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -351,14 +353,149 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
     } catch (e) {
       debugPrint('[GF_BG_ENTRY] keep-alive stream setup failed: $e');
     }
+    // ── Alignment warning streams (event-driven — zero timers) ─────────
+    // Phase-5 warnings (GPS off 996 / airplane mode 998 / wifi-hidden 997)
+    // previously existed only in the combined service, the foreground
+    // monitor and the ~30-min headless WorkManager.  The keep-alive FGS
+    // (geofence-only users) was deaf to them: GPS off or airplane mode
+    // produced TOTAL silence until the next WorkManager fire — up to 30
+    // minutes, and system-scheduled periodics are deferrable on aggressive
+    // OEMs.  These listeners are pure event streams: they wake only on an
+    // actual state change, never poll, never request a GPS fix — the
+    // battery contract stays intact (stationary = zero radio churn).
+    //
+    // Notification IDs / channel / prefs keys SHARED with the foreground
+    // monitor + headless worker + wifi worker (single source of truth —
+    // all sides REPLACE, never duplicate, each other's popups).
+    final alignNotif = FlutterLocalNotificationsPlugin();
+    const alignChannel = AndroidNotificationDetails(
+      'user_alignment',
+      'Attendance Alerts',
+      importance: Importance.high,
+      priority: Priority.high,
+    );
+    const alignDetails = NotificationDetails(android: alignChannel);
+    StreamSubscription<ServiceStatus>? alignGpsSub;
+    StreamSubscription<List<ConnectivityResult>>? alignConnSub;
+    try {
+      // GPS off → 996 (geofences can't fire).  Same gate as the headless
+      // worker: punched IN + any auto feature.
+      alignGpsSub = Geolocator.getServiceStatusStream().listen((status) async {
+        final p = await SharedPreferences.getInstance();
+        final anyAuto = (p.getBool('geofence_auto_enabled') ?? false) ||
+            (p.getBool('wifi_auto_punch_enabled_bg') ?? false) ||
+            (p.getBool('wifi_auto_punch_enabled') ?? false) ||
+            (p.getBool('field_tracking_enabled') ?? false);
+        if (p.getString(_kPersistPunchType) != 'In' || !anyAuto) {
+          try {
+            await alignNotif.cancel(996);
+          } catch (_) {}
+          return;
+        }
+        try {
+          if (status == ServiceStatus.disabled) {
+            await alignNotif.show(
+              996,
+              'GPS is off',
+              'Auto punch won\u2019t work and you could be marked absent even '
+                  'at the office. Turn Location back on.',
+              alignDetails,
+            );
+          } else {
+            await alignNotif.cancel(996);
+          }
+        } catch (e) {
+          debugPrint('[KEEP_ALIVE] GPS alert failed: $e');
+        }
+      });
+      // Airplane mode / no network → 998 (warn once per offline stretch),
+      // wifi-hidden → 997 on wifi (re)connect events, rate-limited 10 min.
+      alignConnSub =
+          Connectivity().onConnectivityChanged.listen((results) async {
+        final p = await SharedPreferences.getInstance();
+        final anyAuto = (p.getBool('geofence_auto_enabled') ?? false) ||
+            (p.getBool('wifi_auto_punch_enabled_bg') ?? false) ||
+            (p.getBool('wifi_auto_punch_enabled') ?? false) ||
+            (p.getBool('field_tracking_enabled') ?? false);
+        if (p.getString(_kPersistPunchType) != 'In' || !anyAuto) {
+          try {
+            await alignNotif.cancel(998);
+            await alignNotif.cancel(997);
+          } catch (_) {}
+          return;
+        }
+        try {
+          final none =
+              results.isEmpty || results.every((r) => r == ConnectivityResult.none);
+          if (none) {
+            if (p.getBool('wifi_bg_no_connectivity_warned') ?? false) return;
+            await p.setBool('wifi_bg_no_connectivity_warned', true);
+            await alignNotif.show(
+              998,
+              'No network (airplane mode?)',
+              'Attendance can\u2019t send or receive right now. WiFi punches '
+                  'will be saved and sent when you\u2019re back online. Swipe '
+                  'down from the top of your screen and turn off airplane mode.',
+              alignDetails,
+            );
+          } else {
+            if (p.getBool('wifi_bg_no_connectivity_warned') ?? false) {
+              await p.setBool('wifi_bg_no_connectivity_warned', false);
+            }
+            await alignNotif.cancel(998);
+            if (results.contains(ConnectivityResult.wifi)) {
+              // Wifi (re)connect — check Android isn't hiding the BSSID
+              // (location off) so wifi auto punch can still confirm.
+              String? bssid;
+              try {
+                bssid = await NetworkInfo().getWifiBSSID();
+              } catch (_) {
+                bssid = null;
+              }
+              final hidden = bssid == null ||
+                  bssid.isEmpty ||
+                  bssid == '02:00:00:00:00:00';
+              if (!hidden) {
+                await alignNotif.cancel(997);
+                return;
+              }
+              final now = DateTime.now().millisecondsSinceEpoch;
+              final last = p.getInt('wifi_bg_bssid_warned_ts') ?? 0;
+              if (now - last < const Duration(minutes: 10).inMilliseconds) {
+                return;
+              }
+              await p.setInt('wifi_bg_bssid_warned_ts', now);
+              await alignNotif.show(
+                997,
+                'Connected to WiFi, but the app can\u2019t read it',
+                'This happens when Location is off. Turn it on so auto punch '
+                    'can confirm you\u2019re on the office network. Phone '
+                    'Settings \u2192 Location.',
+                alignDetails,
+              );
+            } else {
+              await alignNotif.cancel(997);
+            }
+          }
+        } catch (e) {
+          debugPrint('[KEEP_ALIVE] connectivity alert failed: $e');
+        }
+      });
+    } catch (e) {
+      debugPrint('[KEEP_ALIVE] alignment stream setup failed: $e');
+    }
     // Idle: no timers — just the stream above + stop signals.
     service.on('stopKeepAlive').listen((_) async {
       debugPrint('[GF_BG_ENTRY] Keep-alive stop requested');
       await keepAliveSub?.cancel();
+      await alignGpsSub?.cancel();
+      await alignConnSub?.cancel();
       if (service is AndroidServiceInstance) service.stopSelf();
     });
     service.on('stop').listen((_) async {
       await keepAliveSub?.cancel();
+      await alignGpsSub?.cancel();
+      await alignConnSub?.cancel();
       if (service is AndroidServiceInstance) service.stopSelf();
     });
     return;
