@@ -1,6 +1,8 @@
 import 'package:dio/dio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../features/punch/services/oem_keep_alive_service.dart';
+
 /// Intercepts every `POST /attendance/punch` response and syncs punch state
 /// to SharedPreferences key `gf_last_punch_type` / `gf_last_punch_time`.
 ///
@@ -54,6 +56,10 @@ class PunchStateInterceptor extends Interceptor {
         'gf_last_punch_time',
         DateTime.now().toIso8601String(),
       );
+      // Keep-alive FGS is punch-state lifecycle: a manual / wifi / offline
+      // punch OUT must close the FGS (banner), a manual IN must start the
+      // walk-out monitor.  No-op on transition absence.
+      await OemKeepAliveService.syncToPunchState();
     });
   }
 }

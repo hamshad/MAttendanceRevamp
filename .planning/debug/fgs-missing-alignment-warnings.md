@@ -1,8 +1,8 @@
 ---
 status: resolved
-trigger: "User: app shows NO warning notifications (GPS off / airplane mode) while the keep-alive FGS is running — 'i thought we moved it in fgs right?'"
+trigger: "User: app shows NO warning notifications (GPS off / airplane mode) while the keep-alive FGS is running — 'i thought we moved it in fgs right?'  PLUS: 'the fgs doesn't close when the user is OUT — my idea was to keep the native IN 24/7 and the OUT with fgs only when user is IN'"
 created: 2026-08-17T13:00:00Z
-updated: 2026-08-17T13:30:00Z
+updated: 2026-08-17T15:00:00Z
 ---
 
 ## Current Focus
@@ -36,9 +36,17 @@ started: since the keep-alive FGS exists (`6a1f670` era) — warnings were never
   checked: notification ID/channel sharing (AlignmentMonitor 996-999, headless worker 996/997/998, wifi worker 997/998)
   found: all sides share IDs 996/997/998 + channel user_alignment + prefs keys wifi_bg_no_connectivity_warned / wifi_bg_bssid_warned_ts — replace, never duplicate
   implication: FGS listeners must use the same IDs/keys — done
+- timestamp: 2026-08-17
+  checked: FGS not closing on OUT (second user report)
+  found: `gf_last_punch_type` has FIVE writers; only ONE (`geofence_monitor._persistPunchState`) wired the FGS lifecycle. Manual UI punches (`main_shell._onAttendanceStatusChanged:551`), every punch POST response mirror (`PunchStateInterceptor:52`), and both offline queue flushes (`OfflineSyncManager._publishLocalState:191`, `SyncService._publishLocalState:129`) wrote 'Out' with NO `OemKeepAliveService.stop()`. Manual IN likewise never started the walk-out monitor.
+  implication: any OUT not flowing through the geofence persist path left 'Geofence Active' pinned in the tray. Native receivers clean (no revival), geofence path clean — the gap was the non-geofence writers.
+- timestamp: 2026-08-17
+  checked: user design intent ("native IN 24/7, OUT-watch FGS only while IN")
+  found: EXACTLY the contracted shape (IN headless always; FGS = walk-out monitor gated punched-IN, OUT → unconditional stop)
+  implication: no redesign needed — enforce the existing contract on every punch-state writer: `OemKeepAliveService.syncToPunchState()` (transition-gated start/stop), called from main_shell + interceptor + both offline flush paths
 
 ## Resolution
-root_cause: keep-alive FGS branch returned before the alignment monitors (GPS status stream, connectivity stream, wifi-hidden check) were ever registered; those lived only in the combined-service path below the return. Geofence-only users' ONLY live process therefore never emitted GPS-off/airplane warnings — silence until app-open or the ~30-min WorkManager fire.
-fix: keep-alive branch now registers two event-driven streams before returning: `getServiceStatusStream` → GPS-off 996 (punched-IN + any-auto gate), `onConnectivityChanged` → no-network 998 (warn-once per offline stretch, shared key) + wifi-hidden 997 on wifi (re)connect (10-min rate limit, shared key). Same IDs/channel/keys as the other monitors. Streams cancelled on stopKeepAlive/stop. No timers, no polling, no GPS fixes — battery contract intact.
-verification: flutter analyze 0 new issues, flutter test 180/180 green. Field verification pending (user: punched in + backgrounded → GPS off → 996 within seconds; airplane → 998).
-files_changed: [lib/features/tracking/services/field_tracking_service.dart, .planning/docs/native-first-geofence-architecture.md]
+root_cause: TWO gaps, same FGS lifecycle theme. (1) Warnings: keep-alive FGS branch returned before the alignment monitors (GPS status stream, connectivity stream, wifi-hidden check) were ever registered; those lived only in the combined-service path below the return — geofence-only users' ONLY live process never emitted GPS-off/airplane warnings. (2) FGS-not-closing: `gf_last_punch_type` has five writers but only the geofence persist path wired the FGS start/stop — manual UI punches, the punch-POST response mirror (PunchStateInterceptor), attendance-poll mirror and both offline queue flushes left the FGS running after OUT / unstarted after manual IN.
+fix: (1) Keep-alive branch registers event-driven streams before returning (996 GPS-off, 998 airplane, 997 wifi-hidden rate-limited) — same IDs/channel/keys as other monitors, no timers/polling/fixes. (2) New `OemKeepAliveService.syncToPunchState()` — transition-gated `startIfNeeded`/`stop` — called from all four non-geofence writers. Contract confirmed: native IN headless 24/7, FGS = walk-out monitor EXACTLY while punched IN, closes on ANY OUT source.
+verification: flutter analyze 0 new issues, flutter test 180/180 green. Field verification pending (user: manual OUT → banner gone; manual IN → FGS starts; GPS off/airplane toggles → 996/998 within seconds).
+files_changed: [lib/features/tracking/services/field_tracking_service.dart, lib/features/punch/services/oem_keep_alive_service.dart, lib/core/api/punch_state_interceptor.dart, lib/features/shell/main_shell.dart, lib/core/offline/offline_sync_manager.dart, lib/core/offline/sync_service.dart, .planning/docs/native-first-geofence-architecture.md]

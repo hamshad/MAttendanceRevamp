@@ -547,12 +547,16 @@ class _MainShellState extends ConsumerState<MainShell>
       debugPrint('UI: Attendance status updated. Punched In: $nextPunched');
 
       // Persist punch state for the background service notification
-      SharedPreferences.getInstance().then((prefs) {
-        prefs.setString('gf_last_punch_type', statusStr);
-        prefs.setString('gf_last_punch_time', DateTime.now().toIso8601String());
+      SharedPreferences.getInstance().then((prefs) async {
+        await prefs.setString('gf_last_punch_type', statusStr);
+        await prefs.setString('gf_last_punch_time', DateTime.now().toIso8601String());
         if (nextPunched && next.value?.officeName != null) {
           prefs.setString('gf_last_punch_office', next.value!.officeName!);
         }
+        // Keep-alive FGS is punch-state lifecycle: manual OUT (or any
+        // server-side state change) must close the FGS, manual IN must
+        // start the walk-out monitor.  No-op on no transition.
+        await OemKeepAliveService.syncToPunchState();
       });
     }
 

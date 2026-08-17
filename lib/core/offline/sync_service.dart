@@ -5,6 +5,7 @@ import '../api/api_endpoints.dart';
 import '../api/dio_client.dart';
 import '../punch/punch_coordinator.dart';
 import '../utils/constants.dart';
+import '../../features/punch/services/oem_keep_alive_service.dart';
 import '../../models/offline_punch.dart';
 import 'offline_queue.dart';
 
@@ -129,6 +130,10 @@ class SyncService {
       await prefs.setString('gf_last_punch_type', punch.direction ?? 'In');
       await prefs.setString(
           'gf_last_punch_time', punch.createdAt.toIso8601String());
+      // Keep-alive FGS is punch-state lifecycle (manual/queued punches
+      // bypass the geofence persist path): a synced OUT closes the FGS,
+      // a synced IN starts the walk-out monitor.  No-op on no transition.
+      await OemKeepAliveService.syncToPunchState();
     } catch (_) {}
   }
 

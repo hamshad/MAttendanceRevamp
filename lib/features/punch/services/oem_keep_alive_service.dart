@@ -132,6 +132,29 @@ class OemKeepAliveService {
     }
   }
 
+  /// Keep the keep-alive FGS lifecycle in sync with the punch state written
+  /// by ANY source.
+  ///
+  /// The geofence punch path (`_persistPunchState`) is not the only writer
+  /// of `gf_last_punch_type`: manual UI punches, the server-state mirror
+  /// (`PunchStateInterceptor`, attendance poll) and the offline queue
+  /// flushes all persist the punch type directly.  Before this helper,
+  /// an OUT written by any of those left the FGS running — banner stuck
+  /// "Geofence Active" after the user punched out (2026-08-17 user
+  /// report).  And a MANUAL IN never started the walk-out monitor.
+  ///
+  /// Cheap no-op when nothing changed: [startIfNeeded] and [stop] both
+  /// re-read prefs + `isRunning()` and act only on transitions.
+  static Future<void> syncToPunchState() async {
+    if (!Platform.isAndroid) return;
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getString('gf_last_punch_type') == 'In') {
+      await startIfNeeded();
+    } else {
+      await stop();
+    }
+  }
+
   /// Stop the keep-alive foreground service.
   ///
   /// Unconditional: once punched OUT we go back to the headless IN path
