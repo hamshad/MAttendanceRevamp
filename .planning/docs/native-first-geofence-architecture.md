@@ -172,6 +172,16 @@ machinery. Evidence first, always.
   chain never rests while armed (24/7 since `e624167` — the morning-IN
   net must be alive exactly when Out+window). Leave days: no shift alarm
   → no chain, no banner.
+- **FGS lifecycle = punch state from ANY source** (strengthened 2026-08-17):
+  `_persistPunchState` was the only writer that started/stopped the FGS —
+  manual UI punches, the server-state mirror (`PunchStateInterceptor`,
+  attendance poll) and offline queue flushes persisted `gf_last_punch_type`
+  directly, so a manual OUT left "Geofence Active" stuck in the tray and a
+  manual IN never armed the walk-out monitor.  New
+  `OemKeepAliveService.syncToPunchState()` — cheap transition-gated
+  start/stop — is called by all four non-geofence writers
+  (`main_shell`, `PunchStateInterceptor`, `OfflineSyncManager`,
+  `SyncService`).  No-op when nothing transitioned.
 - **No timers in the service.** Two event-driven listeners added (2026-08-17):
   alignment warning streams — `getServiceStatusStream()` → GPS-off (996) and
   `onConnectivityChanged` → airplane/no-network (998) + wifi-hidden (997 on
@@ -291,6 +301,7 @@ machinery. Evidence first, always.
 | `835c2a7` | **Revert of `18f3e45` — IN stays headless (user correction, premise falsified)**: the at-point IN never came from the FGS stream — IN was always the straightforward headless OS ENTER path (accurate, dead-process safe) and OUT the late one; the FGS exists ONLY as the walk-out monitor (OUT-accelerator: stream delivers fixes at the boundary → honest OUT ~radius+25m within a minute). Restored: `startIfNeeded` In-only gate, unconditional `stop()` on OUT, In-only stream self-cancelling on OUT, plain `stop()` on takeover/disable/logout. Kept from `f5a53dd`: catch-up ENTER net + Nothing exact alarm (zero-battery dead-process IN insurance). Anti-fake layers stay — Android fused fixes blend wifi/cell (300-500m jump class), plugin exposes no provider, so bands + two-fix + zone-identity are the only defense and cost honest users nothing. Tests 183→173, analyze 0 errors. Debug: `.planning/debug/resolved/nothing-in-at-point.md` |
 | (pending) | **OUT accuracy TRUST FLOOR + honest offline punches + divergence self-heal (2026-08-17 field evidence)**: (1) NEW `lib/core/utils/geo_bands.dart` — `isOutsideOfficeBand` = distance beyond `radius+slack` AND fix accuracy ≤ the band (45m @ 20m office). Applied to ALL FOUR OUT paths (keep-alive stream `isOutsideAllOffices`, `_reconcileOut` confirmOut + insideAny, `_verifyTransition` fresh-fix, crossing branch). Closes the false-OUT class: a fused wifi-blend fix at 68m beyond the radius claiming 120m accuracy can no longer punch OUT while the user sits inside (old dist-only check believed it). Accuracy NEVER widens bands (`ab070de` intact); the floor only ADDS a defer. (2) Honest queued punches: `_executePunch` POST-fail + queue → notification now says "Auto-Punched Out (offline) — syncing when online" instead of claiming the server recorded it; undecided-IN queue likewise. (3) Duplicate-divergence deadlock closed: user's field session showed queued OUT + server-still-In → return ENTER silently skipped as duplicate, queue never flushed. `_executePunch` now snapshots local punch type BEFORE persist, and on own-source echo with divergence flushes the queue (`scheduleNow`) + notifies "Server already shows — offline punches syncing"; already-confirmed-locally skip added before the server call. Tests 173→180, analyze 0 errors. Debug: `.planning/debug/xiaomi-in-missed.md` |
 | (pending) | **Alignment warnings in the keep-alive FGS (2026-08-17 user report)**: geofence-only users got NO GPS-off/airplane warnings while the FGS ran — warnings lived only in the combined service, foreground monitor and ~30-min headless WorkManager (deferrable on aggressive OEMs). Keep-alive branch now runs two event-driven streams (`getServiceStatusStream` → 996, `onConnectivityChanged` → 998 + wifi-hidden 997 rate-limited 10 min), punched-IN + any-auto gated, shared IDs/channel/keys with the other monitors (replace, never duplicate), cancelled on stop. No timers, no polling, no fixes — battery contract intact. Tests 180, analyze 0 errors |
+| (pending) | **FGS lifecycle on ALL punch sources (2026-08-17 user report)**: FGS stayed running after a manual OUT (banner "Geofence Active" stuck in the tray); manual IN never started the walk-out monitor. Only the geofence persist path wired start/stop — manual UI, server-state mirror (`PunchStateInterceptor`), attendance poll and offline queue flushes wrote `gf_last_punch_type` directly. New `OemKeepAliveService.syncToPunchState()` (transition-gated, no-op when unchanged) called from `main_shell`, `PunchStateInterceptor`, `OfflineSyncManager._publishLocalState`, `SyncService._publishLocalState`. Confirms the contracted shape: native IN headless 24/7, FGS = walk-out monitor EXACTLY while punched IN, closed on any OUT. Tests 180, analyze 0 errors |
 
 ## Verification
 
