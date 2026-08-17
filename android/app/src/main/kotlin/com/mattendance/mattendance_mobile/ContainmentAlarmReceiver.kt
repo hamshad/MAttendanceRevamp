@@ -67,19 +67,13 @@ class ContainmentAlarmReceiver : BroadcastReceiver() {
 
         /**
          * ROMs that kill background app starts / WorkManager / deferred
-         * alarms without user exemptions (MIUI/HyperOS is the canonical
-         * pain; ColorOS/OxygenOS, Funtouch/OriginOS and MagicOS behave the
-         * same).  Must mirror AggressiveOem.aggressiveBrands (Dart).
+         * alarms without user exemptions.  MI family ONLY (user decision
+         * 2026-08-17: Samsung / Nothing / OnePlus field-proven working
+         * without restrictions — no exact-alarm treatment needed for them).
+         * Must mirror AggressiveOem.aggressiveBrands (Dart).
          */
         private val AGGRESSIVE_BRANDS = listOf(
-            "xiaomi", "redmi", "poco", "honor",
-            "oppo", "realme", "oneplus", "vivo",
-            // Nothing OS aggressively defers inexact alarms and background
-            // WorkManager (field-proven: the 15-min checker + OS ENTER were
-            // delayed past the walk-back-in window on the Nothing 3a —
-            // missed-IN until app open).  Exact alarm keeps the checker on
-            // schedule; falls back to inexact if the permission is revoked.
-            "nothing",
+            "xiaomi", "redmi", "poco",
         )
 
         fun isAggressiveOem(context: Context): Boolean {

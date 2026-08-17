@@ -5,6 +5,7 @@ import 'package:permission_handler/permission_handler.dart' as ph;
 import 'dart:io';
 
 import '../../punch/services/geofence_monitor.dart';
+import '../../../core/utils/aggressive_oem.dart';
 
 // ── Provider ──────────────────────────────────────────────────────────────────
 
@@ -13,6 +14,66 @@ import '../../punch/services/geofence_monitor.dart';
 final geofenceEnabledProvider = StateProvider<bool>(
   (ref) => GeofenceMonitor.isEnabled,
 );
+
+// ── Mandatory MIUI battery-restrictions gate ──────────────────────────────────
+//
+// Shared by the geofence settings toggle AND the home-screen toggle
+// (main_shell) — both enable paths must enforce it.  MIUI-family devices
+// kill background work (WorkManager, alarms, the keep-alive FGS) unless
+// the user disables Auto-start + battery restrictions.  MIUI's per-app
+// battery state is NOT programmatically readable, so the flow opens each
+// MIUI page and the user confirms by hand — an honest, user-verified
+// gate (documented in the dialog).
+Future<bool> ensureMiRestrictionsOff(BuildContext context) async {
+  if (!context.mounted) return false;
+  return await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Xiaomi Battery Restrictions — Required'),
+          content: const SingleChildScrollView(
+            child: Text(
+              'Xiaomi (MIUI) kills background work like auto-punch unless '
+              'the app is exempted. Without this, punches will be missed '
+              'or delayed.\n\n'
+              'Please do all three, then come back:\n\n'
+              '1. Tap "Open Auto-start" → enable MAttendance.\n'
+              '2. Tap "Battery Saver" → choose "No restrictions".\n'
+              '3. Tap "Battery Optimization" → allow.\n\n'
+              'We can\u2019t read MIUI\u2019s per-app settings — this gate '
+              'is your confirmation.',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => AggressiveOem.openMiuiAutoStart(),
+              child: const Text('Open Auto-start'),
+            ),
+            TextButton(
+              onPressed: () => AggressiveOem.openMiuiBatterySaver(),
+              child: const Text('Battery Saver'),
+            ),
+            TextButton(
+              onPressed: () =>
+                  AggressiveOem.requestIgnoreBatteryOptimizations(),
+              child: const Text('Battery Optimization'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                await AggressiveOem.setRestrictionsConfirmed(true);
+                if (ctx.mounted) Navigator.pop(ctx, true);
+              },
+              child: const Text('Done — restrictions are off'),
+            ),
+          ],
+        ),
+      ) ??
+      false;
+}
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
@@ -29,12 +90,15 @@ class _GeofenceSettingsScreenState
     with WidgetsBindingObserver {
   LocationPermission _permission = LocationPermission.denied;
   bool _locationServiceEnabled = false;
+  bool _isAggressiveOem = false;
+  bool _miRestrictionsConfirmed = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _refreshPermissionStatus();
+    _refreshOemState();
   }
 
   @override
@@ -42,6 +106,19 @@ class _GeofenceSettingsScreenState
     // Re-check permission when the user returns from device settings.
     if (state == AppLifecycleState.resumed) {
       _refreshPermissionStatus();
+      _refreshOemState();
+    }
+  }
+
+  Future<void> _refreshOemState() async {
+    final aggressive = await AggressiveOem.isAggressive();
+    final confirmed = await AggressiveOem.restrictionsConfirmed();
+    if (mounted && (aggressive != _isAggressiveOem ||
+        confirmed != _miRestrictionsConfirmed)) {
+      setState(() {
+        _isAggressiveOem = aggressive;
+        _miRestrictionsConfirmed = confirmed;
+      });
     }
   }
 
@@ -152,6 +229,21 @@ class _GeofenceSettingsScreenState
         }
       }
       await _requestNotificationPermission();
+
+      // MANDATORY gate (user decision 2026-08-17): MIUI-family devices kill
+      // background work (WorkManager, alarms, the keep-alive FGS) unless
+      // the user disables Auto-start + battery restrictions.  Auto-punch
+      // cannot be enabled until the user confirms they're off.  MIUI's
+      // per-app battery state is NOT programmatically readable, so the
+      // user verifies by hand — the flow opens each MIUI page.
+      if (await AggressiveOem.isAggressive() &&
+          !(await AggressiveOem.restrictionsConfirmed())) {
+        final confirmed = await ensureMiRestrictionsOff(context);
+        if (!confirmed) {
+          _showSnack('Xiaomi battery restrictions must be off for auto-punch.');
+          return;
+        }
+      }
     }
 
     await GeofenceMonitor.setEnabled(value);
@@ -212,15 +304,31 @@ class _GeofenceSettingsScreenState
             ),
 
           // ── OEM auto-start warning ─────────────────────────────────────────
-          if (enabled)
+          // MI-family only (user decision 2026-08-17): Samsung / Nothing /
+          // OnePlus are field-proven to work without restrictions — no gate,
+          // no tile.  For MI users this doubles as the status + re-run entry
+          // for the mandatory battery-restrictions flow.
+          if (enabled && _isAggressiveOem)
             _WarningTile(
               icon: Icons.settings_power_outlined,
-              color: Colors.red.shade600,
-              title: 'Oppo / Vivo / Samsung / Xiaomi Users',
-              body: 'Go to device Settings → Apps → MAttendance → '
-                  'Enable "Auto-start" / "Allow background activity" / '
-                  '"Lock in recent tasks". '
-                  'Without this, the OS may kill the app after closing it.',
+              color: _miRestrictionsConfirmed
+                  ? Colors.green.shade700
+                  : Colors.red.shade600,
+              title: _miRestrictionsConfirmed
+                  ? 'Xiaomi restrictions — off (confirmed)'
+                  : 'Xiaomi battery restrictions — REQUIRED',
+              body: _miRestrictionsConfirmed
+                  ? 'Auto-start, battery saver and battery optimization are '
+                      'confirmed off. Tap to re-open the setup flow.'
+                  : 'Auto-punch cannot run reliably until Auto-start and '
+                      'battery restrictions are disabled for MAttendance. '
+                      'Tap to fix now.',
+              onTap: _miRestrictionsConfirmed
+                  ? null
+                  : () async {
+                      await _requireMiRestrictionsOff();
+                      await _refreshOemState();
+                    },
             ),
 
           // ── Permission status ─────────────────────────────────────────────
@@ -271,45 +379,51 @@ class _WarningTile extends StatelessWidget {
   final Color color;
   final String title;
   final String body;
+  final VoidCallback? onTap;
 
   const _WarningTile({
     required this.icon,
     required this.color,
     required this.title,
     required this.body,
+    this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: color.withAlpha(20),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withAlpha(60)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, color: color, size: 20),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title,
-                    style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        color: color,
-                        fontSize: 13)),
-                const SizedBox(height: 3),
-                Text(body,
-                    style: TextStyle(color: color, fontSize: 12)),
-              ],
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: color.withAlpha(20),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: color.withAlpha(60)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: color, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title,
+                      style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: color,
+                          fontSize: 13)),
+                  const SizedBox(height: 3),
+                  Text(body,
+                      style: TextStyle(color: color, fontSize: 12)),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

@@ -5,8 +5,10 @@ import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Process
+import android.provider.Settings
 import android.util.Log
 import androidx.annotation.NonNull
 import androidx.core.content.ContextCompat
@@ -93,6 +95,65 @@ class MainActivity : FlutterFragmentActivity() {
                 }
                 "isAggressiveOem" -> {
                     result.success(ContainmentAlarmReceiver.isAggressiveOem(this))
+                }
+                "openMiuiAutoStart" -> {
+                    // MIUI per-app Auto-start page.  MIUI hides the standard
+                    // "Allow background activity"-style toggles behind its
+                    // own AutoStart manager; best-effort (MIUI versions move
+                    // components) with a fallback to the app details page.
+                    runCatching {
+                        val intent = Intent("miui.intent.action.OP_AUTO_START").apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            setClassName(
+                                "com.miui.securitycenter",
+                                "com.miui.permcenter.autostart.AutoStartManagementActivity",
+                            )
+                        }
+                        startActivity(intent)
+                    }.onFailure {
+                        runCatching {
+                            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = Uri.parse("package:$packageName")
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            })
+                        }
+                    }
+                    result.success(null)
+                }
+                "openMiuiBatterySaver" -> {
+                    // MIUI per-app "Battery saver" page (unrestricted toggle).
+                    runCatching {
+                        val intent = Intent("miui.intent.action.APP_BATTERY_SAVER").apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            putExtra("package_name", packageName)
+                            setClassName(
+                                "com.miui.securitycenter",
+                                "com.miui.powercenter.batteryUI.BatterySettingsActivity",
+                            )
+                        }
+                        startActivity(intent)
+                    }.onFailure {
+                        runCatching {
+                            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = Uri.parse("package:$packageName")
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            })
+                        }
+                    }
+                    result.success(null)
+                }
+                "requestIgnoreBatteryOptimizations" -> {
+                    // Standard Android battery-optimization exemption dialog —
+                    // works on MIUI too ("No restrictions" in App details →
+                    // Battery).
+                    runCatching {
+                        val intent = Intent(
+                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:$packageName"),
+                        ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+                        startActivity(intent)
+                    }
+                    result.success(null)
                 }
                 "stopBackgroundService" -> {
                     Log.d(TAG, "stopBackgroundService called")

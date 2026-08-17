@@ -1251,6 +1251,13 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                     }
                     return;
                   }
+                  // Mandatory MIUI battery-restrictions gate (user decision
+                  // 2026-08-17) — same gate as the settings screen toggle.
+                  if (await AggressiveOem.isAggressive() &&
+                      !(await AggressiveOem.restrictionsConfirmed())) {
+                    final confirmed = await ensureMiRestrictionsOff(context);
+                    if (!confirmed) return;
+                  }
                 }
                 await GeofenceMonitor.setEnabled(value);
                 (await SharedPreferences.getInstance()).setBool('geofence_auto_enabled', value);

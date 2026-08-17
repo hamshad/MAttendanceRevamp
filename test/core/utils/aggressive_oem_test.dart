@@ -9,16 +9,20 @@ void main() {
       expect(AggressiveOem.isAggressiveBrand('POCO'), isTrue);
     });
 
-    test('other aggressive OEM families detected', () {
-      expect(AggressiveOem.isAggressiveBrand('HONOR'), isTrue);
-      expect(AggressiveOem.isAggressiveBrand('Oppo'), isTrue);
-      expect(AggressiveOem.isAggressiveBrand('realme'), isTrue);
-      expect(AggressiveOem.isAggressiveBrand('OnePlus'), isTrue);
-      expect(AggressiveOem.isAggressiveBrand('vivo'), isTrue);
+    test('MI family only (user decision 2026-08-17): former aggressive '
+        'families now regular', () {
+      // Field-proven working without battery restrictions → no special
+      // treatment, exact alarms or gates for these.
+      expect(AggressiveOem.isAggressiveBrand('HONOR'), isFalse);
+      expect(AggressiveOem.isAggressiveBrand('Oppo'), isFalse);
+      expect(AggressiveOem.isAggressiveBrand('realme'), isFalse);
+      expect(AggressiveOem.isAggressiveBrand('OnePlus'), isFalse);
+      expect(AggressiveOem.isAggressiveBrand('vivo'), isFalse);
+      expect(AggressiveOem.isAggressiveBrand('Nothing'), isFalse);
+      expect(AggressiveOem.isAggressiveBrand('samsung'), isFalse);
     });
 
     test('regular brands not detected', () {
-      expect(AggressiveOem.isAggressiveBrand('samsung'), isFalse);
       expect(AggressiveOem.isAggressiveBrand('Google'), isFalse);
       expect(AggressiveOem.isAggressiveBrand('motorola'), isFalse);
       expect(AggressiveOem.isAggressiveBrand('nokia'), isFalse);
