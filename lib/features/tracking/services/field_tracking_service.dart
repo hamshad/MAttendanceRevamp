@@ -9,6 +9,8 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
+
+import '../../../core/utils/geo_bands.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -92,20 +94,29 @@ List<GeofenceZone> keepAliveOfficeZones(SharedPreferences prefs) {
 
 /// True when [fix] is outside EVERY office radius by the OUT band
 /// (radius + fixed 25m — mirrors GeofencePunchHandler's OUT slack, user
-/// spec "out of radius + 25-30m → punch OUT").
+/// spec "out of radius + 25-30m → punch OUT") **with the accuracy trust
+/// floor** ([isOutsideOfficeBand]).
 ///
-/// Accuracy NEVER widens this check: the old 2x-accuracy margin delayed
-/// OUT punches until dist exceeded radius + up to 250m (the 149m miss on
-/// the Nothing 3a).  Misleading-accuracy fixes are handled downstream by
-/// reconcileContainment's two-fix confirmation, not by band widening.
+/// Strengthened 2026-08-17: a fix also counts as "still inside" when its
+/// claimed accuracy exceeds the band — fused wifi-blend fixes can claim
+/// 100-500m and jump 300-500m, and two such fixes previously fabricated
+/// a false OUT at 68m beyond the radius while the user was inside.
+/// Accuracy still NEVER widens the band (the 2x-accuracy margin delayed
+/// the Nothing's 149m OUT); untrusted fixes simply defer the punch to
+/// the next check (OS EXIT crossing path / 15-min net).
 ///
 /// Pure function — unit-testable.
 bool isOutsideAllOffices(Position fix, List<GeofenceZone> zones) {
   if (zones.isEmpty) return false;
   for (final z in zones) {
-    final dist = Geolocator.distanceBetween(
-        fix.latitude, fix.longitude, z.latitude, z.longitude);
-    if (dist <= z.radius + 25.0) return false; // still inside this office
+    if (!isOutsideOfficeBand(
+      fix,
+      zoneLatitude: z.latitude,
+      zoneLongitude: z.longitude,
+      zoneRadius: z.radius,
+    )) {
+      return false; // still inside (or untrusted) this office
+    }
   }
   return true;
 }

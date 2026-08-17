@@ -109,22 +109,46 @@ void main() {
     });
 
     test('accuracy never widens the OUT band (fixed 25m slack)', () {
-      // 46m out, 20m radius: past the radius+25=45m band → outside
-      // REGARDLESS of a poor 60m accuracy claim.  (The old 2x-accuracy
-      // margin kept such fixes "inside" until ~140m — the root cause of
-      // the delayed 149m OUT punch.)
-      expect(
-          isOutsideAllOffices(fixAt(0.000414, 0.0, accuracy: 60), [zone]),
-          isTrue);
+      // 46m out, 20m radius: past the radius+25=45m band with honest GPS
+      // accuracy → outside.  (The old 2x-accuracy margin kept such fixes
+      // "inside" until ~140m — the root cause of the delayed 149m OUT.)
       expect(
           isOutsideAllOffices(fixAt(0.000414, 0.0, accuracy: 10), [zone]),
           isTrue);
+      // Same distance but untrusted wifi-blend accuracy (> band 45m):
+      // the trust floor defers — NO outside claim from a 60m-accuracy fix.
+      expect(
+          isOutsideAllOffices(fixAt(0.000414, 0.0, accuracy: 60), [zone]),
+          isFalse);
       // 44m out: still within the 45m band → inside, whatever accuracy.
       expect(
           isOutsideAllOffices(fixAt(0.0004, 0.0, accuracy: 60), [zone]),
           isFalse);
       expect(
           isOutsideAllOffices(fixAt(0.0004, 0.0, accuracy: 10), [zone]),
+          isFalse);
+    });
+
+    test('OUT trust floor: wifi-blend accuracy worse than the band defers '
+        'the punch (2026-08-17 false-OUT fix)', () {
+      // The false-OUT class: a fused wifi-blend fix 68m beyond the radius
+      // (88m from center, 20m radius) claiming poor accuracy while the
+      // user is physically INSIDE.  Accuracy worse than the band
+      // (radius+25=45m) → NOT outside → no OUT trigger, no reconcile.
+      expect(
+          isOutsideAllOffices(fixAt(0.00079, 0.0, accuracy: 120), [zone]),
+          isFalse);
+      // Same distance with honest GPS accuracy → outside (normal walk-out).
+      expect(
+          isOutsideAllOffices(fixAt(0.00079, 0.0, accuracy: 15), [zone]),
+          isTrue);
+      // Accuracy exactly at the band boundary (45m) → trusted (<=).
+      expect(
+          isOutsideAllOffices(fixAt(0.00079, 0.0, accuracy: 45), [zone]),
+          isTrue);
+      // Poor accuracy but still inside the band → inside, obviously.
+      expect(
+          isOutsideAllOffices(fixAt(0.0002, 0.0, accuracy: 300), [zone]),
           isFalse);
     });
 

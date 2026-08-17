@@ -690,11 +690,15 @@ void main() {
       expect(mock.punchCalls, 0);
     });
 
-    test('exit + fix 46m out with poor accuracy → still OUT (no widening)',
-        () async {
-      // The 149m-miss root cause: a 60m accuracy claim used to widen the
-      // inside band to radius+120 → OUT delayed until ~140m+.  Fixed band
-      // + two-fix confirmation handles the accuracy instead.
+    test('exit + fix 46m out with poor accuracy → NO OUT (trust floor, '
+        '2026-08-17 false-OUT fix)', () async {
+      // Two contracts here: (1) the 149m-miss root cause — a 60m accuracy
+      // claim used to WIDEN the inside band to radius+120 → OUT delayed
+      // until ~140m+; the fixed band + two-fix confirmation handle that
+      // (accuracy never widens).  (2) NEW — the accuracy TRUST FLOOR:
+      // a 60m-accuracy fix beyond the 45m band cannot corroborate an OUT
+      // (wifi-blend jump class — the false 68m-beyond-radius OUT while
+      // the user sat inside).  Untrusted → defer, no punch.
       SharedPreferences.setMockInitialValues(
           _smallRadiusPrefs(lastType: 'In'));
       mock.isPunchedIn = true;
@@ -702,7 +706,7 @@ void main() {
         latitude: _officeLat + 0.000414, // ~46m
         longitude: _officeLng,
         timestamp: DateTime.now(),
-        accuracy: 60, // poor claim — band unchanged
+        accuracy: 60, // worse than the 45m band → untrusted
         altitude: 0,
         altitudeAccuracy: 0,
         heading: 0,
@@ -711,6 +715,31 @@ void main() {
         speedAccuracy: 0,
       );
       fakeGeo.positionQueue = [poor, poor];
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.exit));
+
+      expect(mock.punchCalls, 0);
+      expect(mock.lastDirection, isNull);
+    });
+
+    test('exit + fix 46m out with honest accuracy → OUT punches', () async {
+      SharedPreferences.setMockInitialValues(
+          _smallRadiusPrefs(lastType: 'In'));
+      mock.isPunchedIn = true;
+      final good = geo.Position(
+        latitude: _officeLat + 0.000414, // ~46m
+        longitude: _officeLng,
+        timestamp: DateTime.now(),
+        accuracy: 15, // honest GPS — within the 45m band floor
+        altitude: 0,
+        altitudeAccuracy: 0,
+        heading: 0,
+        headingAccuracy: 0,
+        speed: 0,
+        speedAccuracy: 0,
+      );
+      fakeGeo.positionQueue = [good, good];
 
       await GeofencePunchHandler.forTest(_dioWith(mock))
           .handleEvent(_params(_officeId, GeofenceEvent.exit));

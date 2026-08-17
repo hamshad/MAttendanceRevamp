@@ -16,6 +16,7 @@ import '../../../core/offline/offline_queue.dart';
 import '../../../core/offline/offline_sync_manager.dart';
 import '../../../core/punch/punch_coordinator.dart';
 import '../../../core/utils/constants.dart';
+import '../../../core/utils/geo_bands.dart';
 import '../../../models/client_site.dart';
 import '../../../models/office.dart';
 import '../../../models/offline_punch.dart';
@@ -658,12 +659,16 @@ class GeofencePunchHandler {
 
     bool insideAny = false;
     for (final zone in zones) {
-      final dist = geo.Geolocator.distanceBetween(
-          fix.latitude, fix.longitude, zone.latitude, zone.longitude);
-      // OUT band: fixed 25m slack past the radius (user spec "out of
-      // radius + 25-30m → punch OUT").  Accuracy never widens this check —
-      // the old 2x-accuracy margin is what delayed OUT until 149m.
-      if (dist <= zone.radius + _outSlackM) {
+      // OUT band with the accuracy TRUST FLOOR (strengthened 2026-08-17:
+      // wifi-blend fixes claiming accuracy worse than the band no longer
+      // count as "outside" — the false 68m-beyond-radius OUT).
+      if (!isOutsideOfficeBand(
+        fix,
+        zoneLatitude: zone.latitude,
+        zoneLongitude: zone.longitude,
+        zoneRadius: zone.radius,
+        slackM: _outSlackM,
+      )) {
         insideAny = true;
         break;
       }
@@ -680,9 +685,13 @@ class GeofencePunchHandler {
       final fix2 = await _freshFix();
       if (fix2 == null) return false; // can't confirm → conservative: no punch
       for (final zone in zones) {
-        final d = geo.Geolocator.distanceBetween(
-            fix2.latitude, fix2.longitude, zone.latitude, zone.longitude);
-        if (d <= zone.radius + _outSlackM) {
+        if (!isOutsideOfficeBand(
+          fix2,
+          zoneLatitude: zone.latitude,
+          zoneLongitude: zone.longitude,
+          zoneRadius: zone.radius,
+          slackM: _outSlackM,
+        )) {
           debugPrint('[GF_MON] reconcile: confirm fix inside office — no OUT');
           return false;
         }
@@ -839,9 +848,27 @@ class GeofencePunchHandler {
           method == 'GeofenceAuto' ||
           method == 'WiFi';
       debugPrint('[GF_MON] ${zone.id}: skip $direction — duplicate (source: $method)');
+      // LOCAL-SERVER DIVERGENCE (strengthened 2026-08-17): the server says
+      // the opposite of our local state — typically an offline OUT queued
+      // but never synced (bad connectivity).  A silent echo here leaves the
+      // user stuck: the queued punch must be flushed NOW so the next OS
+      // event (15-min catch-up ENTER) punches through.  Tell the user.
+      final localType = prefs.getString('gf_last_punch_type');
+      final diverged = localType != null && localType != direction;
       await _persistPunchState(prefs, direction, now, zone.name, zoneId: zone.id);
       if (direction == 'In') await _clearShiftEndedFlag(prefs);
       if (ownSource) {
+        if (diverged) {
+          debugPrint('[GF_MON] ${zone.id}: local=$localType vs server=$direction'
+              ' — flushing offline queue');
+          try {
+            await OfflineSyncManager.scheduleNow();
+          } catch (e) {
+            debugPrint('[GF_MON] offline flush failed: $e');
+          }
+          await _emitSkipNotification(direction, zone,
+              'Server already shows $direction — offline punches syncing');
+        }
         _emit('skipped', zone: zone, direction: direction,
             reason: 'Already $direction (own echo)');
         return;
@@ -873,6 +900,8 @@ class GeofencePunchHandler {
             'In', fix.latitude, fix.longitude);
         if (!queued) {
           debugPrint('[GF_MON] ${zone.id}: queue unavailable — IN lost');
+        } else {
+          await _showPunchNotification('In', zone.name, queued: true);
         }
         return;
       }
@@ -892,6 +921,9 @@ class GeofencePunchHandler {
         reason: 'OS ${direction == 'In' ? 'enter' : 'exit'} event verified');
 
     bool punchAccepted = false;
+    // True when acceptance came from the OFFLINE QUEUE (network failure) —
+    // the notification must not claim the server recorded the punch.
+    var queued = false;
     try {
       final punchResp = await dio.post(ApiEndpoints.punch, data: {
         'Method': 'GeofenceAuto',
@@ -920,18 +952,21 @@ class GeofencePunchHandler {
         }
       } else if (await _queueOfflinePunch(direction, lat, lng)) {
         punchAccepted = true;
+        queued = true;
       }
     } catch (e) {
       debugPrint('[GF_MON] ${zone.id}: punch error: $e');
       if (await _queueOfflinePunch(direction, lat, lng)) {
         punchAccepted = true;
+        queued = true;
       }
     }
 
     if (punchAccepted) {
       await _persistPunchState(prefs, direction, now, zone.name, zoneId: zone.id);
-      debugPrint('[GF_MON] ${zone.id}: $direction SUCCESS');
-      await _showPunchNotification(direction, zone.name);
+      debugPrint('[GF_MON] ${zone.id}: $direction SUCCESS'
+          '${queued ? ' (queued offline — will sync)' : ''}');
+      await _showPunchNotification(direction, zone.name, queued: queued);
       if (direction == 'In') {
         await _clearShiftEndedFlag(prefs);
       }
@@ -1066,15 +1101,34 @@ class GeofencePunchHandler {
       // 2x-accuracy margin delayed OUT until dist > radius + up to 250m)
       // — AND a second confirmatory fix (jump guard: wifi-derived fixes
       // can sit 300-500m off, a single outside fix must never punch the
-      // user out while they are still inside the office).
-      if (fixDist == null || fixDist <= zone.radius + _outSlackM) return null;
-      final f = fix!;
+      // user out while they are still inside the office).  Both fixes
+      // carry the accuracy TRUST FLOOR (strengthened 2026-08-17: a fix
+      // claiming accuracy worse than the band cannot corroborate an OUT —
+      // two wifi-blend jumps fabricated a false OUT at 68m beyond the
+      // radius while the user was inside).
+      if (fix == null ||
+          !isOutsideOfficeBand(
+            fix,
+            zoneLatitude: zone.latitude,
+            zoneLongitude: zone.longitude,
+            zoneRadius: zone.radius,
+            slackM: _outSlackM,
+          )) {
+        return null;
+      }
+      final f = fix;
 
       final fix2 = await _freshFix();
       if (fix2 == null) return null; // can't confirm → conservative: no punch
-      final fix2Dist = geo.Geolocator.distanceBetween(
-          fix2.latitude, fix2.longitude, zone.latitude, zone.longitude);
-      if (fix2Dist <= zone.radius + _outSlackM) return null;
+      if (!isOutsideOfficeBand(
+        fix2,
+        zoneLatitude: zone.latitude,
+        zoneLongitude: zone.longitude,
+        zoneRadius: zone.radius,
+        slackM: _outSlackM,
+      )) {
+        return null;
+      }
 
       // Implausible displacement between the two fixes = noise, not movement.
       final moved = geo.Geolocator.distanceBetween(
@@ -1252,14 +1306,25 @@ class GeofencePunchHandler {
     }
   }
 
-  Future<void> _showPunchNotification(String direction, String officeName) async {
+  Future<void> _showPunchNotification(String direction, String officeName,
+      {bool queued = false}) async {
     await _ensureNotifications();
     final isIn = direction == 'In';
+    final title = queued
+        ? (isIn ? 'Auto-Punched In (offline)' : 'Auto-Punched Out (offline)')
+        : (isIn ? 'Auto-Punched In' : 'Auto-Punched Out');
+    final body = queued
+        ? (isIn
+            ? 'IN recorded offline at $officeName — syncing when online'
+            : 'OUT recorded offline from $officeName — syncing when online')
+        : (isIn
+            ? 'Auto-punched IN at $officeName'
+            : 'Auto-punched OUT from $officeName');
     try {
       await _notifications.show(
         994,
-        isIn ? 'Auto-Punched In' : 'Auto-Punched Out',
-        isIn ? 'Auto-punched IN at $officeName' : 'Auto-punched OUT from $officeName',
+        title,
+        body,
         NotificationDetails(
           android: AndroidNotificationDetails(
             'geofence_auto_punch',
