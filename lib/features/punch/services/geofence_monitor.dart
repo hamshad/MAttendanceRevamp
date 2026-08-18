@@ -503,6 +503,24 @@ class GeofencePunchHandler {
   /// today's IN — stale data can fabricate an office visit.
   static const Duration _lastKnownMaxAge = Duration(minutes: 10);
 
+  // ── Pending-exit (missed-OUT) recovery ──────────────────────────────────────
+  // An accepted OS EXIT crossing whose OUT punch could not complete
+  // (no verifiable fix / GPS off / headless processing) is persisted here
+  // and finished by the 15-min containment check — even after the user is
+  // back inside (brief exits, rapid in/out cycles), where fix-based
+  // reconciliation can never confirm.  The punch uses the REAL OS crossing
+  // location (honesty rule) + the server-truth gate; the flag is never
+  // set by spurious batch exits (crossing tolerance gate, see
+  // _handleZoneEvent).
+  static const String _kPendingExitTs = 'gf_pending_exit_ts';
+  static const String _kPendingExitLat = 'gf_pending_exit_lat';
+  static const String _kPendingExitLng = 'gf_pending_exit_lng';
+  static const String _kPendingExitZoneId = 'gf_pending_exit_zone_id';
+
+  /// Garbage-collects a pending exit after this age: the crossing is too
+  /// old to reconstruct honestly.
+  static const Duration _pendingExitMaxAge = Duration(hours: 2);
+
   Future<void> handleEvent(GeofenceCallbackParams params) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
@@ -650,6 +668,54 @@ class GeofencePunchHandler {
         .toList();
     if (zones.isEmpty) return false;
 
+    // ── Pending-exit auto-OUT (missed-OUT recovery) ──────────────────────
+    // An earlier OUT punch failed silently (no fix / offline / queue
+    // unavailable) and was persisted at its honest fix location.  Finish
+    // it NOW — even when the user is already back inside, where the
+    // fix-based branch below can never confirm.  Server-truth gate still
+    // applies (valid only while the server shows In); the flag recycles
+    // through _executePunch until success or the 2h GC.  A user punched
+    // OUT meanwhile clears it (state already correct).
+    final pendingZoneId = prefs.getString(_kPendingExitZoneId);
+    final pendingTsRaw = prefs.getString(_kPendingExitTs);
+    if (pendingZoneId != null && pendingTsRaw != null) {
+      final pendingTs = DateTime.tryParse(pendingTsRaw);
+      final age = pendingTs == null
+          ? Duration.zero
+          : DateTime.now().difference(pendingTs);
+      if (age > _pendingExitMaxAge || pendingTs == null) {
+        debugPrint('[GF_MON] reconcile: pending exit stale '
+            '(${age.inMinutes}m) — dropping');
+        await _clearPendingExit(prefs);
+      } else {
+        final latD = double.tryParse(prefs.getString(_kPendingExitLat) ?? '');
+        final lngD = double.tryParse(prefs.getString(_kPendingExitLng) ?? '');
+        if (latD == null || lngD == null) {
+          await _clearPendingExit(prefs);
+        } else {
+          final zone = _loadZone(prefs, pendingZoneId) ??
+              zones.firstWhere((z) => z.id == pendingZoneId,
+                  orElse: () => zones.first);
+          debugPrint('[GF_MON] reconcile: pending OS exit — auto-OUT at '
+              'stored crossing (${zone.name})');
+          final pendingFix = geo.Position(
+            latitude: latD,
+            longitude: lngD,
+            timestamp: DateTime.now(),
+            accuracy: 0,
+            altitude: 0,
+            altitudeAccuracy: 0,
+            heading: 0,
+            headingAccuracy: 0,
+            speed: 0,
+            speedAccuracy: 0,
+          );
+          await _executePunch(zone, pendingFix, prefs, 'Out');
+          return true;
+        }
+      }
+    }
+
     // First fix: reuse the OS last-known position when fresh — a
     // stationary user inside the office (or at home) never turns on the
     // GPS radio.  Only when the cache says "outside" (or is stale) does
@@ -760,6 +826,25 @@ class GeofencePunchHandler {
     return true;
   }
 
+  /// Persist an OUT punch attempt that failed silently at an honest fix
+  /// location (missed-OUT recovery — the 15-min check will re-run it via
+  /// the server-truth gate; see [_kPendingExitTs]).
+  Future<void> _persistPendingExit(
+      SharedPreferences prefs, geo.Position fix, String zoneId) async {
+    await prefs.setString(_kPendingExitTs, DateTime.now().toIso8601String());
+    await prefs.setString(_kPendingExitLat, fix.latitude.toString());
+    await prefs.setString(_kPendingExitLng, fix.longitude.toString());
+    await prefs.setString(_kPendingExitZoneId, zoneId);
+    debugPrint('[GF_MON] pending exit stored');
+  }
+
+  Future<void> _clearPendingExit(SharedPreferences prefs) async {
+    await prefs.remove(_kPendingExitTs);
+    await prefs.remove(_kPendingExitLat);
+    await prefs.remove(_kPendingExitLng);
+    await prefs.remove(_kPendingExitZoneId);
+  }
+
   Future<void> _handleZoneEvent(
     GeofenceZone zone,
     String direction,
@@ -857,6 +942,7 @@ class GeofencePunchHandler {
       final diverged = localType != null && localType != direction;
       await _persistPunchState(prefs, direction, now, zone.name, zoneId: zone.id);
       if (direction == 'In') await _clearShiftEndedFlag(prefs);
+      if (direction == 'Out') await _clearPendingExit(prefs);
       if (ownSource) {
         if (diverged) {
           debugPrint('[GF_MON] ${zone.id}: local=$localType vs server=$direction'
@@ -892,6 +978,9 @@ class GeofencePunchHandler {
       final lastType = prefs.getString('gf_last_punch_type');
       if (lastType == direction) {
         debugPrint('[GF_MON] ${zone.id}: skip $direction — already $direction (local, offline)');
+        // Offline + local already In + user genuinely left (OS EXIT) →
+        // this OUT would be lost silently.  Persist for the 15-min retry.
+        if (direction == 'Out') await _persistPendingExit(prefs, fix, zone.id);
         return;
       }
       if (direction == 'In') {
@@ -924,6 +1013,13 @@ class GeofencePunchHandler {
     // True when acceptance came from the OFFLINE QUEUE (network failure) —
     // the notification must not claim the server recorded the punch.
     var queued = false;
+    // Missed-OUT recovery: when an OUT punch fails WITHOUT changing state
+    // and WITHOUT notifying the user (silent failure classes), persist the
+    // punch intent at the honest fix location; the 15-min containment check
+    // re-runs it via the server-truth gate even after the user is back
+    // inside (rapid in/out cycles — fix-based reconcile can never confirm
+    // a back-inside user).  Cleared on any successful state convergence.
+    var persistPendingExit = false;
     try {
       final punchResp = await dio.post(ApiEndpoints.punch, data: {
         'Method': 'GeofenceAuto',
@@ -937,6 +1033,7 @@ class GeofencePunchHandler {
         punchAccepted = true;
       } else {
         debugPrint('[GF_MON] ${zone.id}: punch ${punchResp.statusCode} — ${punchResp.data}');
+        if (direction == 'Out') persistPendingExit = true;
       }
     } on DioException catch (e) {
       debugPrint('[GF_MON] ${zone.id}: punch DioException: ${e.message}');
@@ -953,12 +1050,16 @@ class GeofencePunchHandler {
       } else if (await _queueOfflinePunch(direction, lat, lng)) {
         punchAccepted = true;
         queued = true;
+      } else if (direction == 'Out') {
+        persistPendingExit = true;
       }
     } catch (e) {
       debugPrint('[GF_MON] ${zone.id}: punch error: $e');
       if (await _queueOfflinePunch(direction, lat, lng)) {
         punchAccepted = true;
         queued = true;
+      } else if (direction == 'Out') {
+        persistPendingExit = true;
       }
     }
 
@@ -972,6 +1073,9 @@ class GeofencePunchHandler {
       }
       _emit('punch_success', zone: zone, direction: direction,
           reason: '$direction via native geofence');
+      if (direction == 'Out') await _clearPendingExit(prefs);
+    } else if (persistPendingExit) {
+      await _persistPendingExit(prefs, fix, zone.id);
     }
   }
 

@@ -2,11 +2,14 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:native_geofence/native_geofence.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
 import '../../../core/offline/offline_sync_manager.dart';
+import '../../../core/utils/constants.dart';
+import '../../../models/offline_punch.dart';
 import '../../../models/shift.dart';
 import '../../alignment/headless_alignment_worker.dart';
 import '../../tracking/services/field_tracking_service.dart';
@@ -38,6 +41,19 @@ const _kAlarmChannel = MethodChannel('com.mattendance.mattendance_mobile/geofenc
 @pragma('vm:entry-point')
 void geofenceWorkmanagerCallback() {
   Workmanager().executeTask((taskName, inputData) async {
+    // Hive init for the offline punch queue — headless isolates (containment
+    // / alignment / sync tasks) need the queue box BEFORE any punch POST can
+    // fall back to it.  Without this, a headless OUT with a failed POST
+    // silently lost the punch (the queue call threw).  Mirrors the
+    // background-service entrypoint; cheap when run repeatedly.
+    try {
+      await Hive.initFlutter();
+      Hive.registerAdapter(OfflinePunchAdapter());
+      await Hive.openBox<OfflinePunch>(AppConstants.offlinePunchBox);
+      await Hive.openBox(AppConstants.cacheBox);
+    } catch (e) {
+      debugPrint('[GF_SCHED] Hive init failed: $e');
+    }
     // ── Offline queue sync tasks ────────────────────────────────────────
     // Route to the offline sync manager BEFORE geofence logic.  These tasks
     // sync queued punches when connectivity returns, then close.

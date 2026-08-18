@@ -326,7 +326,7 @@ class _GeofenceSettingsScreenState
               onTap: _miRestrictionsConfirmed
                   ? null
                   : () async {
-                      await _requireMiRestrictionsOff();
+                      await ensureMiRestrictionsOff(context);
                       await _refreshOemState();
                     },
             ),

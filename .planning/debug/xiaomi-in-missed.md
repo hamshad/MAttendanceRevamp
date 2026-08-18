@@ -36,6 +36,18 @@ started: first noticed in current testing session; OUT code path unchanged since
   timestamp: 2026-08-17
 
 ## Evidence
+- timestamp: 2026-08-18
+  checked: geofenceScheduler.geofenceWorkmanagerCallback (headless WorkManager isolate)
+  found: Hive was NEVER initialized in the geofence WorkManager callback → any headless punch POST-fail → _queueOfflinePunch threw on Hive box open → OUT silently LOST without notification (exact 'no OUT' class on Samsung/Nothing). Background-service entrypoint had init; WorkManager path did not. FIXED: root-zone `_initHive` now runs in the callback before any punch; scheduled/complete ignore repeats.
+  implication: headless OUT after OS EXIT with bad/missing network = silent total loss in every build before this. Queue now survives; server-truth gate retries (PunchCoordinator) instead of throwing.
+- timestamp: 2026-08-18
+  checked: _executePunch silent-failure branches (geofence_monitor.dart)
+  found: two more silent-OUT classes: (a) undecided-offline skip (`lastType == direction` return) while actually OUT-side — OUT silently dropped when network dead; (b) POST non-2xx / DioException without queue → OUT dropped silently (no state change, no notification) → next ENTER judged duplicate (server In + local In) → missed-IN class.
+  implication: FIXED via pending-exit recovery: silent OUT failures persist the honest crossing fix; 15-min reconcile auto-OUTs via server-truth gate even when user already back inside (fix-based branch could never confirm); flag recycles until success or 2h GC; cleared on any successful IN/OUT convergence. Verified: all 180 tests green, 0 analyzer errors.
+- timestamp: 2026-08-18
+  checked: MI battery restrictions + aggressive-OEM list (commit 9ee84a8, 8b21ada)
+  found: aggressive-inexact-alarm list narrowed to MI family ONLY (xiaomi/redmi/poco); Samsung/Nothing/OnePlus removed (field-proven fine without). MI gate MANDATORY both enable paths: auto-punch cannot enable until Auto-start + battery saver + battery optimization off confirmed (`gf_oem_restrictions_confirmed`). MIUI per-app battery state not programmatically readable → user-verified, honest. Samsung/Nothing = plain inexact alarm (works, less drain).
+  implication: MFI field evidence (xiaomi-in-missed) closed by design: MI now gates cranky backgrounding explicitly; non-MI never sees aggressive path.
 - timestamp: 2026-08-17
   checked: User field session (build c253932, ~same week)
   found: THREE user-visible failures: (1) FALSE 'Auto-Punched Out' notification ~8 min after leaving while physically inside + no OUT actually registered (bad internet → queued only, server never recorded it, yet UI claimed 'Auto-Punched OUT'); (2) no IN on return — server still 'In' → return ENTER judged duplicate → silently skipped, queue never flushed; (3) earlier event: false OUT at ~68m beyond radius while confidently INSIDE (wifi-blend accuracy 120m), plus ~30 min no reconciliation → manual IN.
@@ -54,7 +66,7 @@ started: first noticed in current testing session; OUT code path unchanged since
   implication: delta is server payload/data/date or environment — evidence must come from the device (logcat) or server response
 
 ## Resolution
-root_cause: (pending — evening test evidence)
-fix: (pending)
-verification: (pending)
-files_changed: []
+root_cause: MULTI-CLASS: (DONE) WorkManager headless Hive gap → silent OUT loss; silent OUT failure branches → duplicate-divergence missed-IN; MI battery backgrounding behind user's back (design gate). (PENDING) server-truth gate OUT rejection — evening field test evidence; Xiaomi WM headless IN throttle — exemptions retest.
+fix: (committed 2026-08-17: trust floor, honest queue, divergence flush, FGS lifecycle, MI aggressive list+gate; 2026-08-18 in-flight: geofence WorkManager callback Hive init + pending-exit auto-OUT recovery)
+verification: flutter analyze 0 errors, 180/180 tests green
+files_changed: [lib/features/punch/services/geofence_monitor.dart, lib/features/punch/services/geofence_scheduler.dart, lib/features/settings/screens/geofence_settings_screen.dart]
