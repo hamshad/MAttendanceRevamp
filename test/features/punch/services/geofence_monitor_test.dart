@@ -13,7 +13,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Fake notifications platform — records which notification ids were shown
-// (skip-notification hygiene: own-source echoes silent, id 995, cooldown).
+// (notification hygiene: only real, server-recorded punches notify — id
+// 994 — plus client-site prompts; skips and offline queues are silent).
 // ═══════════════════════════════════════════════════════════════════════
 
 class _FakeNotifications extends AndroidFlutterLocalNotificationsPlugin
@@ -974,10 +975,11 @@ void main() {
       expect(notifications.shown.where((id) => id == 995), isEmpty);
     });
 
-    test('real other-source duplicate (Biometric) → notification id 995',
+    test('real other-source duplicate (Biometric) → silent skip, no notification',
         () async {
-      // A REAL duplicate — user punched via the biometric machine → tell
-      // them, using id 995 (999 is reserved for the permission alert).
+      // A REAL duplicate — user punched via the biometric machine. Still no
+      // notification: skip notifs were removed (notification noise — only
+      // real punches notify; the homepage punch state shows the truth).
       SharedPreferences.setMockInitialValues(_basePrefs());
       fakeGeo.position = _fixAt(0.0002, 0.0002);
       mock.isPunchedIn = true; // default punchMethod: Biometric
@@ -986,31 +988,27 @@ void main() {
           .handleEvent(_params(_officeId, GeofenceEvent.enter));
 
       expect(mock.punchCalls, 0);
-      expect(notifications.shown, contains(995));
+      expect(notifications.shown.where((id) => id == 995), isEmpty);
+      expect(notifications.shown.where((id) => id == 994), isEmpty);
     });
 
-    test('skip notification rate-limited per zone+direction (30 min)',
-        () async {
+    test('repeated duplicates → always silent, no notifications', () async {
       SharedPreferences.setMockInitialValues({
         ..._basePrefs(),
         'gf_zone_ids': [_officeId, 'office_2'],
         ..._zoneMeta('office_2'),
       });
       fakeGeo.position = _fixAt(0.0002, 0.0002);
-      mock.isPunchedIn = true; // Biometric → notifiable duplicate
+      mock.isPunchedIn = true; // Biometric → duplicate
 
       final h = GeofencePunchHandler.forTest(_dioWith(mock));
       await h.handleEvent(_params(_officeId, GeofenceEvent.enter));
-      expect(notifications.shown.where((id) => id == 995).length, 1);
-
-      // Second duplicate for the SAME zone+direction within the window →
-      // suppressed (cooldown key from the first notification).
       await h.handleEvent(_params(_officeId, GeofenceEvent.enter));
-      expect(notifications.shown.where((id) => id == 995).length, 1);
-
-      // Different zone → separate cooldown slot, not suppressed.
       await h.handleEvent(_params('office_2', GeofenceEvent.enter));
-      expect(notifications.shown.where((id) => id == 995).length, 2);
+
+      expect(mock.punchCalls, 0);
+      expect(notifications.shown.where((id) => id == 995), isEmpty);
+      expect(notifications.shown.where((id) => id == 994), isEmpty);
     });
   });
 

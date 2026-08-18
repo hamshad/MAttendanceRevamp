@@ -952,21 +952,17 @@ class GeofencePunchHandler {
           } catch (e) {
             debugPrint('[GF_MON] offline flush failed: $e');
           }
-          await _emitSkipNotification(direction, zone,
-              'Server already shows $direction — offline punches syncing');
         }
         _emit('skipped', zone: zone, direction: direction,
             reason: 'Already $direction (own echo)');
         return;
       }
-      await _emitSkipNotification(direction, zone,
-          'Already punched $direction via $method');
+      _emit('skipped', zone: zone, direction: direction,
+          reason: 'Already $direction via $method');
       return;
     }
     if (verdict == PunchCheck.blocked) {
       debugPrint('[GF_MON] ${zone.id}: skip $direction — blocked by server state');
-      await _emitSkipNotification(
-          direction, zone, direction == 'Out' ? 'No IN punch today' : 'Break in progress');
       return;
     }
     if (verdict == PunchCheck.undecided) {
@@ -989,8 +985,6 @@ class GeofencePunchHandler {
             'In', fix.latitude, fix.longitude);
         if (!queued) {
           debugPrint('[GF_MON] ${zone.id}: queue unavailable — IN lost');
-        } else {
-          await _showPunchNotification('In', zone.name, queued: true);
         }
         return;
       }
@@ -1067,7 +1061,13 @@ class GeofencePunchHandler {
       await _persistPunchState(prefs, direction, now, zone.name, zoneId: zone.id);
       debugPrint('[GF_MON] ${zone.id}: $direction SUCCESS'
           '${queued ? ' (queued offline — will sync)' : ''}');
-      await _showPunchNotification(direction, zone.name, queued: queued);
+      // Real punches only — queued/offline confirmations stay silent (the
+      // punch is NOT server-recorded yet; a success-style banner would lie,
+      // and the user asked for minimal notifications. Offline screen shows
+      // pending queue state.)
+      if (!queued) {
+        await _showPunchNotification(direction, zone.name);
+      }
       if (direction == 'In') {
         await _clearShiftEndedFlag(prefs);
       }
@@ -1362,68 +1362,13 @@ class GeofencePunchHandler {
     } catch (_) {}
   }
 
-  /// Informs the user why the punch was skipped — always a short, direct
-  /// message, never a big block of text.
-  /// Cooldown for skip notifications — at most one per zone+direction per
-  /// window, whatever the cause.  (The big spam source — own-source echoes —
-  /// is silenced before this point; this bounds the rest.)
-  static const Duration _skipNotifCooldown = Duration(minutes: 30);
-
-  /// Informs the user why the punch was skipped — always a short, direct
-  /// message, never a big block of text.  Rate-limited per zone+direction
-  /// (see [_skipNotifCooldown]); own-source echoes never reach here.
-  /// Notification ID 995 — NOT 999 (that id is reserved for the
-  /// permission alert) and not 998 (no-connectivity warning).
-  Future<void> _emitSkipNotification(
-      String direction, GeofenceZone zone, String reason) async {
-    _emit('skipped', zone: zone, direction: direction, reason: reason);
-    final prefs = await SharedPreferences.getInstance();
-    final cooldownKey = 'gf_skip_notif_${zone.id}_$direction';
-    final lastShown = prefs.getString(cooldownKey);
-    if (lastShown != null) {
-      final last = DateTime.tryParse(lastShown);
-      if (last != null &&
-          DateTime.now().difference(last) < _skipNotifCooldown) {
-        debugPrint('[GF_MON] skip notification cooldown active ($cooldownKey)');
-        return;
-      }
-    }
-    await prefs.setString(cooldownKey, DateTime.now().toIso8601String());
-
-    await _ensureNotifications();
-    try {
-      await _notifications.show(
-        995,
-        'Punch skipped',
-        reason,
-        NotificationDetails(
-          android: AndroidNotificationDetails(
-            'geofence_auto_punch',
-            'Geofence Auto-Punch',
-            importance: Importance.high,
-            priority: Priority.high,
-          ),
-        ),
-      );
-    } catch (e) {
-      debugPrint('[GF_MON] Skip notification failed: $e');
-    }
-  }
-
-  Future<void> _showPunchNotification(String direction, String officeName,
-      {bool queued = false}) async {
+  Future<void> _showPunchNotification(String direction, String officeName) async {
     await _ensureNotifications();
     final isIn = direction == 'In';
-    final title = queued
-        ? (isIn ? 'Auto-Punched In (offline)' : 'Auto-Punched Out (offline)')
-        : (isIn ? 'Auto-Punched In' : 'Auto-Punched Out');
-    final body = queued
-        ? (isIn
-            ? 'IN recorded offline at $officeName — syncing when online'
-            : 'OUT recorded offline from $officeName — syncing when online')
-        : (isIn
-            ? 'Auto-punched IN at $officeName'
-            : 'Auto-punched OUT from $officeName');
+    final title = isIn ? 'Auto-Punched In' : 'Auto-Punched Out';
+    final body = isIn
+        ? 'Auto-punched IN at $officeName'
+        : 'Auto-punched OUT from $officeName';
     try {
       await _notifications.show(
         994,
