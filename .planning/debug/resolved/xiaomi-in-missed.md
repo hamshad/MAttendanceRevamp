@@ -1,6 +1,6 @@
 ---
 status: resolved
-trigger: "User: Xiaomi IN didn't work (Samsung/Nothing fine) + auto geofence OUT didn't work on ANY phone mid-shift (punched In, IN landed same day, nothing at 18 min). Build c253932. FOLLOW-UP (2026-08-19): auto-IN only works when app is OPEN, never backgrounded, on ALL devices; user sits INSIDE office hours with no IN."
+trigger: "CORRECTED 2026-08-19: User: auto-IN not working on ANY device since the 08-17/08-18 update — only works when app is OPEN, never backgrounded; user sits INSIDE office hours with no IN. Auto geofence OUT worked fine on all devices mid-shift. (Original 08-17 trigger claimed Xiaomi-only IN miss + OUT broken on any phone — both superseded by user correction.)"
 created: 2026-08-17T00:00:00Z
 updated: 2026-08-19T00:00:00Z
 ---
@@ -12,11 +12,11 @@ expecting: one of: (a) 'blocked by server state' → todayStatus says no punches
 next_action: evening test evidence (logcat); Xiaomi exemptions retest; OUT walk with bad internet (expect honest queued notification + sync recovery on return-IN)
 
 ## Symptoms
-expected: headless OUT at walk-out (stream/OS EXIT/net) on every phone, punched In
-actual: NO OUT on any phone (Samsung + Nothing), mid-shift, checked 18 min after leaving; IN landed same day on those phones; Xiaomi: IN itself missed (separate thread)
-errors: nothing visible in UI (no skip notification seen)
-reproduction: build c253932, punched In, leave office during shift, wait 18+ min, no OUT
-started: first noticed in current testing session; OUT code path unchanged since it last worked (61m Nothing OUT, Samsung cycle)
+expected: headless auto-IN on arrival at office (OS ENTER or 15-min containment catch-up) on every phone, punched Out; auto-OUT at walk-out
+actual: auto-IN NOT working on ANY device in background — only when app opened (foreground Hive/bootstrapping ran); no IN for hours while inside office radius. Auto-OUT worked on ALL devices mid-shift. (Original 08-17 entry recorded 'NO OUT on any phone (Samsung + Nothing)' — superseded by user correction 2026-08-19: OUT was working.)
+errors: 08-19 emulator repro: `[GF_SCHED] Containment check failed: HiveError: Box not found`; server 400 'Geofence auto-punch already recorded within the last 5 minutes'
+reproduction: build c253932+, punched Out, arrive/remain inside office radius with app backgrounded or killed, wait 20+ min, no IN
+started: since 08-17/08-18 update (pending-exit auto-OUT era); IN-missed class observed fleet-wide
 
 ## Eliminated
 - hypothesis: shift-window gate blocks OUT outside window
