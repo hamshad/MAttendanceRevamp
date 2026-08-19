@@ -1040,6 +1040,17 @@ class GeofencePunchHandler {
         if (resp.data is Map && resp.data['message'] is String) {
           final msg = resp.data['message'] as String;
           debugPrint('[GF_MON] ${zone.id}: server rejected — $msg');
+          // EXCEPTION: the GeofenceAuto rate limit ('already recorded
+          // within the last 5 minutes', e.g. a pending-exit OUT completed
+          // moments before the return ENTER).  Time-bounded → the punch is
+          // retryable: for IN, local state stays Out (nothing persisted —
+          // the interceptor must not mirror it either) and the
+          // containment/poll net retries until the window passes.  Other
+          // 4xx stay permanent.
+          if (direction == 'In' && msg.contains('already recorded within')) {
+            debugPrint('[GF_MON] ${zone.id}: transient geo auto rate limit '
+                '— reconcile net will retry IN');
+          }
         }
       } else if (await _queueOfflinePunch(direction, lat, lng)) {
         punchAccepted = true;

@@ -25,6 +25,17 @@ class PunchStateInterceptor extends Interceptor {
       final body = error.response?.data as Map?;
       final msg = (body?['message'] as String? ?? '').toLowerCase();
       if (msg.contains('duplicate') || msg.contains('already recorded')) {
+        // Transient GeofenceAuto rate limit (server: at most one auto-punch
+        // per 5 min — e.g. a pending-exit OUT completed just before the
+        // return ENTER): the server REJECTED this punch, it did NOT accept
+        // it.  Mirroring state here would fake a local 'In' while the
+        // server stays 'Out' — the reconcile net then skips the IN path
+        // and the missed-IN becomes permanent.  Skip the mirror; the local
+        // state stays Out and the containment/poll net retries.
+        if (msg.contains('within the last')) {
+          handler.next(error);
+          return;
+        }
         // Server already accepted the punch — sync state
         _syncDirection(error.requestOptions);
       }

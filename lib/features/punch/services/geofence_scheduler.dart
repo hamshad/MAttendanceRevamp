@@ -41,16 +41,25 @@ const _kAlarmChannel = MethodChannel('com.mattendance.mattendance_mobile/geofenc
 @pragma('vm:entry-point')
 void geofenceWorkmanagerCallback() {
   Workmanager().executeTask((taskName, inputData) async {
-    // Hive init for the offline punch queue — headless isolates (containment
-    // / alignment / sync tasks) need the queue box BEFORE any punch POST can
-    // fall back to it.  Without this, a headless OUT with a failed POST
-    // silently lost the punch (the queue call threw).  Mirrors the
-    // background-service entrypoint; cheap when run repeatedly.
+    // Hive init for the offline punch queue AND the geofence settings box —
+    // headless isolates (containment / alignment / sync tasks) need them
+    // BEFORE any code path touches Hive:
+    //   - offlinePunchBox: a headless punch POST-fail falls back to the queue
+    //     (missing box = silent punch loss),
+    //   - geofenceSettingsBox: GeofenceMonitor.isEnabled (the re-register /
+    //     reconcile gate) reads it — missing box made the ENTIRE 15-min
+    //     containment net throw HiveError on every fire (no catch-up ENTER,
+    //     no reconcile, no recovery for a rate-limited / deferred IN),
+    //   - cacheBox / shiftsBox / tokenBackupBox: mirrored from main.dart for
+    //     the sync / shift paths.  Cheap when run repeatedly.
     try {
       await Hive.initFlutter();
       Hive.registerAdapter(OfflinePunchAdapter());
       await Hive.openBox<OfflinePunch>(AppConstants.offlinePunchBox);
       await Hive.openBox(AppConstants.cacheBox);
+      await Hive.openBox(AppConstants.geofenceSettingsBox);
+      await Hive.openBox(AppConstants.shiftsBox);
+      await Hive.openBox(AppConstants.tokenBackupBox);
     } catch (e) {
       debugPrint('[GF_SCHED] Hive init failed: $e');
     }

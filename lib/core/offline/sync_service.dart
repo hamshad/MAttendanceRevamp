@@ -66,10 +66,22 @@ class SyncService {
           synced++;
         } on DioException catch (e) {
           if (e.type == DioExceptionType.badResponse) {
-            punch.retryCount = 99;
-            punch.errorMessage =
-                (e.response?.data as Map?)?['message']?.toString() ??
-                    'Rejected by server';
+            final message =
+                (e.response?.data as Map?)?['message']?.toString() ?? '';
+            // GeofenceAuto transient rate limit ('...already recorded within
+            // the last 5 minutes') is NOT a permanent rejection — the punch
+            // stays valid, it just hit the per-source anti-double window.
+            // Bump retry instead of capping at 99 (capped entries are never
+            // flushed again → the offline IN would be lost forever).
+            if (message.contains('within the last')) {
+              punch.retryCount++;
+              punch.errorMessage = 'Transient rate limit — will retry';
+            } else {
+              punch.retryCount = 99;
+              punch.errorMessage = message.isEmpty
+                  ? 'Rejected by server'
+                  : message;
+            }
           } else {
             punch.retryCount++;
             punch.errorMessage = 'Network error — will retry';

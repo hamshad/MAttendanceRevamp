@@ -816,6 +816,18 @@ class WifiBackgroundWorker {
       if (body is Map && body['message'] is String) {
         final msg = body['message'] as String;
         if (msg.contains('already recorded') || msg.contains('Duplicate')) {
+          // EXCEPTION: the GeofenceAuto transient rate limit ('...already
+          // recorded within the last 5 minutes') is NOT a duplicate — the
+          // server REJECTED this punch.  Treating it as one would fake a
+          // local punch state (e.g. 'In' while the server stays 'Out') and
+          // suppress every later retry → user stays punched-out inside the
+          // office for hours (2026-08-19 field report).  Time-bounded: the
+          // next poll retries until the window passes.
+          if (msg.contains('within the last')) {
+            debugPrint('[WIFI_BG] Transient geo auto rate limit — '
+                'NOT a duplicate; retrying on next poll');
+            return false;
+          }
           debugPrint('[WIFI_BG] Duplicate detected — syncing state');
           await _setLastPunchType(direction);
           if (direction == 'In') {
