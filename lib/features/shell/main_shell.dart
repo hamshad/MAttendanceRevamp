@@ -439,7 +439,42 @@ class _MainShellState extends ConsumerState<MainShell>
     if (mounted) {
       ref.read(fieldTrackingRunningProvider.notifier).state = alreadyRunning;
     }
-    if (alreadyRunning) return;
+    if (alreadyRunning) {
+      // The background service is already up — but it may have been started
+      // by the geofence or WiFi paths (initState runs _initGeofence /
+      // _initWifiAuto first), which never touch `field_tracking_enabled`.
+      // If the user is punched in and tracking is permitted (no fresh punch
+      // transition to set the flag — e.g. app reopened mid-shift, or
+      // already-punched-in at launch), the ping timer would silently gate on
+      // the missing flag and no pings would ever fire while the UI claims
+      // "Tracking Active".  Repair the flag here; upgrade a keep-alive-mode
+      // service (geofence-only FGS) to the full combined service.
+      final perms = ref.read(accessPermissionsProvider).value;
+      final status = ref.read(attendanceStatusProvider).value;
+      final shouldTrack =
+          perms?.allowFieldTracking == true && status?.isPunchedIn == true;
+      if (shouldTrack) {
+        final prefs = await SharedPreferences.getInstance();
+        final wasEnabled = prefs.getBool('field_tracking_enabled') ?? false;
+        if (!wasEnabled) {
+          debugPrint('SHELL_FT: service already running, punched in — '
+              'enabling field tracking pings');
+          await prefs.setBool('field_tracking_enabled', true);
+          // A keep-alive isolate reads gf_keep_alive_mode at startup and runs
+          // LIGHT (no ping timer).  Clear it and restart so the full combined
+          // entrypoint takes over.
+          final keepAliveMode =
+              prefs.getBool(OemKeepAliveService.keepAliveModeKey) ?? false;
+          if (keepAliveMode) {
+            debugPrint('SHELL_FT: keep-alive service active — '
+                'upgrading to full combined service');
+            await OemKeepAliveService.stop();
+            await FieldTrackingService.start();
+          }
+        }
+      }
+      return;
+    }
 
     // Request permission once here — never inside the service, as that would
     // block the Riverpod punch-flow listener.
