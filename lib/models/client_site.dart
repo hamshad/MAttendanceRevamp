@@ -24,6 +24,15 @@ class ClientSite {
         radiusMeters: j['radiusMeters'] as int,
       );
 
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'siteName': siteName,
+        'address': address,
+        'latitude': latitude,
+        'longitude': longitude,
+        'radiusMeters': radiusMeters,
+      };
+
   /// Human-readable label for the dropdown.
   String get displayName =>
       address != null ? '$siteName — $address' : siteName;

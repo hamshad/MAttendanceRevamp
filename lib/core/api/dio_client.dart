@@ -22,6 +22,10 @@ class DioClient {
   // Prevents concurrent refresh loops
   bool _isRefreshing = false;
 
+  // Guards against spawning multiple "wait for other isolate" loops for
+  // the same refresh window.
+  bool _waitingForLock = false;
+
   // Requests that arrived while a refresh was already in progress
   final List<({RequestOptions options, ErrorInterceptorHandler handler})>
       _pendingRequests = [];
@@ -83,10 +87,20 @@ class DioClient {
     RequestOptions options,
     RequestInterceptorHandler handler,
   ) async {
-    final token = await _tokenStorage.getAccessToken();
+    String? token = await _tokenStorage.getAccessToken();
+    if (token == null && !options.path.contains('/auth/')) {
+      // Retry once — guards against transient FlutterSecureStorage failures
+      // that would cascade into forceLogout if we synthesised a 401 here.
+      token = await _tokenStorage.getAccessToken();
+    }
     if (token != null) {
       options.headers['Authorization'] = 'Bearer $token';
     }
+    // If token is still null for a non-auth endpoint, let the request through
+    // without auth header. The server returns a real 401 if auth is required,
+    // and our 401 interceptor handles refresh properly using the refresh token.
+    // Previously we synthesised a 401 here which could cascade into
+    // forceLogout on transient storage failures.
 
     options.headers['X-Client-Type'] = 'mobile';
     options.headers['X-Platform'] = _platform;
@@ -141,23 +155,58 @@ class DioClient {
     if (!await _tokenStorage.acquireRefreshLock()) {
       AppLogger.w('[AUTH] 401: Another isolate is already refreshing tokens. Queuing request.');
       _pendingRequests.add((options: error.requestOptions, handler: handler));
-      
-      // Periodically check if the lock is released or if we should try ourselves
-      _waitForOtherIsolateRefresh(error, handler);
+
+      // Only start ONE wait loop for all queued requests.  When the other
+      // isolate's refresh completes, we re-read tokens and retry everything.
+      if (!_waitingForLock) {
+        _waitingForLock = true;
+        _waitForOtherIsolateRefresh();
+      }
       return;
     }
 
+    // Snapshot of the mirror timestamp BEFORE our refresh attempt.  On a
+    // refresh 400 we compare against this to detect that another isolate
+    // refreshed successfully while we were trying (concurrent-refresh race)
+    // so we can adopt its tokens instead of force-logging-out.
+    final refreshStartTs = await _mirrorTokenTs();
+
+    // Refresh token we actually sent — captured outside try so the catch
+    // block can compare against the current pair on a 400.
+    String? sentRefreshToken;
+
     try {
-      final refreshToken = await _tokenStorage.getRefreshToken();
-      final expiredAccessToken = await _tokenStorage.getAccessToken();
+      String? refreshToken = await _tokenStorage.getRefreshToken();
+      String? expiredAccessToken = await _tokenStorage.getAccessToken();
 
       if (refreshToken == null) {
-        AppLogger.w('[AUTH] No refresh token — forcing logout');
+        // Retry once — could be transient FlutterSecureStorage failure
+        AppLogger.w('[AUTH] Refresh token null — retrying read...');
+        await Future.delayed(const Duration(milliseconds: 100));
+        refreshToken = await _tokenStorage.getRefreshToken();
+        if (expiredAccessToken == null) {
+          expiredAccessToken = await _tokenStorage.getAccessToken();
+        }
+      }
+
+      if (refreshToken == null) {
+        if (expiredAccessToken != null ||
+            await _tokenStorage.getAccessToken() != null) {
+          // Access token exists but refresh missing — partial state, don't
+          // force logout. The request fails but session survives.
+          AppLogger.w('[AUTH] No refresh token but access token exists — retaining session');
+          _isRefreshing = false;
+          await _tokenStorage.releaseRefreshLock();
+          _rejectPendingRequests(error, transient: true);
+          return handler.next(_asTransient(error));
+        }
+        AppLogger.w('[AUTH] No refresh token — clearing session');
         await _handleRefreshFailure(error, handler);
         return;
       }
 
       AppLogger.i('[AUTH] Starting token refresh...');
+      sentRefreshToken = refreshToken;
       
       // Implement retry for the refresh call itself (max 3 attempts)
       String? newAccess;
@@ -223,57 +272,155 @@ class DioClient {
           e.response!.statusCode != null &&
           e.response!.statusCode! >= 500;
 
+      // Only 400 Bad Request from the refresh endpoint means the token was
+      // definitively rejected (revoked / invalid). All other errors are
+      // transient and MUST NOT force-logout the user.
+      final isTokenRejected = e is DioException &&
+          e.response != null &&
+          e.response!.statusCode == 400;
+
       if (isNetworkError || isServerError) {
         AppLogger.w('[AUTH] Refresh failed due to network/server error. Session retained.');
         _rejectPendingRequests(e);
         return handler.next(_mapError(e));
       }
 
-      // Fatal refresh failure (token revoked, 400 Bad Request, etc.)
-      AppLogger.e('[AUTH] Refresh FAILED (fatal) — clearing session', e);
-      await _handleRefreshFailure(error, handler);
+      if (isTokenRejected) {
+        // A 400 from /auth/refresh means the refresh token we sent was
+        // definitively rejected.  BUT this can also be the loser's outcome
+        // in a concurrent-refresh race: another isolate refreshed with the
+        // SAME refresh token a moment earlier, the server rotated it, and our
+        // attempt failed.  Before force-logging-out, check whether the token
+        // pair actually changed while we were refreshing — if so, adopt the
+        // newer pair and retry instead of destroying the session.
+        final adopted = await _adoptNewerTokensIfRefreshed(
+          refreshStartTs: refreshStartTs,
+          attemptedRefresh: sentRefreshToken ?? '',
+          error: error,
+          handler: handler,
+        );
+        if (adopted) return;
+
+        AppLogger.e('[AUTH] Refresh token rejected by server (400) — clearing session', e);
+        await _handleRefreshFailure(error, handler);
+        return;
+      }
+
+      // Catch-all for ambiguous errors (429, 403, parse failures, etc.).
+      // Never force-logout on errors we can't positively identify as
+      // token-revocation — the next request may succeed.
+      AppLogger.w('[AUTH] Refresh failed (non-fatal) — retaining session', e);
+      _rejectPendingRequests(error, transient: true);
+      return handler.next(_asTransient(error));
     }
   }
 
   Future<void> _handleRefreshFailure(DioException error, ErrorInterceptorHandler handler) async {
     await _tokenStorage.clearTokens();
+    // NOTE: Hive backup is intentionally preserved here.  It survives an
+    // accidental/race-induced clear and acts as a recovery source in
+    // AuthProvider._tryAutoLogin (restore + re-validate).  Only explicit
+    // user logout calls clearBackup().
     _isRefreshing = false;
     _rejectPendingRequests(error);
     _notifySessionExpired();
     handler.next(_mapError(error));
   }
 
-  /// Helper to wait for another isolate's refresh to complete.
-  void _waitForOtherIsolateRefresh(DioException error, ErrorInterceptorHandler handler) async {
-    int attempts = 0;
-    while (attempts < 10) {
-      await Future.delayed(const Duration(seconds: 3));
+  /// Timestamp of the token mirror before we started refreshing.  Used to
+  /// detect whether another isolate completed a refresh while we were trying.
+  Future<int> _mirrorTokenTs() async {
+    try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.reload();
-      if (!prefs.containsKey(TokenStorage.bgRefreshLockKey)) {
-        AppLogger.i('[AUTH] Other isolate finished refresh. Syncing and retrying.');
-        final newAccess = await _tokenStorage.getAccessToken();
-        if (newAccess != null) {
-          _isRefreshing = false;
-          _flushPendingRequests(newAccess);
-          
-          // Retry THIS request
-          error.requestOptions.headers['Authorization'] = 'Bearer $newAccess';
-          try {
-            final resp = await _dio.fetch(error.requestOptions);
-            return handler.resolve(resp);
-          } catch (e) {
-            return handler.next(e is DioException ? e : error);
-          }
-        }
-        break; 
-      }
-      attempts++;
+      return prefs.getInt(TokenStorage.bgTokenTimestampKey) ?? 0;
+    } catch (_) {
+      return 0;
     }
-    
-    // If we waited too long, try to take over the refresh or fail
+  }
+
+  /// If tokens changed while we were refreshing (another isolate won the
+  /// concurrent-refresh race and rotated the refresh token), adopt the newer
+  /// pair and retry the original request instead of force-logging-out.
+  Future<bool> _adoptNewerTokensIfRefreshed({
+    required int refreshStartTs,
+    required String attemptedRefresh,
+    required DioException error,
+    required ErrorInterceptorHandler handler,
+  }) async {
+    try {
+      await _tokenStorage.releaseRefreshLock();
+      // Re-read current tokens (getRefreshToken syncs a newer mirror first).
+      final currentRefresh = await _tokenStorage.getRefreshToken();
+      if (currentRefresh == null || currentRefresh == attemptedRefresh) {
+        // Tokens did not change — our 400 was genuine token rejection.
+        return false;
+      }
+      final newAccess = await _tokenStorage.getAccessToken();
+      if (newAccess == null) return false;
+
+      AppLogger.i('[AUTH] Concurrent refresh detected (ts $refreshStartTs) — adopting newer tokens and retrying');
+      _isRefreshing = false;
+      _flushPendingRequests(newAccess);
+
+      error.requestOptions.headers['Authorization'] = 'Bearer $newAccess';
+      try {
+        final resp = await _dio.fetch(error.requestOptions);
+        handler.resolve(resp);
+        return true;
+      } catch (e) {
+        handler.next(e is DioException ? e : error);
+        return true;
+      }
+    } catch (e) {
+      AppLogger.w('[AUTH] _adoptNewerTokensIfRefreshed failed: $e');
+      return false;
+    }
+  }
+
+  /// Waits for another isolate's refresh to complete, then flushes queued
+  /// requests with the refreshed token.  NEVER re-enters [_onError] — if the
+  /// other isolate never releases the lock, queued requests are rejected and
+  /// the next API call starts a fresh refresh attempt (no double-refresh loop).
+  void _waitForOtherIsolateRefresh() async {
+    final deadline = DateTime.now().add(const Duration(seconds: 40));
+    while (DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(seconds: 2));
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.reload();
+        if (prefs.containsKey(TokenStorage.bgRefreshLockKey)) continue;
+
+        // Other isolate finished — sync mirror → secure storage, retry queue.
+        AppLogger.i('[AUTH] Other isolate finished refresh. Syncing and retrying queued requests.');
+        final newAccess = await _tokenStorage.getAccessToken();
+        _isRefreshing = false;
+        _waitingForLock = false;
+        if (newAccess != null) {
+          _flushPendingRequests(newAccess);
+        } else {
+          _rejectPendingRequests(DioException(
+            requestOptions: RequestOptions(path: ''),
+            type: DioExceptionType.unknown,
+            error: 'Token refresh failed',
+          ));
+        }
+        return;
+      } catch (_) {
+        // Transient SharedPreferences error — keep waiting.
+      }
+    }
+
+    // Timed out: the other isolate never released the lock.  Fail queued
+    // requests cleanly; do NOT re-enter _onError (would double-refresh).
+    AppLogger.w('[AUTH] Timed out waiting for other isolate refresh');
     _isRefreshing = false;
-    _onError(error, handler);
+    _waitingForLock = false;
+    _rejectPendingRequests(DioException(
+      requestOptions: RequestOptions(path: ''),
+      type: DioExceptionType.unknown,
+      error: 'Token refresh timed out',
+    ));
   }
 
   /// Retry all queued requests with the new access token after a successful refresh.
@@ -294,14 +441,29 @@ class DioClient {
   }
 
   /// Reject all queued requests when refresh fails.
-  void _rejectPendingRequests(DioException originalError) {
+  ///
+  /// [transient] marks the failure as "session retained" — queued requests
+  /// receive a [SessionRefreshFailedException] instead of an ApiException(401)
+  /// so callers never mistake a transient refresh failure (429/5xx/network)
+  /// for definitive token rejection.
+  void _rejectPendingRequests(DioException originalError, {bool transient = false}) {
     final pending = List.of(_pendingRequests);
     _pendingRequests.clear();
     for (final req in pending) {
       req.handler.next(
-        _mapError(originalError.copyWith(requestOptions: req.options)),
+        transient
+            ? _asTransient(originalError.copyWith(requestOptions: req.options))
+            : _mapError(originalError.copyWith(requestOptions: req.options)),
       );
     }
+  }
+
+  /// Marks a refresh-failed request as transient: keeps the original
+  /// response/status intact for logging, but replaces `error` with
+  /// [SessionRefreshFailedException] so callers checking for a genuine 401
+  /// (`e.error is ApiException && statusCode == 401`) will NOT clear tokens.
+  DioException _asTransient(DioException error) {
+    return error.copyWith(error: const SessionRefreshFailedException());
   }
 
   void _notifySessionExpired() {
@@ -323,6 +485,33 @@ class DioClient {
         error: ApiException(
           message.isNotEmpty ? message : 'Session expired. Please log in again.',
           statusCode: 401,
+        ),
+      );
+    }
+    if (status == 429) {
+      // Rate-limited by the server (login brute-force protection, per-IP or
+      // per-account window). Surface a friendly message instead of raw Dio
+      // "validateStatus" boilerplate. Honor Retry-After when provided.
+      int? retryAfter;
+      final headers = error.response?.headers;
+      if (headers != null) {
+        final raw = headers.value('retry-after');
+        retryAfter = int.tryParse(raw ?? '');
+        if (retryAfter == null && raw != null) {
+          final parsed = DateTime.tryParse(raw);
+          if (parsed != null) {
+            retryAfter = parsed.difference(DateTime.now()).inSeconds.clamp(0, 1 << 31);
+          }
+        }
+      }
+      final base = 'Too many requests. Please wait and try again.';
+      final waitHint = retryAfter != null && retryAfter > 0
+          ? ' Try again in ${retryAfter}s.'
+          : ' Please wait a few minutes.';
+      return error.copyWith(
+        error: TooManyRequestsException(
+          '$base$waitHint',
+          retryAfter,
         ),
       );
     }

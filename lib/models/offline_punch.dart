@@ -54,4 +54,7 @@ class OfflinePunch extends HiveObject {
 
   @HiveField(16)
   String? errorMessage;
+
+  @HiveField(17)
+  int? clientSiteId;
 }

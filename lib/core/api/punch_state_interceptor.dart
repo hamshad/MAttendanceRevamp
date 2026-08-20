@@ -1,12 +1,14 @@
 import 'package:dio/dio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../features/punch/services/oem_keep_alive_service.dart';
+
 /// Intercepts every `POST /attendance/punch` response and syncs punch state
 /// to SharedPreferences key `gf_last_punch_type` / `gf_last_punch_time`.
 ///
 /// This is the SINGLE source of truth for punch direction across all
 /// isolates — manual, geofence, WiFi, foreground, background.
-/// Both [GeofenceBackgroundWorker] and [WifiBackgroundWorker] read these
+/// Both [GeofencePunchHandler] and [WifiBackgroundWorker] read these
 /// keys to gate duplicate punches.
 class PunchStateInterceptor extends Interceptor {
   static const _punchPath = 'attendance/punch';
@@ -23,6 +25,17 @@ class PunchStateInterceptor extends Interceptor {
       final body = error.response?.data as Map?;
       final msg = (body?['message'] as String? ?? '').toLowerCase();
       if (msg.contains('duplicate') || msg.contains('already recorded')) {
+        // Transient GeofenceAuto rate limit (server: at most one auto-punch
+        // per 5 min — e.g. a pending-exit OUT completed just before the
+        // return ENTER): the server REJECTED this punch, it did NOT accept
+        // it.  Mirroring state here would fake a local 'In' while the
+        // server stays 'Out' — the reconcile net then skips the IN path
+        // and the missed-IN becomes permanent.  Skip the mirror; the local
+        // state stays Out and the containment/poll net retries.
+        if (msg.contains('within the last')) {
+          handler.next(error);
+          return;
+        }
         // Server already accepted the punch — sync state
         _syncDirection(error.requestOptions);
       }
@@ -54,6 +67,10 @@ class PunchStateInterceptor extends Interceptor {
         'gf_last_punch_time',
         DateTime.now().toIso8601String(),
       );
+      // Keep-alive FGS is punch-state lifecycle: a manual / wifi / offline
+      // punch OUT must close the FGS (banner), a manual IN must start the
+      // walk-out monitor.  No-op on transition absence.
+      await OemKeepAliveService.syncToPunchState();
     });
   }
 }

@@ -88,6 +88,29 @@
         <receiver
             android:name=".GeofenceAlarmReceiver"
             android:exported="false" />
+        <!-- Periodic containment check (15 min, Doze-tolerant): guarantees
+             auto punch-out/IN even when the OS misses geofence transitions
+             while backgrounded.  Self-perpetuating; enqueues headless
+             WorkManager work (no foreground service). -->
+        <receiver
+            android:name=".ContainmentAlarmReceiver"
+            android:exported="false" />
+
+        <!-- Used by plugin: native_geofence — OS-native geofencing events.
+             BroadcastReceiver: receives GeofencingClient transitions (spawns
+             the plugin's WorkManager isolate → Dart geofence callback).
+             RebootBroadcastReceiver: re-registers geofences after reboot.
+             ForegroundService: hosts the callback while doing punch work. -->
+        <receiver android:name="com.chunkytofustudios.native_geofence.receivers.NativeGeofenceBroadcastReceiver"
+                  android:exported="true"/>
+        <receiver android:name="com.chunkytofustudios.native_geofence.receivers.NativeGeofenceRebootBroadcastReceiver"
+                  android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"></action>
+            </intent-filter>
+        </receiver>
+        <service android:name="com.chunkytofustudios.native_geofence.NativeGeofenceForegroundService"
+                  android:permission="android.permission.BIND_JOB_SERVICE" android:exported="true"/>
 
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

@@ -69,8 +69,12 @@ class _GPSPunchScreenState extends ConsumerState<GPSPunchScreen> {
     setState(() => _isPunching = true);
 
     // FEATURE 1: Manual Proximity Check
+    // Validate against the SAME fix shown on the map (the one being punched) —
+    // not a second GPS read, which on some devices (Samsung) returns a stale
+    // fused fix different from what the user sees and wrongly denies the punch.
     if (widget.method == 'GeofenceAuto') {
-      final office = await ref.read(manualGeoServiceProvider).validateProximity();
+      final office =
+          await ref.read(manualGeoServiceProvider).validateProximity(location);
       if (office == null) {
         if (!mounted) return;
         setState(() => _isPunching = false);
@@ -84,7 +88,7 @@ class _GPSPunchScreenState extends ConsumerState<GPSPunchScreen> {
       }
     }
 
-    final result = await ref.read(punchProvider.notifier).punch(
+    var result = await ref.read(punchProvider.notifier).punch(
       widget.method,
       extras: {
         'latitude': location.latitude,
@@ -92,6 +96,39 @@ class _GPSPunchScreenState extends ConsumerState<GPSPunchScreen> {
         'direction': widget.direction,
       },
     );
+
+    // Server already has this punch (biometric/website) — short confirm
+    // before forcing.
+    if (result.isDuplicate && mounted) {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Punch anyway?'),
+          content: Text(result.message ?? 'Already punched'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Yes'),
+            ),
+          ],
+        ),
+      );
+      if (confirm == true && mounted) {
+        result = await ref.read(punchProvider.notifier).punch(
+          widget.method,
+          extras: {
+            'latitude': location.latitude,
+            'longitude': location.longitude,
+            'direction': widget.direction,
+          },
+          force: true,
+        );
+      }
+    }
 
     if (!mounted) return;
     setState(() => _isPunching = false);
@@ -139,7 +176,9 @@ class _GPSPunchScreenState extends ConsumerState<GPSPunchScreen> {
         error: (e, _) => _ErrorView(
           message: e is LocationPermissionDeniedException
               ? e.message
-              : 'Failed to get location. Please try again.',
+              : e is LocationPrecisionRequiredException
+                  ? e.message
+                  : 'Failed to get location. Please try again.',
           onRetry: () => ref.invalidate(_gpsLocationProvider),
         ),
         data: (location) => _buildContent(context, theme, location, dirLabel, offices),

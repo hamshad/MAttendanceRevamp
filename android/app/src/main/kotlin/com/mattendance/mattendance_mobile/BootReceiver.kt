@@ -34,7 +34,23 @@ class BootReceiver : BroadcastReceiver() {
         if (wasTracking) {
             startBackgroundService(context)
         }
+
+// Re-arm the periodic containment check (punched-in auto-punch users).
+        // The alarm self-perpetuates once its first fire is scheduled.
+        ContainmentAlarmReceiver.armFromPrefsIfNeeded(context)
+
+        // NOTE: no keep-alive FGS revival here.  The FGS is punch-state
+        // lifecycle (starts on the IN punch, stops on OUT) — if the user
+        // closed it, it stays closed: the banner must not come back
+        // behind their back.  Headless OUT keeps working after reboot
+        // (OS geofence EXIT + the 15-min headless reconcile).
+        // Android 15 (API 35)+ also bans `location`-type FGS starts from
+        // BOOT_COMPLETED — avoiding the revival sidesteps that entirely.
     }
+
+    /** Start the full combined background service (field tracking /
+     *  wifi auto-punch users after reboot — the geofence-only keep-alive
+     *  FGS deliberately never starts here, see above). */
 
     private fun startBackgroundService(context: Context) {
         val serviceIntent = Intent(context, BackgroundService::class.java)
@@ -51,11 +67,17 @@ class BootReceiver : BroadcastReceiver() {
         //   "2026-06-12T10:00:00.000"  (with millis)
         //   "2026-06-12T10:00:00"       (without millis)
         //   "2026-06-12T10:00:00.000Z"  (with trailing Z)
-        // Strips trailing Z and decimal millis, then parses as "yyyy-MM-dd'T'HH:mm:ss".
+        // Strips trailing Z and decimal millis, then parses.
+        // IMPORTANT: Dart's DateTime.now().toIso8601String() writes LOCAL time
+        // WITHOUT a Z suffix.  Parse in the device's default timezone so the
+        // alarm fires at the same wall-clock time the Dart side intended.
+        // (Previously parsed as UTC, shifting the alarm by the device's UTC
+        // offset — e.g. +5:30 IST → alarm fired 5.5h late after reboot.)
         val cleaned = iso
             .replace(Regex("[Zz]\$"), "")
             .replace(Regex("\\.\\d+"), "")
-        // Simple parse: assume UTC since Dart's toIso8601String() produces UTC
+        // Simple parse: assume local time since Dart's toIso8601String() on a
+        // local DateTime produces no timezone marker
         val parts = cleaned.split(Regex("[-T:]"))
         if (parts.size < 6) return null
         val year = parts[0].toIntOrNull() ?: return null
@@ -65,7 +87,7 @@ class BootReceiver : BroadcastReceiver() {
         val min = parts[4].toIntOrNull() ?: return null
         val sec = parts[5].toIntOrNull() ?: return null
 
-        val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
+        val cal = java.util.Calendar.getInstance(java.util.TimeZone.getDefault())
         cal.set(year, month - 1, day, hour, min, sec)
         cal.set(java.util.Calendar.MILLISECOND, 0)
         return cal.timeInMillis

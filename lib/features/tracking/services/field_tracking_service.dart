@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
@@ -8,6 +10,10 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
+
+import '../../../core/utils/geo_bands.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import 'package:network_info_plus/network_info_plus.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -15,11 +21,14 @@ import 'package:intl/intl.dart';
 
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/utils/constants.dart';
-import '../../punch/services/geofence_background_worker.dart';
+import '../../../core/utils/location_precision.dart';
+import '../../../models/offline_punch.dart';
+import '../../punch/services/geofence_monitor.dart';
+import '../../punch/services/geofence_scheduler.dart';
+import '../../punch/services/oem_keep_alive_service.dart';
 import '../../punch/services/wifi_background_worker.dart';
 import '../models/location_result.dart';
 import 'filters/location_filter.dart';
-import 'filters/confidence_scorer.dart';
 
 // ── Running state ─────────────────────────────────────────────────────────────
 
@@ -27,7 +36,7 @@ import 'filters/confidence_scorer.dart';
 /// Updated in [MainShell] by listening to [FieldTrackingService.runningStream].
 final fieldTrackingRunningProvider = StateProvider<bool>((ref) => false);
 
-// ── SharedPreferences keys written by GeofenceAutoPunchService ────────────────
+// ── SharedPreferences keys written by GeofenceMonitor ─────────────────────────
 
 /// Key where the geofence service stores the nearest office latitude.
 const _kDbgGeofenceLat    = 'dbg_geofence_lat';
@@ -52,10 +61,67 @@ const _kBgRefreshLock = 'bg_refresh_lock';
 /// The combined entrypoint reads this to decide whether to send pings.
 const _kFieldTrackingEnabled = 'field_tracking_enabled';
 
-/// Persisted punch-state keys (mirrors GeofenceBackgroundWorker).
+/// Persisted punch-state keys (mirrors GeofencePunchHandler).
 const _kPersistPunchType  = 'gf_last_punch_type';
 const _kPersistPunchTime  = 'gf_last_punch_time';
 const _kPersistPunchOffice = 'gf_last_punch_office';
+
+// ── Keep-alive punch monitor ────────────────────────────────────────────────
+
+/// Movement gate for the keep-alive GPS stream (metres).
+///
+/// High-accuracy fixes are only delivered when the phone moves >= this
+/// distance from the last fix.  A user sitting at the office desk receives
+/// no fixes at all (negligible battery); walking out of the office produces
+/// a fix every ~30m — dense enough to catch the boundary crossing without
+/// continuous GPS polling.
+const keepAliveDistanceFilterM = 30;
+
+/// Office (non client-site) zones persisted by [GeofenceMonitor] under
+/// `gf_zone_ids` / `gf_zone_$id`.
+List<GeofenceZone> keepAliveOfficeZones(SharedPreferences prefs) {
+  final ids = prefs.getStringList('gf_zone_ids') ?? const [];
+  final zones = <GeofenceZone>[];
+  for (final id in ids) {
+    final raw = prefs.getString('gf_zone_$id');
+    if (raw == null) continue;
+    try {
+      final zone =
+          GeofenceZone.fromJson(id, jsonDecode(raw) as Map<String, dynamic>);
+      if (zone != null && !zone.isClientSite) zones.add(zone);
+    } catch (_) {/* corrupt metadata — skip */}
+  }
+  return zones;
+}
+
+/// True when [fix] is outside EVERY office radius by the OUT band
+/// (radius + fixed 25m — mirrors GeofencePunchHandler's OUT slack, user
+/// spec "out of radius + 25-30m → punch OUT") **with the accuracy trust
+/// floor** ([isOutsideOfficeBand]).
+///
+/// Strengthened 2026-08-17: a fix also counts as "still inside" when its
+/// claimed accuracy exceeds the band — fused wifi-blend fixes can claim
+/// 100-500m and jump 300-500m, and two such fixes previously fabricated
+/// a false OUT at 68m beyond the radius while the user was inside.
+/// Accuracy still NEVER widens the band (the 2x-accuracy margin delayed
+/// the Nothing's 149m OUT); untrusted fixes simply defer the punch to
+/// the next check (OS EXIT crossing path / 15-min net).
+///
+/// Pure function — unit-testable.
+bool isOutsideAllOffices(Position fix, List<GeofenceZone> zones) {
+  if (zones.isEmpty) return false;
+  for (final z in zones) {
+    if (!isOutsideOfficeBand(
+      fix,
+      zoneLatitude: z.latitude,
+      zoneLongitude: z.longitude,
+      zoneRadius: z.radius,
+    )) {
+      return false; // still inside (or untrusted) this office
+    }
+  }
+  return true;
+}
 
 // ── Service facade ────────────────────────────────────────────────────────────
 
@@ -87,6 +153,10 @@ class FieldTrackingService {
 
   /// Start the background tracking service.
   static Future<void> start() async {
+    // Keep-alive holds the process — stop it first (mode flag cleared),
+    // or the combined service would start with the keep-alive mode flag
+    // still set (and run light instead of full).
+    await OemKeepAliveService.stop();
     try {
       await _svc.startService();
     } catch (e) {
@@ -162,6 +232,18 @@ Future<bool> _iosBackground(ServiceInstance service) async => true;
 void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
   debugPrint('[GF_BG_ENTRY] Entrypoint started — isAndroid=${service is AndroidServiceInstance}');
 
+  // Initialize Hive in this isolate so background workers can write to the
+  // offline punch queue (auto punches that fail due to no internet get
+  // queued and synced later by OfflineSyncManager).
+  try {
+    await Hive.initFlutter();
+    Hive.registerAdapter(OfflinePunchAdapter());
+    await Hive.openBox<OfflinePunch>(AppConstants.offlinePunchBox);
+    await Hive.openBox(AppConstants.cacheBox);
+  } catch (e) {
+    debugPrint('[GF_BG_ENTRY] Hive init failed: $e');
+  }
+
   // Guard: if no auth token, do nothing — user not logged in.
   final prefs = await SharedPreferences.getInstance();
   final token = prefs.getString('bg_access_token');
@@ -173,6 +255,303 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
     return;
   }
 
+  // Guard: never run an EMPTY service.  The service exists only to serve
+  // auto features — geofence auto-punch, WiFi auto-punch, field tracking.
+  // If none is enabled there is nothing to monitor; starting anyway would
+  // just show a pointless "Mattendance" foreground notification forever.
+  final gfEnabled = prefs.getBool('geofence_auto_enabled') ?? false;
+  final wifiBg = prefs.getBool('wifi_auto_punch_enabled_bg') ?? false;
+  final wifiFg = prefs.getBool('wifi_auto_punch_enabled') ?? false;
+  final ftEnabled = prefs.getBool('field_tracking_enabled') ?? false;
+  if (!gfEnabled && !wifiBg && !wifiFg && !ftEnabled) {
+    debugPrint('[GF_BG_ENTRY] No auto feature enabled — stopping empty service');
+    if (service is AndroidServiceInstance) {
+      service.stopSelf();
+    }
+    return;
+  }
+
+  // ── Keep-alive mode (all Android devices, uniform) ──────────────────
+  // The service exists here ONLY to keep the process alive so OS geofence
+  // transitions, the containment alarm and WorkManager run in a live
+  // process (Android kills dormant processes on any ROM — the FGS
+  // holding the process removes exemptions everywhere).
+  // Heal geofences, re-check containment once, then run a movement-gated
+  // GPS stream while punched in (catches the EXIT aggressive OEMs drop).
+  if (prefs.getBool(OemKeepAliveService.keepAliveModeKey) ?? false) {
+    debugPrint('[GF_BG_ENTRY] Keep-alive mode — holding process');
+    if (service is AndroidServiceInstance) {
+      service.setForegroundNotificationInfo(
+        title: 'Geofence Active',
+        content: 'Monitoring',
+      );
+    }
+    // Heal OS geofences (a fresh process may find them dropped) and run one
+    // containment check immediately (missed exit/enter).  Everything else
+    // comes from the native alarm / plugin receiver / WorkManager.
+    try {
+      await GeofenceMonitor.registerZones();
+      await GeofencePunchHandler.instance.reconcileContainment(confirmOut: true);
+    } catch (e) {
+      debugPrint('[GF_BG_ENTRY] Keep-alive init check failed: $e');
+    }
+    // ── Movement-gated punch monitor ────────────────────────────────────
+    // Only while punched in.  distanceFilter 30m → a stationary user at
+    // the desk gets ZERO fixes (no GPS radio churn); fixes arrive only as
+    // the user actually moves, so the inside→outside transition is the
+    // honest walk out of the office, not a late OS event.  On the first
+    // outside fix a containment reconcile runs immediately (confirming fix
+    // taken back-to-back, punch OUT records the REAL confirm location).
+    StreamSubscription<Position>? keepAliveSub;
+    var keepAliveWasOutside = false;
+    DateTime? keepAliveLastReconcile;
+    try {
+      final zones = keepAliveOfficeZones(prefs);
+      if (prefs.getString(_kPersistPunchType) == 'In' && zones.isNotEmpty) {
+        final settings = Platform.isAndroid
+            ? AndroidSettings(
+                accuracy: LocationAccuracy.high,
+                distanceFilter: keepAliveDistanceFilterM,
+              )
+            : AppleSettings(
+                accuracy: LocationAccuracy.high,
+                distanceFilter: keepAliveDistanceFilterM,
+                pauseLocationUpdatesAutomatically: false,
+                allowBackgroundLocationUpdates: true,
+              );
+        keepAliveSub = Geolocator.getPositionStream(locationSettings: settings)
+            .listen((fix) async {
+          final p = await SharedPreferences.getInstance();
+          // Punched OUT → nothing to monitor; OS EXIT / containment alarm /
+          // next ENTER take over.  Stop the GPS churn.
+          if (p.getString(_kPersistPunchType) != 'In') {
+            await keepAliveSub?.cancel();
+            keepAliveSub = null;
+            return;
+          }
+          final outside = isOutsideAllOffices(fix, zones);
+          final now = DateTime.now();
+          final cooledDown = keepAliveLastReconcile == null ||
+              now.difference(keepAliveLastReconcile!) >
+                  const Duration(seconds: 60);
+          if (outside && !keepAliveWasOutside && cooledDown) {
+            keepAliveWasOutside = true;
+            keepAliveLastReconcile = now;
+            debugPrint('[GF_BG_ENTRY] keep-alive stream: outside all offices'
+                ' — reconciling OUT');
+            try {
+              await GeofencePunchHandler.instance
+                  .reconcileContainment(confirmOut: true);
+            } catch (e) {
+              debugPrint('[GF_BG_ENTRY] keep-alive reconcile failed: $e');
+            }
+          } else if (!outside) {
+            keepAliveWasOutside = false;
+          }
+        }, onError: (_) {});
+      }
+    } catch (e) {
+      debugPrint('[GF_BG_ENTRY] keep-alive stream setup failed: $e');
+    }
+    // ── Alignment warning streams (event-driven — zero timers) ─────────
+    // Phase-5 warnings (GPS off 996 / airplane mode 998 / wifi-hidden 997)
+    // previously existed only in the combined service, the foreground
+    // monitor and the ~30-min headless WorkManager.  The keep-alive FGS
+    // (geofence-only users) was deaf to them: GPS off or airplane mode
+    // produced TOTAL silence until the next WorkManager fire — up to 30
+    // minutes, and system-scheduled periodics are deferrable on aggressive
+    // OEMs.  These listeners are pure event streams: they wake only on an
+    // actual state change, never poll, never request a GPS fix — the
+    // battery contract stays intact (stationary = zero radio churn).
+    //
+    // Notification IDs / channel / prefs keys SHARED with the foreground
+    // monitor + headless worker + wifi worker (single source of truth —
+    // all sides REPLACE, never duplicate, each other's popups).
+    final alignNotif = FlutterLocalNotificationsPlugin();
+    const alignChannel = AndroidNotificationDetails(
+      'user_alignment',
+      'Attendance Alerts',
+      importance: Importance.high,
+      priority: Priority.high,
+    );
+    const alignDetails = NotificationDetails(android: alignChannel);
+    StreamSubscription<ServiceStatus>? alignGpsSub;
+    StreamSubscription<List<ConnectivityResult>>? alignConnSub;
+    try {
+      // GPS off → 996 (geofences can't fire).  Same gate as the headless
+      // worker: punched IN + any auto feature.
+      alignGpsSub = Geolocator.getServiceStatusStream().listen((status) async {
+        final p = await SharedPreferences.getInstance();
+        final anyAuto = (p.getBool('geofence_auto_enabled') ?? false) ||
+            (p.getBool('wifi_auto_punch_enabled_bg') ?? false) ||
+            (p.getBool('wifi_auto_punch_enabled') ?? false) ||
+            (p.getBool('field_tracking_enabled') ?? false);
+        if (p.getString(_kPersistPunchType) != 'In' || !anyAuto) {
+          try {
+            await alignNotif.cancel(996);
+          } catch (_) {}
+          return;
+        }
+        try {
+          if (status == ServiceStatus.disabled) {
+            await alignNotif.show(
+              996,
+              'GPS is off',
+              'Auto punch won\u2019t work and you could be marked absent even '
+                  'at the office. Turn Location back on.',
+              alignDetails,
+            );
+          } else {
+            await alignNotif.cancel(996);
+          }
+        } catch (e) {
+          debugPrint('[KEEP_ALIVE] GPS alert failed: $e');
+        }
+      });
+      // Airplane mode / no network → 998 (warn once per offline stretch),
+      // wifi-hidden → 997 on wifi (re)connect events, rate-limited 10 min.
+      alignConnSub =
+          Connectivity().onConnectivityChanged.listen((results) async {
+        final p = await SharedPreferences.getInstance();
+        final anyAuto = (p.getBool('geofence_auto_enabled') ?? false) ||
+            (p.getBool('wifi_auto_punch_enabled_bg') ?? false) ||
+            (p.getBool('wifi_auto_punch_enabled') ?? false) ||
+            (p.getBool('field_tracking_enabled') ?? false);
+        if (p.getString(_kPersistPunchType) != 'In' || !anyAuto) {
+          try {
+            await alignNotif.cancel(998);
+            await alignNotif.cancel(997);
+          } catch (_) {}
+          return;
+        }
+        try {
+          final none =
+              results.isEmpty || results.every((r) => r == ConnectivityResult.none);
+          if (none) {
+            if (p.getBool('wifi_bg_no_connectivity_warned') ?? false) return;
+            await p.setBool('wifi_bg_no_connectivity_warned', true);
+            await alignNotif.show(
+              998,
+              'No network (airplane mode?)',
+              'Attendance can\u2019t send or receive right now. WiFi punches '
+                  'will be saved and sent when you\u2019re back online. Swipe '
+                  'down from the top of your screen and turn off airplane mode.',
+              alignDetails,
+            );
+          } else {
+            if (p.getBool('wifi_bg_no_connectivity_warned') ?? false) {
+              await p.setBool('wifi_bg_no_connectivity_warned', false);
+            }
+            await alignNotif.cancel(998);
+            if (results.contains(ConnectivityResult.wifi)) {
+              // Wifi (re)connect — check Android isn't hiding the BSSID
+              // (location off) so wifi auto punch can still confirm.
+              String? bssid;
+              try {
+                bssid = await NetworkInfo().getWifiBSSID();
+              } catch (_) {
+                bssid = null;
+              }
+              final hidden = bssid == null ||
+                  bssid.isEmpty ||
+                  bssid == '02:00:00:00:00:00';
+              if (!hidden) {
+                await alignNotif.cancel(997);
+                return;
+              }
+              final now = DateTime.now().millisecondsSinceEpoch;
+              final last = p.getInt('wifi_bg_bssid_warned_ts') ?? 0;
+              if (now - last < const Duration(minutes: 10).inMilliseconds) {
+                return;
+              }
+              await p.setInt('wifi_bg_bssid_warned_ts', now);
+              await alignNotif.show(
+                997,
+                'Connected to WiFi, but the app can\u2019t read it',
+                'This happens when Location is off. Turn it on so auto punch '
+                    'can confirm you\u2019re on the office network. Phone '
+                    'Settings \u2192 Location.',
+                alignDetails,
+              );
+            } else {
+              await alignNotif.cancel(997);
+            }
+          }
+        } catch (e) {
+          debugPrint('[KEEP_ALIVE] connectivity alert failed: $e');
+        }
+      });
+    } catch (e) {
+      debugPrint('[KEEP_ALIVE] alignment stream setup failed: $e');
+    }
+    // Idle: no timers — just the stream above + stop signals.
+    service.on('stopKeepAlive').listen((_) async {
+      debugPrint('[GF_BG_ENTRY] Keep-alive stop requested');
+      await keepAliveSub?.cancel();
+      await alignGpsSub?.cancel();
+      await alignConnSub?.cancel();
+      if (service is AndroidServiceInstance) service.stopSelf();
+    });
+    service.on('stop').listen((_) async {
+      await keepAliveSub?.cancel();
+      await alignGpsSub?.cancel();
+      await alignConnSub?.cancel();
+      if (service is AndroidServiceInstance) service.stopSelf();
+    });
+    return;
+  }
+
+  // ── Geofence-only gate (defense in depth) ─────────────────────────────
+  // The combined service exists ONLY for wifi auto-punch and field
+  // tracking.  A geofence-only config is served headlessly by the OS
+  // geofence + WorkManager + containment alarm — no live isolate needed.
+  // A stray cold start (e.g. native shift-start alarm racing the prefs
+  // flags) must self-heal and stop, never run the full GPS stream all day.
+  if (!await GeofenceScheduler.serviceRequired()) {
+    debugPrint('[GF_BG_ENTRY] Geofence-only config — self-heal then stop, '
+        'no combined service');
+    try {
+      await GeofenceMonitor.registerZones();
+      await GeofencePunchHandler.instance.reconcileContainment(confirmOut: true);
+    } catch (e) {
+      debugPrint('[GF_BG_ENTRY] Pre-stop self-heal failed: $e');
+    }
+    if (service is AndroidServiceInstance) service.stopSelf();
+    return;
+  }
+
+  // Mandatory PRECISE location. Approximate (coarse) fixes are 500m–2km off —
+  // silently breaking geofence auto-punch and field tracking. If the user
+  // downgraded to approximate while the service was running, stop immediately
+  // instead of pinging wrong positions.
+  try {
+    if (!await LocationPrecision.isPreciseGranted()) {
+      debugPrint('[GF_BG_ENTRY] Approximate location — precise required, stopping service');
+      try {
+        await FlutterLocalNotificationsPlugin().show(
+          997,
+          'Precise location required',
+          'Approximate location breaks GPS punch and geofence. Open Settings '
+              '\u2192 Apps \u2192 mAttendance \u2192 Location \u2192 Precise.',
+          const NotificationDetails(
+            android: AndroidNotificationDetails(
+              'user_alignment',
+              'Attendance Alerts',
+              importance: Importance.high,
+              priority: Priority.high,
+            ),
+          ),
+        );
+      } catch (_) {}
+      if (service is AndroidServiceInstance) {
+        service.stopSelf();
+      }
+      return;
+    }
+  } catch (_) {
+    // Fail-open: if precision can't be determined, keep current behavior.
+  }
+
   final locationFilter = LocationFilter();
   TrackingState trackingState = TrackingState.MOVING;
 
@@ -180,11 +559,8 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
   LocationResult? lastPingPosition;
   DateTime? lastPingTime;
   StreamSubscription<Position>? positionSub;
+  StreamSubscription<ServiceStatus>? gpsStatusSub;
   Timer? timer;
-
-  // ── Geofence auto-punch worker ─────────────────────────────────────────────
-  final geoWorker = GeofenceBackgroundWorker(service);
-  debugPrint('[GF_BG_ENTRY] GeoWorker created');
 
   // ── WiFi auto-punch background worker ──────────────────────────────────────
   final wifiWorker = WifiBackgroundWorker(service);
@@ -230,7 +606,7 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
 
   // ── Debug helper ──────────────────────────────────────────────────────────
 
-  /// Reads geofence context written by [GeofenceAutoPunchService] and emits a
+  /// Reads geofence context written by [GeofenceMonitor] and emits a
   /// `trackingDebug` event back to the main isolate (→ [FieldTrackingService.debugStream]).
   Future<void> emitDebug({
     required String event,
@@ -337,8 +713,18 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
           return;
         }
 
-        // Acquire lock
+        // Atomic lock claim: write unique owner token, re-read, verify
+        // ownership.  If another isolate wrote after us, we lost the race.
+        final owner = '$now-${DateTime.now().microsecondsSinceEpoch}';
         await prefs.setInt(_kBgRefreshLock, now);
+        await prefs.setString('bg_refresh_lock_owner', owner);
+        await prefs.reload();
+        final persistedOwner = prefs.getString('bg_refresh_lock_owner');
+        final persistedTs = prefs.getInt(_kBgRefreshLock) ?? 0;
+        if (persistedOwner != owner || persistedTs != now) {
+          debugPrint('[FieldTracking] Lost refresh-lock race — skipping ping');
+          return;
+        }
 
         try {
           final refreshToken = prefs.getString(_kBgRefreshToken);
@@ -347,8 +733,14 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
             // We DON'T wipe tokens here to avoid accidental logout. 
             // The main isolate will handle it when the app is opened.
             await prefs.remove(_kBgRefreshLock);
+            await prefs.remove('bg_refresh_lock_owner');
             return;
           }
+
+          // Session guard: capture session generation BEFORE the network
+          // call.  If it changed (logout/relogin elsewhere) while we were
+          // refreshing, discard results — prevents token resurrection.
+          final sessionId = prefs.getString('auth_session_id');
 
           final refreshDio = Dio(BaseOptions(
             baseUrl: AppConstants.apiBaseUrl,
@@ -366,18 +758,29 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
           final newAccess  = refreshResp.data['accessToken']  as String;
           final newRefresh = refreshResp.data['refreshToken'] as String;
 
+          // Verify session marker is unchanged before persisting.
+          await prefs.reload();
+          if (prefs.getString('auth_session_id') != sessionId) {
+            debugPrint('[FieldTracking] Session changed during refresh — discarding tokens');
+            await prefs.remove(_kBgRefreshLock);
+            await prefs.remove('bg_refresh_lock_owner');
+            return;
+          }
+
           // Persist refreshed tokens with timestamp
           await Future.wait([
             prefs.setString(_kBgAccessToken, newAccess),
             prefs.setString(_kBgRefreshToken, newRefresh),
             prefs.setInt(_kBgTokenTimestamp, DateTime.now().millisecondsSinceEpoch),
             prefs.remove(_kBgRefreshLock),
+            prefs.remove('bg_refresh_lock_owner'),
           ]);
 
           debugPrint('[FieldTracking] Token refreshed — retrying ping');
           await _buildDio(newAccess).post(ApiEndpoints.trackingPing, data: pingData);
         } catch (refreshErr) {
           await prefs.remove(_kBgRefreshLock);
+          await prefs.remove('bg_refresh_lock_owner');
           
           final isNetworkError = refreshErr is DioException &&
               (refreshErr.type == DioExceptionType.connectionTimeout ||
@@ -401,15 +804,13 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
             return;
           }
 
-          // Refresh itself failed (fatal) — don't wipe tokens, just stop pinging.
+          // Refresh itself failed (fatal).
           debugPrint('[FieldTracking] Token refresh FAILED (fatal): $refreshErr');
-          // In background isolate, we only wipe SharedPreferences tokens to stop 401 spam
-          // but we DO NOT call clearTokens() which would wipe SecureStorage.
-          await Future.wait([
-            prefs.remove(_kBgAccessToken),
-            prefs.remove(_kBgRefreshToken),
-          ]);
-          
+          // Do NOT wipe SharedPreferences tokens — doing so would cause the
+          // main isolate's TokenStorage._syncFromBackgroundMirror (or the
+          // SecureStorage read fallback) to see null tokens and trigger an
+          // accidental forceLogout. Let the main isolate's DioClient interceptor
+          // handle session expiry when the app is opened.
           await emitDebug(
             event: 'ping_error',
             loc: position,
@@ -581,14 +982,53 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
         );
       }
 
-      // ── Geofence auto-punch check ──────────────────────────────────────────
-      final gfConfidence = ConfidenceScorer.score(filtered, trackingState, jumpScore: filtered.jumpScore);
-      geoWorker.onLocationFix(filtered, trackingState, gfConfidence);
-
+      // ── Update foreground notification (punch state / accuracy) ──────────
       await updateNotification(loc: filtered);
     },
     onError: (_) {},
   );
+
+  // ── GPS service status monitor ─────────────────────────────────────────────
+  // When user turns off GPS while geofence auto-punch is enabled, alert them
+  // that geofence will stop working.
+  late final FlutterLocalNotificationsPlugin gpsNotif =
+      FlutterLocalNotificationsPlugin();
+  gpsStatusSub = Geolocator.getServiceStatusStream().listen((status) async {
+    final prefs = await SharedPreferences.getInstance();
+    // No shift → no nagging: GPS-off alerts only matter while the user is
+    // punched in (auto punch must work).  At home, punched out, GPS being
+    // off is normal and must stay quiet.
+    final punchType = prefs.getString(_kPersistPunchType);
+    if (punchType != 'In') return;
+    final gfEnabled = prefs.getBool('geofence_auto_enabled') ?? false;
+    final ftEnabled = prefs.getBool('field_tracking_enabled') ?? false;
+    final wifiEnabled = prefs.getBool('wifi_auto_punch_enabled_bg') ?? false;
+    final anyAuto = gfEnabled || ftEnabled || wifiEnabled;
+    if (status == ServiceStatus.disabled && anyAuto) {
+      debugPrint('[GF_BG_ENTRY] GPS turned off while auto punch active — sending alert');
+      try {
+        await gpsNotif.show(
+          996,
+          'GPS is off',
+          'Auto punch and tracking won\u2019t work until you turn Location back '
+          'on. Open phone Settings \u2192 Location \u2192 turn it on.',
+          const NotificationDetails(
+            android: AndroidNotificationDetails(
+              'user_alignment',
+              'Attendance Alerts',
+              importance: Importance.high,
+              priority: Priority.high,
+            ),
+          ),
+        );
+      } catch (e) {
+        debugPrint('[GF_BG_ENTRY] GPS disabled notification failed: $e');
+      }
+    } else if (status == ServiceStatus.enabled && anyAuto) {
+      debugPrint('[GF_BG_ENTRY] GPS re-enabled — dismissing alert');
+      await gpsNotif.cancel(996);
+    }
+  });
 
   // ── Ping timer ─────────────────────────────────────────────────────────────
 
@@ -655,53 +1095,15 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
   await emitDebug(event: 'service_start', reason: 'Background service started');
 
   // ── Geofence worker data load ────────────────────────────────────────────────
-  debugPrint('[GF_BG_ENTRY] Calling geoWorker.loadData()...');
-  await geoWorker.loadData();
-  debugPrint('[GF_BG_ENTRY] geoWorker.loadData() complete');
+  // Geofence auto-punch no longer runs here — it is OS-native via
+  // native_geofence (geofenceTriggered in geofence_monitor.dart), registered
+  // from the main isolate by MainShell.  This service only does field-tracking
+  // pings + WiFi auto-punch.
+  debugPrint('[GF_BG_ENTRY] Geofence handled natively (native_geofence)');
 
   // ── Start WiFi background worker ─────────────────────────────────────────
   wifiWorker.start();
   debugPrint('[GF_BG_ENTRY] WiFi background worker started');
-
-  // ── Proactive initial location check ──────────────────────────────────────
-  // On first start (fresh install, new login, app restart), the GPS stream may
-  // take 10-60s for a cold fix.  If the user is already inside an office zone,
-  // we want to punch IN immediately rather than waiting for the first stream
-  // fix.  A single `getCurrentPosition` call resolves faster than the stream.
-  try {
-    debugPrint('[GF_BG_ENTRY] Proactive location check...');
-    final initPos = await Geolocator.getCurrentPosition(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        timeLimit: Duration(seconds: 10),
-      ),
-    );
-    {
-      final initRaw = LocationResult(
-        latitude: initPos.latitude,
-        longitude: initPos.longitude,
-        accuracy: initPos.accuracy,
-        speed: initPos.speed,
-        altitude: initPos.altitude,
-        heading: initPos.heading,
-        timestamp: initPos.timestamp,
-      );
-      if (initRaw.accuracy <= LocationFilter.MIN_ACCURACY) {
-        final initFiltered = locationFilter.process(initRaw, trackingState);
-        if (initFiltered != null) {
-          trackingState = locationFilter.evaluateState(initFiltered, trackingState);
-          final initConfidence = ConfidenceScorer.score(
-            initFiltered, trackingState,
-            jumpScore: initFiltered.jumpScore,
-          );
-          debugPrint('[GF_BG_ENTRY] Initial fix — lat=${initFiltered.latitude.toStringAsFixed(5)} acc=${initFiltered.accuracy.toStringAsFixed(1)}m conf=${initConfidence.toStringAsFixed(2)}');
-          geoWorker.onLocationFix(initFiltered, trackingState, initConfidence);
-        }
-      }
-    }
-  } catch (e) {
-    debugPrint('[GF_BG_ENTRY] Proactive location check failed: $e');
-  }
 
   await updateNotification();
   debugPrint('[GF_BG_ENTRY] Initial setup complete — monitoring active');
@@ -725,10 +1127,18 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
     await emitDebug(event: 'service_stop', reason: 'Stop command received');
     timer?.cancel();
     await positionSub?.cancel();
+    await gpsStatusSub?.cancel();
     wifiWorker.stop();
     service.invoke('running', {'value': false});
     final stopPrefs = await SharedPreferences.getInstance();
     await stopPrefs.setBool('was_field_tracking', false);
+    // Kill the 15-min restart safety-net: a shift-end stop (or a settings
+    // disable) must stay stopped until the next shift-start alarm re-arms.
+    try {
+      await GeofenceScheduler.cancelRestartAlarm();
+    } catch (e) {
+      debugPrint('[GF_BG_ENTRY] Cancel restart alarm failed: $e');
+    }
     service.stopSelf();
   });
 }

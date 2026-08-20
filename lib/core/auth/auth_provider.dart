@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import '../../models/auth_response.dart';
 import '../../models/user.dart';
 import '../api/api_endpoints.dart';
+import '../api/api_exceptions.dart';
 import '../api/dio_client.dart';
 import '../utils/constants.dart';
 import 'auth_api.dart';
@@ -14,7 +15,9 @@ import 'token_storage.dart';
 import 'biometric_service.dart';
 import '../utils/app_logger.dart';
 import '../services/office_data_service.dart';
+import '../../features/punch/services/geofence_monitor.dart';
 import '../../features/punch/services/geofence_scheduler.dart';
+import '../offline/offline_sync_manager.dart';
 
 // ── Providers ─────────────────────────────────────────────────────────────────
 
@@ -54,8 +57,10 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
   Future<AppUser?> build() async {
     _tokenStorage = ref.read(tokenStorageProvider);
     _authApi = ref.read(authApiProvider);
-    
+
+    final _bench = Stopwatch()..start();
     final user = await _tryAutoLogin();
+    debugPrint('[BENCH] _tryAutoLogin total: ${_bench.elapsedMilliseconds}ms');
     if (user != null) {
       // Fetch and save offices on app open if user is already logged in
       _fetchAndSaveOffices();
@@ -65,17 +70,28 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
 
   Future<AppUser?> _tryAutoLogin() async {
     try {
+      final _bench = Stopwatch()..start();
       final hasTokens = await _tokenStorage.hasTokens();
+      debugPrint('[BENCH] hasTokens: ${_bench.elapsedMilliseconds}ms');
       if (!hasTokens) {
         AppLogger.d('AUTH: No tokens found for auto-login');
+        // Clear any stale cached user so a later auto-login does not start
+        // from a phantom logged-in state.
+        await AppUser.clear();
         return null;
       }
 
       AppLogger.i('AUTH: Tokens found, attempting to load user data');
-      final user = await AppUser.load();
-      if (user != null) {
+
+      // Fast path: return cached user immediately without server call.
+      // Token validation happens lazily when other API calls are made;
+      // the 401 interceptor handles refresh if needed.
+      final _bench2 = Stopwatch()..start();
+      final cachedUser = await AppUser.load();
+      debugPrint('[BENCH] AppUser.load: ${_bench2.elapsedMilliseconds}ms');
+      if (cachedUser != null) {
         AppLogger.i('AUTH: Auto-login successful (cached user)');
-        return user;
+        return cachedUser;
       }
 
       // Tokens exist but user data is missing — try fetching from server
@@ -101,6 +117,18 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
             return newUser;
           }
         } catch (e) {
+          // Only clear the session on DEFINITIVE token rejection — a genuine
+          // 401 that survived the interceptor's refresh attempt. The
+          // interceptor tags transient refresh failures (429 rate limit,
+          // 5xx, network) with SessionRefreshFailedException; those must NOT
+          // flush tokens, even though the request's raw statusCode is 401.
+          final apiErr = e is DioException ? e.error : null;
+          if (apiErr is ApiException && apiErr.statusCode == 401) {
+            AppLogger.w('AUTH: Token rejected (401) — clearing stale session');
+            await _tokenStorage.clearTokens();
+            await AppUser.clear();
+            return null;
+          }
           final retryable = e is DioException && _isRetryableDioError(e);
           if (i < 2 && retryable) {
             AppLogger.w('AUTH: Profile fetch attempt $i failed (retryable) — retrying in 2s');
@@ -270,7 +298,12 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
     }
     await GeofenceScheduler.cancel();
     await GeofenceScheduler.stopGeofenceService();
+    // Unregister OS geofences so no events fire while logged out.
+    await GeofenceMonitor.unregisterAll();
+    // No queued punches to sync after logout — stop the background manager.
+    await OfflineSyncManager.cancel();
     await _tokenStorage.clearTokens();
+    await _tokenStorage.clearBackup();
     await AppUser.clear();
     ref.read(officeDataServiceProvider).reset();
     state = const AsyncData(null);
@@ -280,6 +313,10 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
   Future<void> forceLogout() async {
     AppLogger.w('AUTH: forceLogout() called — clearing session and navigating to LoginScreen');
     await _tokenStorage.clearTokens();
+    // Definitive logout: also destroy the Hive backup so a future
+    // hasTokens() cannot restore the rejected/expired session.
+    await _tokenStorage.clearBackup();
+    await OfflineSyncManager.cancel();
     await AppUser.clear();
     ref.read(officeDataServiceProvider).reset();
     state = const AsyncData(null);
@@ -289,6 +326,9 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
   Future<void> _fetchAndSaveOffices() async {
     try {
       await ref.read(officeDataServiceProvider).fetchAndSaveOffices();
+      // Preload active client sites so the auto-geofence engine and the
+      // Geofence Places screen can use them without a fresh round-trip.
+      await ref.read(officeDataServiceProvider).fetchAndSaveClientSites();
     } catch (e) {
       AppLogger.e('AUTH: Failed to trigger office data fetch', e);
     }

@@ -8,7 +8,6 @@ import '../../punch/screens/gps_punch_screen.dart';
 import '../../punch/screens/wifi_punch_screen.dart';
 import '../../punch/screens/selfie_punch_screen.dart';
 import '../../punch/screens/qr_scan_screen.dart';
-import '../../punch/screens/fingerprint_punch_screen.dart';
 import '../../punch/screens/ble_scan_screen.dart';
 import '../../punch/screens/nfc_tap_screen.dart';
 import '../../punch/screens/face_recog_screen.dart';
@@ -152,14 +151,6 @@ class _PunchButtonState extends ConsumerState<PunchButton>
           ),
         );
         break;
-      case 'Fingerprint':
-        await Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => FingerprintPunchScreen(direction: direction),
-          ),
-        );
-        break;
       case 'Bluetooth':
         await Navigator.push(
           context,
@@ -195,7 +186,32 @@ class _PunchButtonState extends ConsumerState<PunchButton>
       default:
         // For methods not yet implemented, punch directly
         setState(() => _isPunching = true);
-        final result = await ref.read(punchProvider.notifier).punch(method);
+        var result = await ref.read(punchProvider.notifier).punch(method);
+        // Server already has this punch (biometric/website) — short confirm
+        // before forcing, never a big message.
+        if (result.isDuplicate && mounted) {
+          final confirm = await showDialog<bool>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('Punch anyway?'),
+              content: Text(result.message ?? 'Already punched'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text('Yes'),
+                ),
+              ],
+            ),
+          );
+          if (confirm == true && mounted) {
+            result =
+                await ref.read(punchProvider.notifier).punch(method, force: true);
+          }
+        }
         if (!mounted) return;
         setState(() => _isPunching = false);
         if (!result.success) {
@@ -301,7 +317,6 @@ class MethodSelector extends ConsumerWidget {
     'WiFi': (label: 'WiFi', icon: Icons.wifi),
     'QRCode': (label: 'QR', icon: Icons.qr_code_scanner),
     'Selfie': (label: 'Selfie', icon: Icons.photo_camera),
-    'Fingerprint': (label: 'Print', icon: Icons.fingerprint),
     'Bluetooth': (label: 'BLE', icon: Icons.bluetooth),
     'NFC': (label: 'NFC', icon: Icons.nfc),
     'FaceRecog': (label: 'Face', icon: Icons.face),

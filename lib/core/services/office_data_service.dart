@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../models/client_site.dart';
 import '../../models/office.dart';
 import '../api/api_endpoints.dart';
 import '../utils/app_logger.dart';
@@ -78,6 +79,48 @@ class OfficeDataService {
     final list = jsonDecode(raw) as List;
     return list
         .map((e) => Office.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Fetches active client sites and caches them locally (same pattern as
+  /// offices) so the auto-geofence engine and the places screen can use them
+  /// without a network round-trip.
+  Future<List<ClientSite>> fetchAndSaveClientSites() async {
+    const endpoint = ApiEndpoints.clientSitesActive;
+
+    try {
+      final response = await _dio.get(endpoint);
+      final data = response.data;
+      _logResponse(endpoint, response.statusCode, data);
+
+      final list = (data is List ? data : data['data'] ?? []) as List;
+      final sites = list
+          .map((e) => ClientSite.fromJson(e as Map<String, dynamic>))
+          .toList();
+      await _persistClientSites(sites);
+
+      AppLogger.i(
+          'OFFICE_DATA: Successfully fetched and cached ${sites.length} client sites');
+      return sites;
+    } catch (e) {
+      AppLogger.e('OFFICE_DATA: Failed to fetch client sites', e);
+      return getCachedClientSites() ?? [];
+    }
+  }
+
+  Future<void> _persistClientSites(List<ClientSite> sites) async {
+    final box = Hive.box(AppConstants.cacheBox);
+    final json = sites.map((s) => s.toJson()).toList();
+    await box.put('client_sites', jsonEncode(json));
+  }
+
+  static List<ClientSite>? getCachedClientSites() {
+    final box = Hive.box(AppConstants.cacheBox);
+    final raw = box.get('client_sites') as String?;
+    if (raw == null) return null;
+    final list = jsonDecode(raw) as List;
+    return list
+        .map((e) => ClientSite.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 

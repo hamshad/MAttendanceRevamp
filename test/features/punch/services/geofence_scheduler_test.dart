@@ -102,16 +102,24 @@ Shift _makeShift({
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Mirrors the delay-computation logic in [GeofenceScheduler.scheduleNextShift].
+///
+/// NOTE: [Shift.todayStart]/[Shift.todayEnd] are computed against the REAL
+/// clock, so the mirrors below derive the day from the passed `now` — keeps
+/// these tests date-independent (they used to drift stale as dates passed).
 Duration _computeDelay(Shift shift, {DateTime? now}) {
   now ??= DateTime.now();
-  final start = shift.todayStart;
+  final parts = shift.startTime.split(':');
+  final start = DateTime(
+    now.year, now.month, now.day,
+    int.parse(parts[0]), int.parse(parts[1]),
+    parts.length > 2 ? int.parse(parts[2]) : 0,
+  );
 
   if (now.isBefore(start)) {
     return start.difference(now);
   }
 
   final tomorrow = now.add(const Duration(days: 1));
-  final parts = shift.startTime.split(':');
   final nextStart = DateTime(
     tomorrow.year, tomorrow.month, tomorrow.day,
     int.parse(parts[0]), int.parse(parts[1]),
@@ -123,14 +131,26 @@ Duration _computeDelay(Shift shift, {DateTime? now}) {
 /// Mirrors the window-check logic in [GeofenceScheduler.startIfWithinShiftWindow].
 bool _isWithinShiftWindow(Shift shift, {DateTime? now}) {
   now ??= DateTime.now();
-  final start = shift.todayStart;
-  final end = shift.todayEnd;
+  final startParts = shift.startTime.split(':');
+  final endParts = shift.endTime.split(':');
+  final start = DateTime(
+    now.year, now.month, now.day,
+    int.parse(startParts[0]), int.parse(startParts[1]),
+    startParts.length > 2 ? int.parse(startParts[2]) : 0,
+  );
+  var end = DateTime(
+    now.year, now.month, now.day,
+    int.parse(endParts[0]), int.parse(endParts[1]),
+    endParts.length > 2 ? int.parse(endParts[2]) : 0,
+  );
+  if (shift.isOvernight) end = end.add(const Duration(days: 1));
   return !now.isBefore(start) && now.isBefore(end);
 }
 
 void main() {
   setUp(() {
     WorkmanagerPlatform.instance = _FakeWorkmanagerPlatform();
+    SharedPreferences.setMockInitialValues({});
   });
 
   group('Delay computation', () {
@@ -312,6 +332,141 @@ void main() {
       final nextTime = DateTime.tryParse(nextStr!);
       expect(nextTime, isNotNull);
       expect(nextTime!.isAfter(DateTime.now()), isTrue);
+    });
+
+    test('persists shift end time for the self-kill check', () async {
+      SharedPreferences.setMockInitialValues({});
+
+      final shift = _makeShift(name: 'TestShift', startTime: '14:00', endTime: '22:00');
+      await GeofenceScheduler.scheduleNextShift(shift);
+
+      final prefs = await SharedPreferences.getInstance();
+      final endRaw = prefs.getString('gf_shift_end_time');
+      expect(endRaw, isNotNull);
+      expect(DateTime.tryParse(endRaw!), isNotNull);
+    });
+  });
+
+  group('Shift-end self-kill', () {
+    test('isPastShiftEnd true when persisted end is in the past', () async {
+      SharedPreferences.setMockInitialValues({
+        'gf_shift_end_time': DateTime.now()
+            .subtract(const Duration(hours: 1))
+            .toIso8601String(),
+      });
+      expect(await GeofenceScheduler.isPastShiftEnd(), isTrue);
+    });
+
+    test('isPastShiftEnd false when persisted end is in the future', () async {
+      SharedPreferences.setMockInitialValues({
+        'gf_shift_end_time': DateTime.now()
+            .add(const Duration(hours: 1))
+            .toIso8601String(),
+      });
+      expect(await GeofenceScheduler.isPastShiftEnd(), isFalse);
+    });
+
+    test('isPastShiftEnd false when no end persisted (fail-safe)', () async {
+      SharedPreferences.setMockInitialValues({});
+      expect(await GeofenceScheduler.isPastShiftEnd(), isFalse);
+    });
+
+    test('cancelRestartAlarm does not throw', () async {
+      SharedPreferences.setMockInitialValues({});
+      await GeofenceScheduler.cancelRestartAlarm();
+    });
+  });
+
+  group('Empty-service guard', () {
+    test('anyAutoFeatureEnabled false when everything is off', () async {
+      SharedPreferences.setMockInitialValues({});
+      expect(await GeofenceScheduler.anyAutoFeatureEnabled(), isFalse);
+    });
+
+    test('anyAutoFeatureEnabled true when geofence auto is on', () async {
+      SharedPreferences.setMockInitialValues({'geofence_auto_enabled': true});
+      expect(await GeofenceScheduler.anyAutoFeatureEnabled(), isTrue);
+    });
+
+    test('anyAutoFeatureEnabled true when wifi bg flag is on', () async {
+      SharedPreferences.setMockInitialValues({
+        'wifi_auto_punch_enabled_bg': true,
+      });
+      expect(await GeofenceScheduler.anyAutoFeatureEnabled(), isTrue);
+    });
+
+    test('anyAutoFeatureEnabled true when field tracking is on', () async {
+      SharedPreferences.setMockInitialValues({'field_tracking_enabled': true});
+      expect(await GeofenceScheduler.anyAutoFeatureEnabled(), isTrue);
+    });
+
+    test('serviceRequired false when geofence is the only auto feature',
+        () async {
+      // Phase 2: geofence-only users run headless — no service process.
+      SharedPreferences.setMockInitialValues({
+        'geofence_auto_enabled': true,
+      });
+      expect(await GeofenceScheduler.serviceRequired(), isFalse);
+    });
+
+    test('serviceRequired false when everything is off', () async {
+      SharedPreferences.setMockInitialValues({});
+      expect(await GeofenceScheduler.serviceRequired(), isFalse);
+    });
+
+    test('serviceRequired true when wifi bg flag is on', () async {
+      SharedPreferences.setMockInitialValues({
+        'wifi_auto_punch_enabled_bg': true,
+      });
+      expect(await GeofenceScheduler.serviceRequired(), isTrue);
+    });
+
+    test('serviceRequired true when wifi fg flag is on', () async {
+      SharedPreferences.setMockInitialValues({
+        'wifi_auto_punch_enabled': true,
+      });
+      expect(await GeofenceScheduler.serviceRequired(), isTrue);
+    });
+
+    test('serviceRequired true when field tracking is on', () async {
+      SharedPreferences.setMockInitialValues({'field_tracking_enabled': true});
+      expect(await GeofenceScheduler.serviceRequired(), isTrue);
+    });
+
+    test('armContainmentAlarmIfNeeded: no token → disarmed', () async {
+      SharedPreferences.setMockInitialValues({'geofence_auto_enabled': true});
+      await GeofenceScheduler.armContainmentAlarmIfNeeded();
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('gf_containment_alarm_armed'), isFalse);
+    });
+
+    test('armContainmentAlarmIfNeeded: token + auto feature → armed', () async {
+      SharedPreferences.setMockInitialValues({
+        'geofence_auto_enabled': true,
+        'bg_access_token': 'tok',
+      });
+      await GeofenceScheduler.armContainmentAlarmIfNeeded();
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('gf_containment_alarm_armed'), isTrue);
+    });
+
+    test('armContainmentAlarmIfNeeded: token, no features → disarmed',
+        () async {
+      SharedPreferences.setMockInitialValues({'bg_access_token': 'tok'});
+      await GeofenceScheduler.armContainmentAlarmIfNeeded();
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('gf_containment_alarm_armed'), isFalse);
+    });
+
+    test('cancelContainmentAlarm clears the armed flag', () async {
+      SharedPreferences.setMockInitialValues({
+        'geofence_auto_enabled': true,
+        'bg_access_token': 'tok',
+        'gf_containment_alarm_armed': true,
+      });
+      await GeofenceScheduler.cancelContainmentAlarm();
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('gf_containment_alarm_armed'), isFalse);
     });
   });
 }

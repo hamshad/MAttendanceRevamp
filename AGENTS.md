@@ -1,0 +1,96 @@
+# Project Memory — mAttendance Mobile
+
+Context for any agent working in this repo. Architecture docs live in
+`.planning/docs/` — READ before touching auto-punch / tracking / geofence code.
+
+## Must-read before geofence/punch/tracking changes
+
+- `.planning/docs/native-first-geofence-architecture.md` — the canonical
+  architecture: §Design contract (CONTRACTED user decisions — we only make
+  it STRONGER, never redesign; rejected designs listed there), punch paths,
+  containment loop, keep-alive service, battery principles, honest-OEM
+  limits, change log.
+- `.planning/docs/device-gps-accuracy-plan.md` — accuracy/uncertainty model.
+- Debug incident records: `.planning/debug/` (resolved → `resolved/`).
+
+> Geofence shape is CONTRACTED (2026-08-14). IN = headless OS ENTER only.
+> OUT = In-only FGS walk-out stream. Anti-fake layers NEVER stripped.
+> New machinery only with field evidence (logcat) + user sign-off.
+
+## Hard invariants (do not regress)
+
+1. **Honesty rule**: punch locations are the REAL detection point (OS
+   crossing or confirm fix). NEVER snap/rewrite coordinates. The old
+   `snapOutToBoundary` was added then removed on purpose (commit `8b6329e`).
+2. OS geofence ENTER/EXIT → WorkManager headless is the PRIMARY punch path.
+   Never replace it with polling as the primary mechanism.
+3. Geofence-only users must NOT get the combined background service
+   (`serviceRequired()` checks wifi bg/fg + field tracking only). The
+   keep-alive FGS is separate and lightweight: **all Android devices,
+   gated to the punched-IN state only** (Android requires a persistent
+   notification for any FGS; IN itself needs no service — OS geofence
+   ENTER is motion-assisted and fires even with a dead process,
+   field-proven 12h+ without app open. The FGS exists for the walk-out
+   only: the movement stream catches it, OUT punches at the boundary and
+   stops the service — back to headless IN. Banner shows exactly while
+   at work: never at night, weekends or leave days (punch-state gate —
+   leave days never punch). The FGS is NEVER auto-revived (sticky
+   close, user design): closed stays closed — no banner behind the
+   user's back; headless OUT covers it (OS geofence EXIT primary +
+   15-min headless reconcile guarantee). Commits
+   `8dc7894`/`47130be`/`8787c56`/`82f2d0a`/`10197aa`/`e624167`/`0c1ec2c`). The
+   15-min AlarmManager containment alarm is the **24/7 headless-IN
+   checker**: `gf_containment_alarm_armed` is the MASTER ENABLE
+   (geofence auto on, never cleared by punch state — cleared on
+   disable/logout only) and the chain NEVER rests while armed — every
+   fire re-registers the OS geofences from persisted metadata
+   (`reRegisterZonesFromCache` — NO network; `registerZones` fetches
+   offices over the API and must not run on 15-min cadence) and
+   re-checks containment (last-known-first + fix budget, no GPS when
+   away). This permanently closes the morning-IN-miss class — the
+   pre-`e624167` chain rested outside the shift window, leaving the
+   missed-ENTER net dead exactly when Out+window.
+   Android 15+ (`VANILLA_ICE_CREAM`): never start the FGS from
+   `BOOT_COMPLETED` — location-type FGS start is banned there; the
+   exact-alarm revive path is exempt.
+4. `wifi_auto_punch_enabled_bg` defaults **false**. A `?? true` here leaks a
+   service start (commit `0ddb03a`).
+5. Containment alarm + alignment worker must call
+    `reRegisterZonesFromCache(initialTriggers: {enter})` (cache-only, no
+    network) BEFORE `reconcileContainment()` — zones self-heal AND the
+    catch-up ENTER re-fires for an already-inside punched-OUT phone
+    (fix-independent headless IN recovery when the OS ENTER is
+    OEM-dropped/deferred — Nothing-class missed-IN). Own-source duplicates
+    persist silently (no notification spam for a punched-IN user sitting
+    inside). Catch-up ENTER only fires when genuinely inside the geofence
+    radius — cannot fabricate a far-away IN (commit `68ce662`; `e624167`
+    made the checker 24/7 and switched it to cache-only re-registration;
+    the `{enter}` catch-up was restored in the Nothing 3a fix).
+6. Keep-alive branch: no timers. Only the movement-gated GPS stream
+   (distanceFilter 30m) while punched in. Stationary = zero fixes.
+7. Punch pipeline order is sacred: fresh-fix GPS gate → OUT zone-identity gate
+   → server-truth `PunchCoordinator` (FIRST in `_executePunch`) → POST →
+   offline queue → `_persistPunchState`. Server decides; local gate only when
+   server unreachable.
+8. **Fixed punch bands (user spec)**: IN accepts only within `radius+5m`
+   (25m at a 20m office); OUT requires beyond `radius+25m` (45m) with
+   two-fix confirmation. Accuracy NEVER widens either band — the old
+   2×accuracy margins caused the 61m IN and the delayed 149m OUT
+   (commit `ab070de`). IN trust floor: fixes claiming worse accuracy than
+   the radius defer to the OS crossing point; a fix at 61m must never
+   punch IN.
+
+## Conventions
+
+- Commits: conventional (`fix(geofence): …`), one logical change, run
+  `flutter analyze` + `flutter test` before committing. Full suite must stay
+  green (173 tests).
+- Geofence changes: only make the contracted design STRONGER (defense
+  depth, edge cases, battery efficiency inside the shapes) — never
+  redesign. Shape changes need user sign-off (see §Design contract).
+- Zone metadata: persisted JSON `gf_zone_ids` / `gf_zone_$id`
+  (`GeofenceZone.toJson/fromJson`). Native/Android pieces under
+  `android/app/src/main/kotlin/com/mattendance/mattendance_mobile/`.
+- Incident → open `.planning/debug/<slug>.md`, follow the debug-file protocol,
+  archive to `resolved/` when done, and append the commit to the architecture
+  doc's change log.

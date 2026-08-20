@@ -6,9 +6,13 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/api/api_endpoints.dart';
+import '../../../core/offline/offline_queue.dart';
+import '../../../core/offline/offline_sync_manager.dart';
+import '../../../core/punch/punch_coordinator.dart';
 import '../../../core/services/office_data_service.dart';
 import '../../../core/utils/constants.dart';
 import '../../../core/utils/app_logger.dart';
+import '../../../models/offline_punch.dart';
 import '../../../models/office.dart';
 import './wifi_service.dart';
 
@@ -18,8 +22,16 @@ class WifiAutoPunchService {
   static const _lastMacKey = 'wifiAutoLastMac';
   static const _currentOfficeNameKey = 'wifiAutoCurrentOfficeName';
 
-  // ✅ NEW: Track last punch state
+  // Track last punch state
   static const _lastPunchStatusKey = 'wifiLastPunchStatus';
+
+  // Manual-out-on-wifi flag: when user manually punches OUT while connected
+  // to office WiFi, suppress auto re-IN until WiFi disconnects (trigger edge).
+  static const _manualOutOnWifiKey = 'wifiManualOutOnWifi';
+
+  // Manual IN flag: when user manually punches IN (GPS, NFC, etc.), suppress
+  // auto WiFi OUT — don't let WiFi undo a manual punch.
+  static const _manualInKey = 'wifiManualIn';
 
   // Pending OUT keys (mirrors wifi_background_worker.dart)
   static const _pendingOutKey = 'wifi_pending_out';
@@ -27,6 +39,31 @@ class WifiAutoPunchService {
   static const _pendingOutBssidKey = 'wifi_pending_out_bssid';
 
   static const String defaultCompanySsid = 'Moksha_Office';
+
+  // Cross-isolate disconnect guard — shared with WifiBackgroundWorker.
+  // Only one isolate should punch OUT per disconnect event.
+  // The first to process marks the timestamp; the other skips.
+  static const String _disconnectProcessedKey = 'wifi_disconnect_processed_ts';
+  static const int _disconnectGuardMs = 30000;
+
+  static Future<bool> isDisconnectAlreadyProcessed() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final ts = prefs.getInt(_disconnectProcessedKey) ?? 0;
+    if (ts == 0) return false;
+    return (DateTime.now().millisecondsSinceEpoch - ts) < _disconnectGuardMs;
+  }
+
+  static Future<void> markDisconnectProcessed() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_disconnectProcessedKey, DateTime.now().millisecondsSinceEpoch);
+    AppLogger.d('WIFI_AUTO: Disconnect marked as processed (guard: ${_disconnectGuardMs}ms)');
+  }
+
+  // Cooldown after a punch action — prevents rapid IN→OUT when two
+  // WiFi scans within the same frame return different results on startup.
+  static const int _cooldownMs = 10000;
+  static int _lastPunchTimestamp = 0;
 
   final Dio _dio;
   final FlutterLocalNotificationsPlugin _notifications;
@@ -69,10 +106,9 @@ class WifiAutoPunchService {
   static Future<void> setRegisteredSsid(String ssid) =>
       Hive.box(AppConstants.cacheBox).put(_registeredSsidKey, ssid);
 
-  // ✅ NEW: Punch state
   static String get lastPunchStatus {
     final box = Hive.box(AppConstants.cacheBox);
-    return box.get(_lastPunchStatusKey, defaultValue: '') as String;
+    return box.get(_lastPunchStatusKey, defaultValue: 'unknown') as String;
   }
 
   static String get lastMac {
@@ -91,14 +127,92 @@ class WifiAutoPunchService {
   static Future<void> setCurrentOfficeName(String name) =>
       Hive.box(AppConstants.cacheBox).put(_currentOfficeNameKey, name);
 
-  static Future<void> setLastPunchStatus(String status) =>
-      Hive.box(AppConstants.cacheBox).put(_lastPunchStatusKey, status);
+  static Future<void> setLastPunchStatus(String status) async {
+    await Hive.box(AppConstants.cacheBox).put(_lastPunchStatusKey, status);
+    // Mirror to SharedPreferences so background worker (which reads
+    // gf_last_punch_type) sees the update without waiting for a punch
+    // API response.
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('gf_last_punch_type', status);
+    _lastPunchTimestamp = DateTime.now().millisecondsSinceEpoch;
+  }
+
+  static bool get manualOutOnWifi {
+    final box = Hive.box(AppConstants.cacheBox);
+    return box.get(_manualOutOnWifiKey, defaultValue: false) as bool;
+  }
+
+  static Future<void> setManualOutOnWifi() async {
+    await Hive.box(AppConstants.cacheBox).put(_manualOutOnWifiKey, true);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('wifi_manual_out_on_wifi', true);
+    AppLogger.i('WIFI_AUTO: Manual-out-on-wifi flag SET');
+  }
+
+  static Future<void> clearManualOutOnWifi() async {
+    await Hive.box(AppConstants.cacheBox).put(_manualOutOnWifiKey, false);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('wifi_manual_out_on_wifi', false);
+    AppLogger.d('WIFI_AUTO: Manual-out-on-wifi flag CLEARED');
+  }
+
+  static bool get manualIn {
+    final box = Hive.box(AppConstants.cacheBox);
+    return box.get(_manualInKey, defaultValue: false) as bool;
+  }
+
+  static Future<void> setManualIn() async {
+    await Hive.box(AppConstants.cacheBox).put(_manualInKey, true);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('wifi_manual_in', true);
+    AppLogger.i('WIFI_AUTO: Manual IN flag SET');
+  }
+
+  static Future<void> clearManualIn() async {
+    await Hive.box(AppConstants.cacheBox).put(_manualInKey, false);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('wifi_manual_in', false);
+    AppLogger.d('WIFI_AUTO: Manual IN flag CLEARED');
+  }
+
+  // Last-IN method (persisted via SP for bg worker compatibility)
+  static const _lastInMethodKey = 'wifi_last_in_method';
+
+  static String get lastInMethod {
+    final box = Hive.box(AppConstants.cacheBox);
+    return box.get(_lastInMethodKey, defaultValue: '') as String;
+  }
+
+  static Future<void> markLastInByWifi() async {
+    await Hive.box(AppConstants.cacheBox).put(_lastInMethodKey, 'wifi');
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_lastInMethodKey, 'wifi');
+  }
+
+  static Future<void> markLastInManual() async {
+    await Hive.box(AppConstants.cacheBox).put(_lastInMethodKey, 'manual');
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_lastInMethodKey, 'manual');
+  }
+
+  static Future<void> clearLastInMethod() async {
+    await Hive.box(AppConstants.cacheBox).put(_lastInMethodKey, '');
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_lastInMethodKey);
+  }
 
   Future<void> syncState({required String status, String? officeName}) async {
     AppLogger.i('WIFI_AUTO: Syncing state from UI -> $status (Office: $officeName)');
     await setLastPunchStatus(status);
     if (officeName != null) {
       await setCurrentOfficeName(officeName);
+    }
+
+    // Manual IN resets the manual-out-on-wifi guard — user wants to be tracked.
+    if (status == 'In') {
+      await clearManualOutOnWifi();
+    } else if (status == 'Out') {
+      await clearLastInMethod();
     }
     
     // If user is IN, try to capture and "learn" the current WiFi as the office WiFi
@@ -128,12 +242,37 @@ class WifiAutoPunchService {
     return prefs.getString(_pendingOutBssidKey) ?? '';
   }
 
-  Future<void> _savePendingOut() async {
-    AppLogger.i('WIFI_AUTO: Saving pending OUT (no internet)');
+  /// Server-truth gate — true when the server already has this direction
+  /// (biometric machine / website) or the punch is invalid (OUT with no IN,
+  /// IN mid-break).  Offline → false: the POST itself will fail and the
+  /// existing failure handling queues / clears as before.
+  Future<bool> _serverSaysDuplicate(String direction) async {
+    final verdict =
+        await PunchCoordinator.check(dio: _dio, direction: direction);
+    return verdict == PunchCheck.duplicate || verdict == PunchCheck.blocked;
+  }
+
+  Future<void> _savePendingOut() async {    AppLogger.i('WIFI_AUTO: Saving pending OUT (no internet)');
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_pendingOutKey, true);
     await prefs.setString(_pendingOutTsKey, DateTime.now().toIso8601String());
     await prefs.setString(_pendingOutBssidKey, lastMac);
+
+    // Also queue into the Hive offline queue so OfflineSyncManager delivers
+    // it when connectivity returns — even if the app is killed (the SP flag
+    // only survives while the isolate runs).
+    try {
+      final punch = OfflinePunch()
+        ..method = 'WiFi'
+        ..direction = 'Out'
+        ..wifiMAC = lastMac.isNotEmpty ? lastMac : 'unknown'
+        ..createdAt = DateTime.now();
+      await OfflineQueueService().enqueue(punch);
+      await OfflineSyncManager.scheduleNow();
+      AppLogger.i('WIFI_AUTO: queued WiFi OUT to offline queue');
+    } catch (e) {
+      AppLogger.e('WIFI_AUTO: offline queue enqueue failed', e);
+    }
   }
 
   Future<void> _flushPendingOut() async {
@@ -148,6 +287,15 @@ class WifiAutoPunchService {
       try {
         ip = await _wifiService.getWifiIP() ?? '0.0.0.0';
       } catch (_) {}
+
+      // Server-truth gate — a biometric/website OUT may already exist.
+      if (await _serverSaysDuplicate('Out')) {
+        await _clearPendingOut();
+        await setLastPunchStatus('Out');
+        await setCurrentOfficeName('');
+        onPunch?.call();
+        return;
+      }
 
       final response = await _dio.post(ApiEndpoints.punch, data: {
         'Method': 'WiFi',
@@ -201,8 +349,12 @@ class WifiAutoPunchService {
 
     _running = true;
 
-    // Immediate check
-    await checkAndPunchIfEnabled();
+    // No immediate check here — the connectivity stream fires asynchronously
+    // right after subscription, which triggers _onConnectivityChanged →
+    // checkAndPunchIfEnabled().  Adding another call here would run two
+    // WiFi scans back-to-back, and the second scan can return a different
+    // BSSID (radio still busy), causing the first scan to punch IN and the
+    // second to punch OUT.
   }
 
   void stop() async {
@@ -227,10 +379,12 @@ class WifiAutoPunchService {
     } else if (results.contains(ConnectivityResult.mobile)) {
       AppLogger.d('WIFI_AUTO: Mobile data available');
       await _flushPendingOut();
-      await checkAndPunchIfEnabled();
+      // Don't call checkAndPunchIfEnabled on mobile data — there's no WiFi
+      // connection to check, and getCurrentWifi() can return a stale cached
+      // BSSID on Android, causing a false IN punch on phantom WiFi.
     } else {
-      AppLogger.d('WIFI_AUTO: WiFi disconnected');
-      await _handleWifiDisconnected();
+      AppLogger.d('WIFI_AUTO: Connectivity lost — re-checking before declaring disconnect');
+      await checkAndPunchIfEnabled();
     }
   }
 
@@ -307,6 +461,12 @@ class WifiAutoPunchService {
         if (matchedOffice != null) {
           AppLogger.i('WIFI_AUTO: Pending OUT cancelled — user returned to ${matchedOffice.name}');
           await _clearPendingOut();
+          // Drop queued WiFi punches too — the disconnect never really happened.
+          try {
+            await OfflineQueueService().deleteQueuedByMethod('WiFi');
+          } catch (e) {
+            AppLogger.e('WIFI_AUTO: clear queued WiFi punches error', e);
+          }
         } else {
           await _flushPendingOut();
         }
@@ -320,7 +480,18 @@ class WifiAutoPunchService {
         await _triggerPunch(info, null);
       }
     } catch (e) {
-      AppLogger.v('WIFI_AUTO: No WiFi connection, verifying punch status');
+      AppLogger.v('WIFI_AUTO: getCurrentWifi failed — verifying real connectivity');
+      // getCurrentWifi() throws when Android hides SSID/BSSID (location/GPS
+      // off) even though WiFi is connected.  Check connectivity first: if
+      // WiFi is still up, this is a READ failure, not a disconnect — do NOT
+      // flush pending OUT or punch OUT.
+      try {
+        final conn = await Connectivity().checkConnectivity();
+        if (conn.contains(ConnectivityResult.wifi)) {
+          AppLogger.w('WIFI_AUTO: WiFi connected but BSSID unreadable (location off?) — skipping disconnect');
+          return;
+        }
+      } catch (_) {}
       // Flush any pending OUT via mobile data if available
       await _flushPendingOut();
       await _handleWifiDisconnected();
@@ -333,13 +504,54 @@ class WifiAutoPunchService {
     final lastStatus = lastPunchStatus;
     final isMatch = matchedOffice != null;
 
+    // ── Unknown-state guard ──────────────────────────────────────
+    // On fresh app start, lastPunchStatus defaults to 'unknown'.
+    // Don't punch until the server syncs the real state via
+    // _onAttendanceStatusChanged → syncState().
+    if (lastStatus == '' || lastStatus == 'unknown') {
+      AppLogger.i('WIFI_AUTO: Unknown punch state ($lastStatus) — deferring to server sync');
+      return;
+    }
+
+    // ── Cooldown guard ───────────────────────────────────────────
+    // Prevent rapid IN → OUT when two WiFi scans return different
+    // results within a short window (common on fresh app open).
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastPunchTimestamp > 0 && (now - _lastPunchTimestamp) < _cooldownMs) {
+      AppLogger.i('WIFI_AUTO: Cooldown active (${now - _lastPunchTimestamp}ms) — skipping punch');
+      return;
+    }
+
     if (isMatch) {
       if (lastStatus == 'In') {
-        AppLogger.d('WIFI_AUTO: Already IN → skipping');
+        // Phone on registered WiFi while already IN.  Mark last IN as WiFi
+        // so a future disconnect triggers OUT correctly.
+        if (lastInMethod != 'wifi') {
+          await markLastInByWifi();
+          AppLogger.i('WIFI_AUTO: Already IN on registered WiFi — marking lastIn=wifi');
+        }
+        return;
+      }
+
+      // Manual-out-on-wifi guard: if user manually punched OUT while still
+      // connected to office WiFi, suppress auto re-IN until WiFi disconnects
+      // (trigger edge — handled in _handleWifiDisconnected).
+      if (manualOutOnWifi) {
+        AppLogger.i('WIFI_AUTO: Manual-out-on-wifi active — skip auto IN (wait for WiFi disconnect)');
         return;
       }
 
       try {
+        // Server-truth gate — a biometric/website IN may already exist.
+        if (await _serverSaysDuplicate('In')) {
+          await setLastPunchStatus('In');
+          await setCurrentOfficeName(matchedOffice.name);
+          await clearManualIn();
+          await markLastInByWifi();
+          AppLogger.w('WIFI_AUTO: Already IN via another source — syncing local state');
+          return;
+        }
+
         // Get IP Address
         String ip = '0.0.0.0';
         try {
@@ -359,6 +571,8 @@ class WifiAutoPunchService {
           await setLastPunchStatus('In');
           await setLastMac(_getRegisteredOfficeMac(matchedOffice.name));
           await setCurrentOfficeName(matchedOffice.name);
+          await clearManualIn();
+          await markLastInByWifi();
           await _showNotification(info.ssid, 'In');
           onPunch?.call();
         }
@@ -367,6 +581,8 @@ class WifiAutoPunchService {
           AppLogger.w('WIFI_AUTO: Duplicate punch detected. Syncing local state.');
           await setLastPunchStatus('In');
           await setCurrentOfficeName(matchedOffice.name);
+          await clearManualIn();
+          await markLastInByWifi();
           onPunch?.call();
           return;
         }
@@ -374,9 +590,30 @@ class WifiAutoPunchService {
       }
     } else {
       if (lastStatus == 'In') {
+        // Manual OUT guard: if user manually punched OUT while on office WiFi,
+        // suppress auto OUT on BSSID mismatch. WiFi-disconnect OUT still fires.
+        if (manualOutOnWifi) {
+          AppLogger.i('WIFI_AUTO: Manual-out-on-wifi active — skip auto OUT (BSSID mismatch)');
+          return;
+        }
+        // Last-IN-method guard: only punch OUT on BSSID mismatch if last IN
+        // was via WiFi auto-punch. Manual IN (GPS/NFC) should not be undone.
+        if (lastInMethod != 'wifi') {
+          AppLogger.i('WIFI_AUTO: Last IN not via WiFi — skip auto OUT (BSSID mismatch)');
+          return;
+        }
+
         AppLogger.i('WIFI_AUTO: Left office WiFi → Punch OUT');
         final mac = _getRegisteredOfficeMac(currentOfficeName);
         try {
+          // Server-truth gate — a biometric/website OUT may already exist.
+          if (await _serverSaysDuplicate('Out')) {
+            await setLastPunchStatus('Out');
+            await setCurrentOfficeName('');
+            AppLogger.w('WIFI_AUTO: Already OUT via another source — syncing local state');
+            return;
+          }
+
           String ip = '0.0.0.0';
           try {
             ip = await _wifiService.getWifiIP() ?? '0.0.0.0';
@@ -435,14 +672,48 @@ class WifiAutoPunchService {
   Future<void> _handleWifiDisconnected() async {
     if (!isEnabled) return;
 
+    // ── Cross-isolate guard: skip if background already processed ──
+    if (await isDisconnectAlreadyProcessed()) {
+      AppLogger.i('WIFI_AUTO: Disconnect already processed by other isolate — skipping');
+      await setLastPunchStatus('Out');
+      await setCurrentOfficeName('');
+      return;
+    }
+
+    // WiFi disconnect clears the manual-out-on-wifi guard — the trigger edge
+    // has now cycled, so auto IN is allowed again on next reconnect.
+    if (manualOutOnWifi) {
+      await clearManualOutOnWifi();
+    }
+
     final lastStatus = lastPunchStatus;
 
     if (lastStatus == 'In') {
+      // Last-IN-method guard: manual IN (GPS/NFC) should not be undone
+      // by WiFi state changes.
+      if (lastInMethod != 'wifi') {
+        AppLogger.i('WIFI_AUTO: Last IN not via WiFi — skip auto OUT on disconnect');
+        return;
+      }
+
       AppLogger.i('WIFI_AUTO: WiFi lost → Punch OUT');
+
+      // Mark processed BEFORE HTTP so background isolate skips its attempt.
+      await markDisconnectProcessed();
 
       final mac = _getRegisteredOfficeMac(currentOfficeName);
   
       try {
+        // Server-truth gate — a biometric/website OUT may already exist.
+        if (await _serverSaysDuplicate('Out')) {
+          await setLastPunchStatus('Out');
+          await setCurrentOfficeName('');
+          await clearManualIn();
+          await clearLastInMethod();
+          AppLogger.w('WIFI_AUTO: Already OUT via another source — syncing local state');
+          return;
+        }
+
         String ip = '0.0.0.0';
         try {
           ip = await _wifiService.getWifiIP() ?? '0.0.0.0';
@@ -460,6 +731,8 @@ class WifiAutoPunchService {
           AppLogger.i('WIFI_AUTO: Successfully punched OUT (Disconnected)');
           await setLastPunchStatus('Out');
           await setCurrentOfficeName('');
+          await clearManualIn();
+          await clearLastInMethod();
           onPunch?.call();
           await _showNotification('', 'Out');
         }
@@ -468,6 +741,8 @@ class WifiAutoPunchService {
           AppLogger.w('WIFI_AUTO: Duplicate punch detected (Disconnected). Syncing local state.');
           await setLastPunchStatus('Out');
           await setCurrentOfficeName('');
+          await clearManualIn();
+          await clearLastInMethod();
           onPunch?.call();
           return;
         }

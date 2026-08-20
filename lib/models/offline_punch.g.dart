@@ -33,13 +33,14 @@ class OfflinePunchAdapter extends TypeAdapter<OfflinePunch> {
       ..direction = fields[13] as String?
       ..createdAt = fields[14] as DateTime
       ..retryCount = fields[15] as int
-      ..errorMessage = fields[16] as String?;
+      ..errorMessage = fields[16] as String?
+      ..clientSiteId = fields[17] as int?;
   }
 
   @override
   void write(BinaryWriter writer, OfflinePunch obj) {
     writer
-      ..writeByte(17)
+      ..writeByte(18)
       ..writeByte(0)
       ..write(obj.method)
       ..writeByte(1)
@@ -73,7 +74,9 @@ class OfflinePunchAdapter extends TypeAdapter<OfflinePunch> {
       ..writeByte(15)
       ..write(obj.retryCount)
       ..writeByte(16)
-      ..write(obj.errorMessage);
+      ..write(obj.errorMessage)
+      ..writeByte(17)
+      ..write(obj.clientSiteId);
   }
 
   @override

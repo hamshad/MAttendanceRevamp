@@ -125,7 +125,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   controller: _passwordController,
                   obscureText: _obscurePassword,
                   textInputAction: TextInputAction.done,
-                  onFieldSubmitted: (_) => _login(),
+                  onFieldSubmitted: (_) {
+                    if (!_isLoading) _login();
+                  },
                   decoration: InputDecoration(
                     labelText: 'Password',
                     prefixIcon: const Icon(Icons.lock_outline),

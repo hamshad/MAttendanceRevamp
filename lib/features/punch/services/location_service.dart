@@ -1,6 +1,7 @@
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import '../../../core/utils/app_logger.dart';
+import '../../../core/utils/location_precision.dart';
 
 class LocationResult {
   final double latitude;
@@ -19,6 +20,15 @@ class LocationResult {
 class LocationPermissionDeniedException implements Exception {
   final String message;
   const LocationPermissionDeniedException(this.message);
+}
+
+/// Thrown when location permission is granted but only at APPROXIMATE
+/// (coarse) granularity. Coarse fixes are 500m–2km off, which silently breaks
+/// GPS punch, geofence, WiFi alignment and client-site verification — so the
+/// app refuses to use them and directs the user to enable precise location.
+class LocationPrecisionRequiredException implements Exception {
+  final String message;
+  const LocationPrecisionRequiredException(this.message);
 }
 
 class LocationService {
@@ -53,6 +63,18 @@ class LocationService {
       AppLogger.e('LOCATION: Permission permanently denied');
       throw const LocationPermissionDeniedException(
         'Location permission permanently denied. Please enable it in app settings.',
+      );
+    }
+
+    // Mandatory PRECISE location. Approximate (coarse) permission is granted
+    // by the OS but serves network/cell-tower fixes 500m–2km off — breaking
+    // every location-based feature. Geolocator cannot detect granularity, so
+    // we query the native side and hard-fail when coarse.
+    if (!await LocationPrecision.isPreciseGranted()) {
+      AppLogger.w('LOCATION: Approximate location granted — precise required');
+      throw const LocationPrecisionRequiredException(
+        'Precise location is required. Open app settings, tap Location, and '
+        'switch from "Approximate" to "Precise" (allow all the time).',
       );
     }
 

@@ -1,17 +1,32 @@
+import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dio/dio.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:network_info_plus/network_info_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/auth/auth_provider.dart';
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/offline/offline_providers.dart';
+import '../../../core/offline/offline_sync_manager.dart';
+import '../../../core/punch/punch_coordinator.dart';
+import '../../../core/utils/constants.dart';
+import '../../alignment/alignment_monitor.dart';
 import '../../punch/services/manual_geo_service.dart';
+import '../../punch/services/location_service.dart';
 import '../../../models/attendance.dart';
 import '../../../models/offline_punch.dart';
+
+/// Injected so we don't create a new instance per punch (on iOS cellular
+/// a fresh [NetworkInfo] can freeze or throw trying to read WiFi IP).
+final networkInfoProvider = Provider<NetworkInfo>((_) => NetworkInfo());
 
 /// Set to `true` when the user manually punches "Out" from the UI.
 /// Consumed by [MainShell] to distinguish manual punch-out (→ stop geofence)
 /// from auto punch-out (→ keep geofence running for re-entry).
 final manualPunchOutProvider = StateProvider<bool>((ref) => false);
+
+final manualPunchInProvider = StateProvider<bool>((ref) => false);
 
 // ── Attendance Status ─────────────────────────────────────────────────────────
 
@@ -20,24 +35,105 @@ final attendanceStatusProvider = AsyncNotifierProvider<AttendanceStatusNotifier,
 );
 
 class AttendanceStatusNotifier extends AsyncNotifier<EmployeeStatus?> {
+  EmployeeStatus? _lastKnownValue;
+
   @override
-  Future<EmployeeStatus?> build() => _fetch();
+  Future<EmployeeStatus?> build() async {
+    ref.watch(authNotifierProvider);
+    // Cache-first: if today's cached status exists, render it instantly and
+    // refresh in the background — no skeleton flash, no waiting on the
+    // network before the home screen shows real data.
+    final cached = _loadFromCache();
+    if (cached != null) {
+      _lastKnownValue = cached;
+      _refreshInBackground();
+      return cached;
+    }
+    final result = await _fetch();
+    if (result != null) return result;
+    return _loadFromCache();
+  }
+
+  /// Fetch fresh data in the background and swap it into the UI when it
+  /// arrives.  Never clobbers a loading/error state with stale data.
+  Future<void> _refreshInBackground() async {
+    try {
+      final fresh = await _fetch();
+      if (fresh != null && state is AsyncData) {
+        state = AsyncData<EmployeeStatus?>(fresh);
+      }
+    } catch (_) {}
+  }
 
   Future<EmployeeStatus?> _fetch() async {
+    final _bench = Stopwatch()..start();
     try {
       final dio = ref.read(dioClientProvider).dio;
       final response = await dio.get(ApiEndpoints.todayStatus);
       print('[DEBUG_SHIFT] Raw /attendance/status JSON (dashboard): ${response.data}');
       final data = response.data['data'] as Map<String, dynamic>?;
-      return data != null ? EmployeeStatus.fromJson(data) : null;
+      print('[BENCH] status fetch: ${_bench.elapsedMilliseconds}ms (cached=${_lastKnownValue != null || _loadFromCache() != null})');
+      _lastKnownValue = data != null ? EmployeeStatus.fromJson(data) : null;
+      if (data != null) _saveToCache(data);
+      return _lastKnownValue;
+    } catch (_) {
+      try {
+        await Future.delayed(const Duration(milliseconds: 800));
+        final dio = ref.read(dioClientProvider).dio;
+        final response = await dio.get(ApiEndpoints.todayStatus);
+        final data = response.data['data'] as Map<String, dynamic>?;
+        print('[BENCH] status fetch (retry): ${_bench.elapsedMilliseconds}ms');
+        _lastKnownValue = data != null ? EmployeeStatus.fromJson(data) : null;
+        if (data != null) _saveToCache(data);
+        return _lastKnownValue;
+      } catch (_) {
+        print('[BENCH] status fetch FAILED: ${_bench.elapsedMilliseconds}ms');
+        return _lastKnownValue;
+      }
+    }
+  }
+
+  /// Persist raw API response to Hive so it survives app restart.
+  void _saveToCache(Map<String, dynamic> data) {
+    try {
+      final box = Hive.box(AppConstants.cacheBox);
+      box.put('cached_status', jsonEncode(data));
+    } catch (_) {}
+  }
+
+  /// Restore cached status from Hive for fresh-offline launches.
+  EmployeeStatus? _loadFromCache() {
+    try {
+      final box = Hive.box(AppConstants.cacheBox);
+      final raw = box.get('cached_status') as String?;
+      if (raw == null) return null;
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+      final status = EmployeeStatus.fromJson(data);
+      // Discard cached data if it's from a different day
+      if (status.date != _todayString()) return null;
+      _lastKnownValue = status;
+      return status;
     } catch (_) {
       return null;
     }
   }
 
+  String _todayString() {
+    final n = DateTime.now();
+    return '${n.year}-${n.month.toString().padLeft(2, '0')}-${n.day.toString().padLeft(2, '0')}';
+  }
+
   Future<void> refresh() async {
-    state = const AsyncLoading();
-    state = await AsyncValue.guard(_fetch);
+    final previous = state.value;
+    final cached = _loadFromCache() ?? previous;
+    if (cached != null) {
+      // Keep showing current data — swap when fresh arrives (no flash).
+      state = AsyncData<EmployeeStatus?>(cached);
+      await _refreshInBackground();
+    } else {
+      state = const AsyncLoading();
+      state = await AsyncValue.guard(() => _fetch().then((v) => v ?? previous));
+    }
   }
 }
 
@@ -57,7 +153,11 @@ class PunchNotifier extends AsyncNotifier<void> {
   @override
   Future<void> build() async {}
 
-  Future<PunchResult> punch(String method, {Map<String, dynamic>? extras}) async {
+  Future<PunchResult> punch(
+    String method, {
+    Map<String, dynamic>? extras,
+    bool force = false,
+  }) async {
     state = const AsyncLoading();
 
     // Check connectivity before attempting the API call
@@ -73,7 +173,7 @@ class PunchNotifier extends AsyncNotifier<void> {
       // Get IP Address (Mandatory for backend)
       String ip = '0.0.0.0';
       try {
-        ip = await NetworkInfo().getWifiIP() ?? '0.0.0.0';
+        ip = await ref.read(networkInfoProvider).getWifiIP() ?? '0.0.0.0';
       } catch (_) {}
 
       // Capitalize keys to match backend expectations (PascalCase)
@@ -104,6 +204,24 @@ class PunchNotifier extends AsyncNotifier<void> {
         }
       }
 
+      // Server-truth gate — the server may already have this punch (biometric
+      // machine / website punched in while the app wasn't looking).  A forced
+      // punch skips the gate (user confirmed the duplicate).
+      if (!force) {
+        final direction = body['Direction'] as String? ?? 'In';
+        final verdict =
+            await PunchCoordinator.check(dio: dio, direction: direction);
+        if (verdict == PunchCheck.duplicate || verdict == PunchCheck.blocked) {
+          return PunchResult(
+            success: false,
+            isDuplicate: true,
+            message: direction == 'In'
+                ? 'Already punched in'
+                : 'Already punched out',
+          );
+        }
+      }
+
       final response = await dio.post(ApiEndpoints.punch, data: body);
       final wrapper = response.data as Map<String, dynamic>;
       // ApiResponse<PunchResponse> — unwrap data field
@@ -112,10 +230,15 @@ class PunchNotifier extends AsyncNotifier<void> {
 
       if (body['Direction'] == 'Out') {
         ref.read(manualPunchOutProvider.notifier).state = true;
+      } else if (body['Direction'] == 'In') {
+        ref.read(manualPunchInProvider.notifier).state = true;
       }
 
       state = const AsyncData(null);
       ref.invalidate(attendanceStatusProvider);
+      // Punch state changed → alignment alerts (GPS off, airplane mode, …)
+      // surface immediately on punch-in and silence on punch-out.
+      await AlignmentMonitor.instance.reEvaluate();
       return result;
     } on DioException catch (e) {
       state = AsyncError(e, StackTrace.current);
@@ -138,26 +261,62 @@ class PunchNotifier extends AsyncNotifier<void> {
   }) async {
     final queue = ref.read(offlineQueueServiceProvider);
 
+    // ── GPS-only policy ─────────────────────────────────────────────────
+    // Offline punches are GPS punches: the backend timeline alternates and
+    // a location is required.  Other methods are NOT queued offline — the
+    // user gets a clear failure instead of a silently-failed queued punch.
+    if (method != 'GPS') {
+      state = const AsyncData(null);
+      return PunchResult(
+        success: false,
+        message: 'Offline punches only supported with GPS — select GPS or go online',
+      );
+    }
+
+    // ── Location is mandatory ───────────────────────────────────────────
+    // The caller may pass coords (GPSPunchScreen) or not (punch flow when
+    // the location provider hadn't resolved).  Never queue a GPS punch
+    // without coordinates — sync validation would permanently fail it.
+    double? lat = (extras?['latitude'] as num?)?.toDouble();
+    double? lng = (extras?['longitude'] as num?)?.toDouble();
+    if (lat == null || lng == null) {
+      final loc = await _captureLocation();
+      if (loc == null) {
+        state = const AsyncData(null);
+        return PunchResult(
+          success: false,
+          message: 'Could not get GPS location — enable GPS and try again',
+        );
+      }
+      lat = loc.latitude;
+      lng = loc.longitude;
+    }
+
+    // ── Alternation guard ───────────────────────────────────────────────
+    // If the most recent queued (non-failed) punch is the same direction,
+    // don't enqueue a duplicate — the server alternates In/Out.
+    final direction = extras?['direction'] as String? ?? 'In';
+    if (queue.lastPendingDirection == direction) {
+      state = const AsyncData(null);
+      return PunchResult(
+        success: false,
+        message: 'A $direction punch is already queued — waiting to sync',
+      );
+    }
+
     final punch = OfflinePunch()
-      ..method = method
-      ..direction = extras?['direction'] as String?
-      ..latitude = (extras?['latitude'] as num?)?.toDouble()
-      ..longitude = (extras?['longitude'] as num?)?.toDouble()
-      ..selfieBase64 = extras?['selfieBase64'] as String?
-      ..qrToken = extras?['qrCodeToken'] as String?
-      ..wifiMAC = extras?['wifiMAC'] as String?
-      ..wifiSSID = extras?['wifiSSID'] as String?
-      ..deviceId = extras?['deviceId'] as String?
-      ..beaconUUID = extras?['beaconUUID'] as String?
-      ..beaconMajor = extras?['beaconMajor'] as int?
-      ..beaconMinor = extras?['beaconMinor'] as int?
-      ..nfcTagId = extras?['nfcTagId'] as String?
-      ..faceEmbedding = extras?['faceEmbedding'] as String?;
+      ..method = 'GPS'
+      ..direction = direction
+      ..latitude = lat
+      ..longitude = lng;
 
     await queue.enqueue(punch);
 
     // Notify UI — update the reactive pending count
     ref.read(pendingOfflineCountProvider.notifier).state = queue.pendingCount;
+
+    // Ask the background manager to sync as soon as connectivity returns.
+    OfflineSyncManager.scheduleNow();
 
     state = const AsyncData(null);
 
@@ -167,6 +326,18 @@ class PunchNotifier extends AsyncNotifier<void> {
         : 'Network error — punch saved locally ($count pending)';
 
     return PunchResult(success: true, message: msg);
+  }
+
+  /// Tries to obtain a fresh GPS fix (3 attempts).  Returns null on failure.
+  Future<LocationResult?> _captureLocation() async {
+    for (int i = 0; i < 3; i++) {
+      try {
+        return await LocationService().getCurrentPosition();
+      } catch (_) {
+        if (i < 2) await Future.delayed(const Duration(seconds: 1));
+      }
+    }
+    return null;
   }
 }
 
@@ -211,6 +382,14 @@ final monthlyStatsProvider = FutureProvider<MonthlyStats>((ref) async {
 
     int present = 0, absent = 0, late = 0, leave = 0;
     for (final day in items) {
+      // Lateness is a flag on the day, not a status string — the backend
+      // marks late days as `isLateIn: true` with status like "HalfDay" or
+      // "Present".  Checking the flag first keeps every late day counted
+      // as late instead of leaking into leave.
+      if (day.isLateIn) {
+        late++;
+        continue;
+      }
       final s = day.status;
       if (s == 'Present' || s == 'OnDuty' || s == 'WFH') {
         present++;
@@ -245,7 +424,18 @@ final accessPermissionsProvider = FutureProvider<AccessPermissions>((ref) async 
     final dio = ref.read(dioClientProvider).dio;
     final response = await dio.get(ApiEndpoints.accessPermissions);
     final data = response.data['data'] as Map<String, dynamic>?;
-    if (data != null) return AccessPermissions.fromJson(data);
+    if (data != null) {
+      final perms = AccessPermissions.fromJson(data);
+      // Mirror the geofence permission to SharedPreferences so the background
+      // worker (_isEnabled) can enforce it — the bg isolate has no access to
+      // this Riverpod provider.  Written ONLY on success: a transient fetch
+      // failure must never revoke a previously-permitted user (the flag is
+      // absent → treated as "unknown/legacy", which does not block).
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('bg_allow_geofence_auto', perms.allowGeofenceAuto);
+      await prefs.setBool('bg_allow_client_site', perms.allowClientSite);
+      return perms;
+    }
   } catch (_) {
     // Fall through to minimal defaults on any error
   }

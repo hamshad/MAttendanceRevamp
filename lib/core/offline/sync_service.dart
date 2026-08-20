@@ -1,6 +1,11 @@
 import 'package:dio/dio.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../api/api_endpoints.dart';
 import '../api/dio_client.dart';
+import '../punch/punch_coordinator.dart';
+import '../utils/constants.dart';
+import '../../features/punch/services/oem_keep_alive_service.dart';
 import '../../models/offline_punch.dart';
 import 'offline_queue.dart';
 
@@ -16,56 +21,140 @@ class SyncResult {
 class SyncService {
   final DioClient _dioClient;
   final OfflineQueueService _queue;
+  bool _isSyncing = false;
 
   SyncService(this._dioClient, this._queue);
 
   Future<SyncResult> syncPendingPunches() async {
-    final pending = _queue.getPending();
-    if (pending.isEmpty) return const SyncResult(synced: 0, failed: 0);
+    if (_isSyncing) return const SyncResult(synced: 0, failed: 0);
+    _isSyncing = true;
+    try {
+      // getPending() returns punches sorted oldest-first — the backend
+      // must receive them in chronological order for In/Out alternation.
+      final pending = _queue.getPending();
+      if (pending.isEmpty) return const SyncResult(synced: 0, failed: 0);
 
-    int synced = 0;
-    int failed = 0;
+      int synced = 0;
+      int failed = 0;
 
-    for (final punch in pending) {
-      try {
-        await _dioClient.dio.post(
-          ApiEndpoints.punch,
-          data: _buildBody(punch),
-        );
-        await punch.delete();
-        synced++;
-      } on DioException catch (e) {
-        // Server rejections (4xx/5xx) are permanent — mark as exhausted so
-        // they won't be retried again after the next reconnect.
-        if (e.type == DioExceptionType.badResponse) {
+      for (final punch in pending) {
+        final validationError = _validate(punch);
+        if (validationError != null) {
           punch.retryCount = 99;
-          punch.errorMessage =
-              (e.response?.data as Map?)?['message']?.toString() ??
-                  'Rejected by server';
-        } else {
-          // Transient network failure — increment retry counter
-          punch.retryCount++;
-          punch.errorMessage = 'Network error — will retry';
+          punch.errorMessage = validationError;
+          await punch.save();
+          failed++;
+          continue;
         }
-        await punch.save();
-        failed++;
-      } catch (e) {
-        punch.retryCount++;
-        punch.errorMessage = e.toString();
-        await punch.save();
-        failed++;
+
+        try {
+          // Server-truth gate — a queued punch may already be covered by a
+          // punch the app can't see (biometric machine / website).
+          if (await _shouldDrop(punch)) {
+            punch.errorMessage = 'Dropped — already covered by another source';
+            await punch.delete();
+            failed++;
+            continue;
+          }
+
+          await _dioClient.dio.post(
+            ApiEndpoints.punch,
+            data: _buildBody(punch),
+          );
+          await punch.delete();
+          await _publishLocalState(punch);
+          synced++;
+        } on DioException catch (e) {
+          if (e.type == DioExceptionType.badResponse) {
+            final message =
+                (e.response?.data as Map?)?['message']?.toString() ?? '';
+            // GeofenceAuto transient rate limit ('...already recorded within
+            // the last 5 minutes') is NOT a permanent rejection — the punch
+            // stays valid, it just hit the per-source anti-double window.
+            // Bump retry instead of capping at 99 (capped entries are never
+            // flushed again → the offline IN would be lost forever).
+            if (message.contains('within the last')) {
+              punch.retryCount++;
+              punch.errorMessage = 'Transient rate limit — will retry';
+            } else {
+              punch.retryCount = 99;
+              punch.errorMessage = message.isEmpty
+                  ? 'Rejected by server'
+                  : message;
+            }
+          } else {
+            punch.retryCount++;
+            punch.errorMessage = 'Network error — will retry';
+          }
+          await punch.save();
+          failed++;
+        } catch (e) {
+          punch.retryCount++;
+          punch.errorMessage = e.toString();
+          await punch.save();
+          failed++;
+        }
       }
+
+      return SyncResult(synced: synced, failed: failed);
+    } finally {
+      _isSyncing = false;
+    }
+  }
+
+  /// Client-side validation before hitting the server.
+  /// Returns null if valid, or an error message string if the punch can't be
+  /// accepted by the server in its current state.
+  String? _validate(OfflinePunch punch) {
+    if (punch.method == 'GPS' && punch.latitude == null) {
+      return 'GPS punch needs location — enable GPS and retry';
+    }
+    return null;
+  }
+
+  /// True when the queued punch is stale or already covered by a punch the
+  /// app can't see.  Auto punches (geofence/WiFi) also expire after
+  /// [AppConstants.autoPunchQueueTtl]; manual punches never expire but still
+  /// pass the server-truth gate.  Server unreachable → not dropped (the POST
+  /// will fail and the punch is kept with a retry bump, as before).
+  Future<bool> _shouldDrop(OfflinePunch punch) async {
+    final direction = punch.direction ?? 'In';
+    final isAuto = punch.method == 'GeofenceAuto' || punch.method == 'WiFi';
+
+    if (isAuto &&
+        DateTime.now().difference(punch.createdAt) >
+            AppConstants.autoPunchQueueTtl) {
+      return true;
     }
 
-    return SyncResult(synced: synced, failed: failed);
+    final verdict = await PunchCoordinator.check(
+      dio: _dioClient.dio,
+      direction: direction,
+    );
+    return verdict == PunchCheck.duplicate || verdict == PunchCheck.blocked;
+  }
+
+  /// Keep the local punch-state prefs coherent after a successful sync so the
+  /// handler gates never act on a stale value.
+  Future<void> _publishLocalState(OfflinePunch punch) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('gf_last_punch_type', punch.direction ?? 'In');
+      await prefs.setString(
+          'gf_last_punch_time', punch.createdAt.toIso8601String());
+      // Keep-alive FGS is punch-state lifecycle (manual/queued punches
+      // bypass the geofence persist path): a synced OUT closes the FGS,
+      // a synced IN starts the walk-out monitor.  No-op on no transition.
+      await OemKeepAliveService.syncToPunchState();
+    } catch (_) {}
   }
 
   Map<String, dynamic> _buildBody(OfflinePunch punch) {
     final body = <String, dynamic>{
       'Method': punch.method,
-      'offlineTimestamp': punch.createdAt.toIso8601String(), // This is usually internal
+      'offlineTimestamp': punch.createdAt.toIso8601String(),
       'Direction': punch.direction ?? 'In',
-      'IPAddress': '0.0.0.0', // Standard for offline sync fallback
+      'IPAddress': '0.0.0.0',
     };
     if (punch.latitude != null) body['Latitude'] = punch.latitude.toString();
     if (punch.longitude != null) body['Longitude'] = punch.longitude.toString();
@@ -79,6 +168,7 @@ class SyncService {
     if (punch.beaconMinor != null) body['BeaconMinor'] = punch.beaconMinor.toString();
     if (punch.nfcTagId != null) body['NfcTagId'] = punch.nfcTagId;
     if (punch.faceEmbedding != null) body['FaceEmbedding'] = punch.faceEmbedding;
+    if (punch.clientSiteId != null) body['ClientSiteId'] = punch.clientSiteId;
     return body;
   }
 }

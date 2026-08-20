@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart' as geo;
@@ -12,12 +14,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/auth/auth_provider.dart';
 import '../../core/config/dev_flags.dart';
+import '../../core/utils/aggressive_oem.dart';
 import '../../core/utils/constants.dart';
 import '../../core/notifications/fcm_service.dart';
 import '../../core/notifications/local_notifications.dart';
 import '../../core/offline/offline_providers.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/theme_provider.dart';
+import '../alignment/alignment_providers.dart';
 import '../settings/screens/debug_log_screen.dart';
 import '../dashboard/providers/dashboard_providers.dart';
 import '../dashboard/screens/home_screen.dart';
@@ -28,19 +32,23 @@ import '../history/screens/regularization_screen.dart';
 import '../leave/screens/leave_screen.dart';
 import '../notifications/providers/notifications_provider.dart';
 import '../notifications/screens/notifications_screen.dart';
-import '../punch/services/geofence_auto_punch_service.dart';
+import '../punch/services/geofence_monitor.dart';
 import '../punch/services/geofence_scheduler.dart';
+import '../punch/services/oem_keep_alive_service.dart';
 import '../punch/services/shift_service.dart';
 import '../punch/services/wifi_auto_punch_service.dart';
 import '../settings/screens/geofence_settings_screen.dart';
 import '../settings/screens/wifi_settings_screen.dart';
 import '../settings/screens/face_enrollment_screen.dart';
 import '../../models/attendance.dart';
+import '../offline/screens/offline_screen.dart';
 import '../../models/shift.dart';
 import '../tracking/screens/my_field_tracking_screen.dart';
 import '../tracking/services/field_tracking_service.dart';
 import '../tracking/widgets/accuracy_debug_overlay.dart';
 import '../punch/screens/punch_flow_screen.dart';
+import '../punch/screens/geofence_places_screen.dart';
+import '../punch/screens/client_site_screen.dart';
 
 // ── Shell ─────────────────────────────────────────────────────────────────────
 
@@ -55,11 +63,19 @@ class MainShell extends ConsumerStatefulWidget {
 
 class _MainShellState extends ConsumerState<MainShell>
     with WidgetsBindingObserver {
-  GeofenceAutoPunchService? _geofenceService;
   WifiAutoPunchService? _wifiAutoService;
   StreamSubscription<bool>? _trackingRunSub;
   StreamSubscription<Map<String, dynamic>>? _punchSub;
   StreamSubscription<Map<String, dynamic>>? _wifiPunchSub;
+  bool _offlineScreenPushed = false;
+
+  // Guards against stacking the battery-exemption dialog when several paths
+  // trigger it near-simultaneously (geofence toggle + field-tracking start).
+  static bool _batteryDialogVisible = false;
+
+  // Set when the user taps "Not Now" — don't nag again this session.  The
+  // prompt only returns on a later app launch + explicit user action.
+  static bool _batteryPromptDismissed = false;
 
   static const _tabs = [
     HomeScreen(),
@@ -88,12 +104,16 @@ class _MainShellState extends ConsumerState<MainShell>
       }
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(alignmentMonitorProvider); // starts the user-alignment watchdog
       _initGeofence();
       _initWifiAuto();
       _initFieldTracking();
       _initGeofenceScheduler();
       fetchUnreadCount(ref);
       _initFCM();
+      _syncOfflinePunches();
+      _checkOfflineOnStart();
+      _initLocalNotificationTap();
     });
   }
 
@@ -134,13 +154,51 @@ class _MainShellState extends ConsumerState<MainShell>
       //    The combined service is started by _initGeofenceScheduler() below
       //    if within the shift window.
       SharedPreferences.getInstance().then((prefs) {
-        final isEnabled = GeofenceAutoPunchService.isEnabled;
+        final isEnabled = GeofenceMonitor.isEnabled;
         debugPrint('SHELL_Lifecycle: syncing geofence_auto_enabled=$isEnabled');
         prefs.setBool('geofence_auto_enabled', isEnabled);
       });
 
       // 4. Ensure the combined service is running if within shift window
       _initGeofenceScheduler();
+
+      // 4b. Recover a missed geofence IN/OUT: GPS may have been off while
+      //     the app was backgrounded (no trustworthy OS transitions fired —
+      //     a re-entry INTO the office radius, or an EXIT while walking
+      //     away, was never punched).  Only punches when the user is
+      //     verified inside an office radius (IN) or outside every office
+      //     radius on two consecutive fixes (OUT).  confirmOut: the OS
+      //     exit is easily missed while backgrounded and geofence-only mode
+      //     has no background poller — confirm the exit with a second fix
+      //     right here instead of waiting for a poll that never comes.
+      GeofencePunchHandler.instance.reconcileContainment(confirmOut: true);
+
+      // 4c. Re-register OS geofences on every resume (self-healing).  The
+      //     system drops geofence registrations on force-stop and some OEM
+      //     memory cleanups; re-arming also refreshes the plugin's Dart
+      //     callback handle so the headless punch path keeps working with
+      //     the app killed even when registration was lost while
+      //     backgrounded.  Idempotent: registerZones wipes and recreates,
+      //     and self-gates on enable/permission/token.
+      //
+      //     NOTE: initialTriggers: {} — do NOT re-arm the enter catch-up
+      //     here.  With the default {enter}, every background→foreground
+      //     re-registration re-fires ENTER for every zone the user is
+      //     inside → a duplicate "already punched" notification while the
+      //     user sits still at the office.  Containment catch-up on resume
+      //     is 4b's reconcileContainment.
+      if (GeofenceMonitor.isEnabled) {
+        GeofenceMonitor.registerZones(
+          providedDio: ref.read(dioClientProvider).dio,
+          initialTriggers: const {},
+        );
+      }
+
+      // 5. Try syncing offline punches on resume
+      _syncOfflinePunches();
+
+      // 6. Refresh dashboard data so it's never stale on resume
+      ref.invalidate(attendanceStatusProvider);
     }
   }
 
@@ -148,19 +206,36 @@ class _MainShellState extends ConsumerState<MainShell>
 
   Future<void> _initGeofence() async {
     if (!mounted) return;
-    debugPrint('SHELL: _initGeofence() triggered — GeofenceAutoPunchService.isEnabled=${GeofenceAutoPunchService.isEnabled}');
+    debugPrint('SHELL: _initGeofence() triggered — GeofenceMonitor.isEnabled=${GeofenceMonitor.isEnabled}');
 
     final perms = ref.read(accessPermissionsProvider).value;
-    if (perms?.allowGeofenceAuto != true) {
-      debugPrint('SHELL: Geofence not permitted by backend — skipping');
+    if (perms == null) {
+      // Perms still loading / fetch failed — do nothing (never revoke on
+      // transient failure).
+      debugPrint('SHELL: Geofence perms unknown (loading) — skipping init');
+      return;
+    }
+    if (!perms.allowGeofenceAuto) {
+      debugPrint('SHELL: Geofence not permitted by backend — stopping geofence service/alarms');
+      // Definitive denial → revoke the background path: cancel shift alarms,
+      // unregister OS geofences, and tell the running service geofence is off.
+      // The combined service stays alive if field tracking needs it.
+      await GeofenceMonitor.unregisterAll();
+      await GeofenceScheduler.cancel();
+      FieldTrackingService.notifyGeofenceToggle();
+      final prefs = await SharedPreferences.getInstance();
+      final ftEnabled = prefs.getBool('field_tracking_enabled') ?? false;
+      if (!ftEnabled) {
+        await GeofenceScheduler.stopGeofenceService();
+      }
       return;
     }
 
-    bool isEnabled = GeofenceAutoPunchService.isEnabled;
+    bool isEnabled = GeofenceMonitor.isEnabled;
 
-    if (!GeofenceAutoPunchService.hasUserToggled) {
+    if (!GeofenceMonitor.hasUserToggled) {
       debugPrint('SHELL: First launch — auto-enabling geofence');
-      await GeofenceAutoPunchService.setEnabled(true);
+      await GeofenceMonitor.setEnabled(true);
       ref.read(geofenceEnabledProvider.notifier).state = true;
       isEnabled = true;
     }
@@ -171,42 +246,30 @@ class _MainShellState extends ConsumerState<MainShell>
     final readback = prefs.getBool('geofence_auto_enabled');
     debugPrint('SHELL: Geofence enabled in settings: $isEnabled, readback from prefs: $readback');
 
-    // Stop the legacy GeofenceAutoPunchService if it was started by a previous version
-    _geofenceService?.stop();
-    _geofenceService = null;
-
     if (isEnabled) {
-      if (Platform.isAndroid) {
-        await _ensureBatteryOptimizationExempt();
-      }
       if (!mounted) return;
-      if (!await FieldTrackingService.isRunning) {
-        debugPrint('SHELL: Starting combined service (geofence enabled)');
-        await FieldTrackingService.start();
-      } else {
-        debugPrint('SHELL: Combined service already running');
-      }
-    }
-  }
-
-  Future<void> _startGeofenceService() async {
-    if (!mounted) return;
-    if (Platform.isAndroid) {
-      await _ensureBatteryOptimizationExempt();
-    }
-    if (!mounted) return;
-
-    _geofenceService = GeofenceAutoPunchService(
-      dio: ref.read(dioClientProvider).dio,
-      notifications: localNotifications,
-      onPunch: () {
-        if (mounted) {
-          ref.invalidate(attendanceStatusProvider);
+      // Phase 2: geofence-only users need no service process — native
+      // geofences + WorkManager headless punch handle everything.  The
+      // combined service starts here only when wifi auto / field tracking
+      // actually need a live isolate.
+      if (await GeofenceScheduler.serviceRequired()) {
+        if (!await FieldTrackingService.isRunning) {
+          debugPrint('SHELL: Starting combined service (wifi/tracking enabled)');
+          await OemKeepAliveService.stop(); // keep-alive holds the process — stop it first
+          await FieldTrackingService.start();
+        } else {
+          debugPrint('SHELL: Combined service already running');
         }
-      },
-    );
-    final started = await _geofenceService!.start();
-    if (!started) _geofenceService = null;
+      } else {
+        debugPrint('SHELL: Geofence-only — no service (native headless path)');
+      }
+      // Register OS geofences (native_geofence). The plugin's
+      // initialTriggers:{enter} re-arms catch-up punches for zones the user
+      // is already inside, so this is safe to run on every resume.
+      await GeofenceMonitor.registerZones(providedDio: ref.read(dioClientProvider).dio);
+    } else {
+      await GeofenceMonitor.unregisterAll();
+    }
   }
 
   void _onGeofenceToggle(bool? prev, bool next) async {
@@ -222,15 +285,22 @@ class _MainShellState extends ConsumerState<MainShell>
       final alreadyRunning = await FieldTrackingService.isRunning;
       debugPrint('SHELL_Toggle: geofence ON, service already running=$alreadyRunning');
       if (!alreadyRunning) {
-        debugPrint('SHELL_Toggle: starting combined service');
-        await FieldTrackingService.start();
+        // Phase 2: geofence-only → no service (native headless path handles
+        // everything).  Service only when wifi/tracking need a live isolate.
+        if (await GeofenceScheduler.serviceRequired()) {
+          debugPrint('SHELL_Toggle: starting combined service');
+          await OemKeepAliveService.stop(); // keep-alive holds the process — stop it first
+          await FieldTrackingService.start();
+        } else {
+          debugPrint('SHELL_Toggle: geofence-only — service not started (native headless)');
+        }
       }
+      await GeofenceMonitor.registerZones(providedDio: ref.read(dioClientProvider).dio);
     } else {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('geofence_auto_enabled', false);
 
-      _geofenceService?.stop();
-      _geofenceService = null;
+      await GeofenceMonitor.unregisterAll();
 
       final ftEnabled = prefs.getBool('field_tracking_enabled') ?? false;
       debugPrint('SHELL_Toggle: geofence OFF, field_tracking_enabled=$ftEnabled');
@@ -244,7 +314,7 @@ class _MainShellState extends ConsumerState<MainShell>
     }
   }
 
-  // ── Geofence Scheduler lifecycle (independent of GeofenceAutoPunchService) ──
+  // ── Geofence Scheduler lifecycle (independent of GeofenceMonitor) ──
 
   /// Fetch shifts, cache them, and start the combined background service if
   /// within the current shift window.  Runs on every app start so that the
@@ -255,6 +325,16 @@ class _MainShellState extends ConsumerState<MainShell>
       return;
     }
     debugPrint('SHELL: _initGeofenceScheduler() triggered');
+
+    // Aggressive-OEM detection (MIUI & friends) — cached for headless reads.
+    await AggressiveOem.refreshFromNative();
+
+    // Guaranteed background punch-out: arm the 15-min containment alarm
+    // (main isolate can reach the MethodChannel).  Once armed, the native
+    // receiver self-perpetuates and only the prefs flag (flipped by
+    // headless punches) matters — the app never needs opening again.
+    // On aggressive OEMs also starts the keep-alive foreground service.
+    GeofenceScheduler.armContainmentAlarmIfNeeded().catchError((_) {});
 
     // Try cached shifts first (fast path — no API call)
     final cached = ShiftService.loadCachedShifts();
@@ -359,7 +439,42 @@ class _MainShellState extends ConsumerState<MainShell>
     if (mounted) {
       ref.read(fieldTrackingRunningProvider.notifier).state = alreadyRunning;
     }
-    if (alreadyRunning) return;
+    if (alreadyRunning) {
+      // The background service is already up — but it may have been started
+      // by the geofence or WiFi paths (initState runs _initGeofence /
+      // _initWifiAuto first), which never touch `field_tracking_enabled`.
+      // If the user is punched in and tracking is permitted (no fresh punch
+      // transition to set the flag — e.g. app reopened mid-shift, or
+      // already-punched-in at launch), the ping timer would silently gate on
+      // the missing flag and no pings would ever fire while the UI claims
+      // "Tracking Active".  Repair the flag here; upgrade a keep-alive-mode
+      // service (geofence-only FGS) to the full combined service.
+      final perms = ref.read(accessPermissionsProvider).value;
+      final status = ref.read(attendanceStatusProvider).value;
+      final shouldTrack =
+          perms?.allowFieldTracking == true && status?.isPunchedIn == true;
+      if (shouldTrack) {
+        final prefs = await SharedPreferences.getInstance();
+        final wasEnabled = prefs.getBool('field_tracking_enabled') ?? false;
+        if (!wasEnabled) {
+          debugPrint('SHELL_FT: service already running, punched in — '
+              'enabling field tracking pings');
+          await prefs.setBool('field_tracking_enabled', true);
+          // A keep-alive isolate reads gf_keep_alive_mode at startup and runs
+          // LIGHT (no ping timer).  Clear it and restart so the full combined
+          // entrypoint takes over.
+          final keepAliveMode =
+              prefs.getBool(OemKeepAliveService.keepAliveModeKey) ?? false;
+          if (keepAliveMode) {
+            debugPrint('SHELL_FT: keep-alive service active — '
+                'upgrading to full combined service');
+            await OemKeepAliveService.stop();
+            await FieldTrackingService.start();
+          }
+        }
+      }
+      return;
+    }
 
     // Request permission once here — never inside the service, as that would
     // block the Riverpod punch-flow listener.
@@ -400,58 +515,41 @@ class _MainShellState extends ConsumerState<MainShell>
 
   /// Checks whether the app is excluded from battery optimisation.
   ///
-  /// Scenarios handled:
-  /// 1. Already excluded  → returns immediately, no UI shown.
-  /// 2. Not excluded + user taps "Allow"  → opens system dialog, waits, then
-  ///    returns (tracking starts regardless of what the user chose there).
-  /// 3. Not excluded + user taps "Not Now" → returns without opening the
-  ///    system dialog (tracking still starts but may be unreliable).
-  /// 4. Widget unmounted during any await  → returns early, no dialog shown.
+  /// Only called on EXPLICIT user intent (geofence toggled ON, field tracking
+  /// started) — never on silent first-launch auto-enable.  Scenarios:
+  /// 1. Already exempt → returns immediately, no UI shown.
+  /// 2. Dialog already visible → returns immediately (no stacking).
+  /// 3. User dismissed "Not Now" this session → returns immediately.
+  /// 4. Not exempt + user taps "Allow" → opens system dialog, then returns
+  ///    (tracking starts regardless of what the user chose there).
+  /// 5. Not exempt + user taps "Not Now" → returns without the system dialog.
   Future<void> _ensureBatteryOptimizationExempt() async {
-    // Scenario 1: already exempt — nothing to do.
+    if (_batteryDialogVisible || _batteryPromptDismissed) return;
     final alreadyExempt =
         await Permission.ignoreBatteryOptimizations.isGranted;
     if (alreadyExempt) return;
 
-    if (!mounted) return; // Scenario 4
+    if (!mounted) return;
 
-    // Scenarios 2 & 3: show an explanation dialog first so the user
-    // understands *why* this system prompt is appearing.
-    final proceed = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        title: const Text('Allow Background Tracking'),
-        content: const Text(
-          'To keep tracking your location when the app is minimized or the '
-          'screen is off, please disable battery optimization for this app.\n\n'
-          'On the next screen choose "Don\'t optimize" to ensure uninterrupted '
-          'field tracking.',
-        ),
-        actions: [
-          TextButton(
-            // Scenario 3: user declines — tracking still starts.
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Not Now'),
-          ),
-          FilledButton(
-            // Scenario 2: user agrees — open system dialog.
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Allow'),
-          ),
-        ],
-      ),
-    );
+    _batteryDialogVisible = true;
+    try {
+      final proceed = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const _BatteryExemptionDialog(),
+      );
+      if (!mounted) return;
 
-    if (!mounted) return; // Scenario 4 — widget disposed while dialog was open
-
-    if (proceed == true) {
-      // Scenario 2: request opens the system "Ignore battery optimizations"
-      // dialog.  We await it but don't gate tracking on the result — the
-      // user may deny it and tracking should still start.
-      await Permission.ignoreBatteryOptimizations.request();
+      if (proceed == true) {
+        // Opens the system "Ignore battery optimizations" dialog.  Tracking
+        // starts regardless of what the user chooses there.
+        await Permission.ignoreBatteryOptimizations.request();
+      } else {
+        _batteryPromptDismissed = true;
+      }
+    } finally {
+      _batteryDialogVisible = false;
     }
-    // Scenario 3: proceed == false → fall through, tracking starts normally.
   }
 
   void _stopFieldTracking() {
@@ -484,12 +582,16 @@ class _MainShellState extends ConsumerState<MainShell>
       debugPrint('UI: Attendance status updated. Punched In: $nextPunched');
 
       // Persist punch state for the background service notification
-      SharedPreferences.getInstance().then((prefs) {
-        prefs.setString('gf_last_punch_type', statusStr);
-        prefs.setString('gf_last_punch_time', DateTime.now().toIso8601String());
+      SharedPreferences.getInstance().then((prefs) async {
+        await prefs.setString('gf_last_punch_type', statusStr);
+        await prefs.setString('gf_last_punch_time', DateTime.now().toIso8601String());
         if (nextPunched && next.value?.officeName != null) {
           prefs.setString('gf_last_punch_office', next.value!.officeName!);
         }
+        // Keep-alive FGS is punch-state lifecycle: manual OUT (or any
+        // server-side state change) must close the FGS, manual IN must
+        // start the walk-out monitor.  No-op on no transition.
+        await OemKeepAliveService.syncToPunchState();
       });
     }
 
@@ -497,11 +599,19 @@ class _MainShellState extends ConsumerState<MainShell>
       debugPrint('SHELL_Punch: punched IN -> starting field tracking');
       SharedPreferences.getInstance().then((sp) => sp.remove('gf_shift_ended'));
       _startFieldTracking();
+
+      if (ref.read(manualPunchInProvider)) {
+        debugPrint('SHELL_Punch: manual punch IN -> setting manualIn guard');
+        WifiAutoPunchService.setManualIn();
+        WifiAutoPunchService.markLastInManual();
+        ref.read(manualPunchInProvider.notifier).state = false;
+      }
     } else if (prevPunched && !nextPunched) {
       if (ref.read(manualPunchOutProvider)) {
         debugPrint('SHELL_Punch: manual punch OUT -> stopping geofence for the day');
+        WifiAutoPunchService.setManualOutOnWifi();
+        WifiAutoPunchService.clearLastInMethod();
         _stopFieldTracking();
-        _geofenceService?.stop();
         ref.read(manualPunchOutProvider.notifier).state = false;
       } else {
         SharedPreferences.getInstance().then((sp) async {
@@ -510,7 +620,6 @@ class _MainShellState extends ConsumerState<MainShell>
             debugPrint('SHELL_Punch: auto punch OUT after shift end -> stopping geofence');
             await sp.remove('gf_shift_ended');
             _stopFieldTracking();
-            _geofenceService?.stop();
           } else {
             debugPrint('SHELL_Punch: auto punch OUT -> keeping geofence running for re-entry');
           }
@@ -523,6 +632,14 @@ class _MainShellState extends ConsumerState<MainShell>
 
   Future<void> _initFCM() async {
     try {
+      // Firebase init is deferred in main() (non-blocking).  Wait until it
+      // is ready so token registration does not race it (max 8s).
+      if (Firebase.apps.isEmpty) {
+        final deadline = DateTime.now().add(const Duration(seconds: 8));
+        while (Firebase.apps.isEmpty && DateTime.now().isBefore(deadline)) {
+          await Future.delayed(const Duration(milliseconds: 100));
+        }
+      }
       await FCMService(ref, onDeepLink: _handleDeepLink).initialize();
     } catch (_) {
       // Firebase not configured or permission denied — fail silently.
@@ -545,6 +662,52 @@ class _MainShellState extends ConsumerState<MainShell>
         Navigator.push(context,
             MaterialPageRoute(builder: (_) => const HistoryHubScreen()));
     }
+  }
+
+  // ── Local notification tap routing ────────────────────────────────────────
+
+  /// Register the local-notification tap handler and replay any notification
+  /// tap that launched the app from a cold start.
+  Future<void> _initLocalNotificationTap() async {
+    localNotificationTapHandler = _handleLocalNotificationPayload;
+    try {
+      final launch = await localNotifications.getNotificationAppLaunchDetails();
+      if (launch?.didNotificationLaunchApp ?? false) {
+        _handleLocalNotificationPayload(launch?.notificationResponse?.payload);
+      }
+    } catch (_) {
+      // getNotificationAppLaunchDetails can throw on some platforms — ignore.
+    }
+  }
+
+  /// Route a local notification tap to the right screen. Currently handles the
+  /// client-site punch prompt (fired by the background geofence worker when the
+  /// user enters a client-site zone — selfie is mandatory, so we open the
+  /// selfie screen with the site preselected + live location shown).
+  void _handleLocalNotificationPayload(String? payload) {
+    if (!mounted || payload == null) return;
+    Map<String, dynamic>? data;
+    try {
+      final decoded = jsonDecode(payload);
+      if (decoded is Map<String, dynamic>) data = decoded;
+    } catch (_) {
+      return;
+    }
+    if (data == null || data['type'] != 'client_site_punch') return;
+
+    final direction = data['direction'] as String? ?? 'In';
+    final clientSiteId = (data['clientSiteId'] as num?)?.toInt();
+    debugPrint('SHELL_LocalNotif: client_site_punch direction=$direction site=$clientSiteId');
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ClientSiteScreen(
+          direction: direction,
+          initialSiteId: clientSiteId,
+        ),
+      ),
+    );
   }
 
   // ── Punch sheet ────────────────────────────────────────────────────────────
@@ -589,7 +752,13 @@ class _MainShellState extends ConsumerState<MainShell>
     ref.listen<AsyncValue<bool>>(isOnlineProvider, (previous, next) {
       final wasOffline = previous?.value == false;
       final isNowOnline = next.value == true;
-      if (wasOffline && isNowOnline) _syncOfflinePunches();
+      final isNowOffline = next.value == false;
+      if (wasOffline && isNowOnline) {
+        _popOfflineScreen();
+        _syncOfflinePunches();
+      } else if (isNowOffline && !_offlineScreenPushed) {
+        _pushOfflineScreen();
+      }
     });
 
     void onTab(int i) => ref.read(_shellIndexProvider.notifier).state = i;
@@ -624,7 +793,7 @@ class _MainShellState extends ConsumerState<MainShell>
 
     return WillStartForegroundTask(
       onWillStart: () async {
-        return GeofenceAutoPunchService.isEnabled;
+        return GeofenceMonitor.isEnabled;
       },
       androidNotificationOptions: AndroidNotificationOptions(
         channelId: 'geofence_service_channel',
@@ -751,8 +920,35 @@ class _MainShellState extends ConsumerState<MainShell>
     );
   }
 
+  Future<void> _checkOfflineOnStart() async {
+    if (!mounted) return;
+    final isOnline = await ref.read(connectivityMonitorProvider).isOnline;
+    if (!isOnline && !_offlineScreenPushed) {
+      _pushOfflineScreen();
+    }
+  }
+
+  Future<void> _pushOfflineScreen() {
+    _offlineScreenPushed = true;
+    return Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const OfflineScreen(),
+        settings: const RouteSettings(name: 'offline_screen'),
+      ),
+    ).then((_) {
+      _offlineScreenPushed = false;
+    });
+  }
+
+  void _popOfflineScreen() {
+    if (!_offlineScreenPushed) return;
+    _offlineScreenPushed = false;
+    Navigator.of(context).popUntil((route) => route.isFirst);
+  }
+
   Future<void> _syncOfflinePunches() async {
-    if (ref.read(pendingOfflineCountProvider) == 0) return;
+    if (ref.read(offlineQueueServiceProvider).pendingCount == 0) return;
 
     final result =
         await ref.read(syncServiceProvider).syncPendingPunches();
@@ -911,6 +1107,8 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
         ref.watch(accessPermissionsProvider).value?.allowFieldTracking ?? false;
     final allowGeofenceAuto =
         ref.watch(accessPermissionsProvider).value?.allowGeofenceAuto ?? false;
+    final allowWiFi =
+        ref.watch(accessPermissionsProvider).value?.allowWiFi ?? false;
     final fieldTrackingRunning = ref.watch(fieldTrackingRunningProvider);
     final unreadCount = ref.watch(unreadNotificationsCountProvider);
     final themeMode = ref.watch(themeModeProvider);
@@ -1088,43 +1286,68 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                     }
                     return;
                   }
+                  // Mandatory MIUI battery-restrictions gate (user decision
+                  // 2026-08-17) — same gate as the settings screen toggle.
+                  if (await AggressiveOem.isAggressive() &&
+                      !(await AggressiveOem.restrictionsConfirmed())) {
+                    final confirmed = await ensureMiRestrictionsOff(context);
+                    if (!confirmed) return;
+                  }
                 }
-                await GeofenceAutoPunchService.setEnabled(value);
+                await GeofenceMonitor.setEnabled(value);
                 (await SharedPreferences.getInstance()).setBool('geofence_auto_enabled', value);
                 ref.read(geofenceEnabledProvider.notifier).state = value;
               },
             ),
+          if (allowGeofenceAuto)
+            ListTile(
+              leading: Icon(
+                Icons.place_outlined,
+                color: AppColors.gray,
+              ),
+              title: const Text('Geofence Places'),
+              subtitle: const Text(
+                'Offices & client sites used for auto-punch',
+                style: TextStyle(fontSize: 12),
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const GeofencePlacesScreen()),
+              ),
+            ),
           if (allowGeofenceAuto) const Divider(height: 1),
 
           // ── WiFi Auto-Punch ──────────────────────────────────────────────
-          ListTile(
-            leading: Consumer(builder: (context, ref, _) {
-              final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
-              return Icon(
-                Icons.wifi_sharp,
-                color: wifiEnabled
-                    ? theme.colorScheme.primary
-                    : AppColors.gray,
-              );
-            }),
-            title: const Text('WiFi Auto-Punch'),
-            subtitle: Consumer(builder: (context, ref, _) {
-              final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
-              return Text(
-                wifiEnabled ? 'On' : 'Off',
-                style: TextStyle(
-                  color: wifiEnabled ? AppColors.success : AppColors.gray,
-                  fontSize: 12,
-                ),
-              );
-            }),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                  builder: (_) => const WifiSettingsScreen()),
+          if (allowWiFi)
+            ListTile(
+              leading: Consumer(builder: (context, ref, _) {
+                final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
+                return Icon(
+                  Icons.wifi_sharp,
+                  color: wifiEnabled
+                      ? theme.colorScheme.primary
+                      : AppColors.gray,
+                );
+              }),
+              title: const Text('WiFi Auto-Punch'),
+              subtitle: Consumer(builder: (context, ref, _) {
+                final wifiEnabled = ref.watch(wifiAutoEnabledProvider);
+                return Text(
+                  wifiEnabled ? 'On' : 'Off',
+                  style: TextStyle(
+                    color: wifiEnabled ? AppColors.success : AppColors.gray,
+                    fontSize: 12,
+                  ),
+                );
+              }),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => const WifiSettingsScreen()),
+              ),
             ),
-          ),
 
           const Divider(height: 1),
 
@@ -1224,6 +1447,107 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ── Battery-exemption dialog ─────────────────────────────────────────────────
+
+/// Benefit-first explanation dialog shown before the system "Ignore battery
+/// optimizations" prompt.  Sells the outcome ("auto punch keeps working"),
+/// not the permission ("we need background access").  The full technical
+/// explanation is collapsed behind "Why this is needed?" so it never blocks
+/// the primary message.
+class _BatteryExemptionDialog extends StatefulWidget {
+  const _BatteryExemptionDialog();
+
+  @override
+  State<_BatteryExemptionDialog> createState() => _BatteryExemptionDialogState();
+}
+
+class _BatteryExemptionDialogState extends State<_BatteryExemptionDialog> {
+  bool _showDetails = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      title: Row(
+        children: [
+          Icon(Icons.bolt, color: theme.colorScheme.primary),
+          const SizedBox(width: 8),
+          const Expanded(child: Text('Never Miss a Punch')),
+        ],
+      ),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Primary pitch — benefit only, two short lines.
+            const Text(
+              'Your attendance records itself — automatically.',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Auto punch-in and punch-out keep working even when your phone '
+              'is locked or the app is closed.',
+              style: TextStyle(
+                fontSize: 14,
+                color: theme.colorScheme.onSurface.withValues(alpha: 0.75),
+              ),
+            ),
+            const SizedBox(height: 12),
+            if (_showDetails) ...[
+              const Divider(height: 1),
+              const SizedBox(height: 12),
+              // Full explanation — hidden unless the user asks.
+              Text(
+                'MAttendance continuously checks your location to detect when '
+                'you arrive at or leave your office. Some phones pause such '
+                'background apps to save battery, which can delay or skip a '
+                'punch.\n\n'
+                'Allowing background running (choose "Don\'t optimize" on the '
+                'next screen) keeps this monitoring active so every punch is '
+                'recorded on time.',
+                style: TextStyle(
+                  fontSize: 13,
+                  height: 1.4,
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.7),
+                ),
+              ),
+            ],
+            const SizedBox(height: 4),
+            // Expandable rationale — small, out of the way.
+            TextButton.icon(
+              onPressed: () =>
+                  setState(() => _showDetails = !_showDetails),
+              icon: Icon(
+                _showDetails ? Icons.expand_less : Icons.expand_more,
+                size: 18,
+              ),
+              label: Text(_showDetails ? 'Hide details' : 'Why this is needed'),
+              style: TextButton.styleFrom(
+                padding: EdgeInsets.zero,
+                minimumSize: const Size(0, 36),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Not Now'),
+        ),
+        FilledButton.icon(
+          onPressed: () => Navigator.pop(context, true),
+          icon: const Icon(Icons.verified_user_outlined, size: 18),
+          label: const Text('Keep It Working'),
+        ),
+      ],
     );
   }
 }
