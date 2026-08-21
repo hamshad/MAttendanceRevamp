@@ -12,6 +12,7 @@ import '../../../core/api/api_endpoints.dart';
 import '../../../core/api/punch_state_interceptor.dart';
 import '../../../core/utils/constants.dart';
 import '../../../models/office.dart';
+import 'punch_state_service.dart';
 
 /// Background WiFi auto-punch worker.
 ///
@@ -159,6 +160,25 @@ class WifiBackgroundWorker {
           return;
         }
 
+        // ── Mediator: server is source of truth for "already punched in" ──
+        // A Web/GPS/Biometric punch on another device is invisible to local
+        // state. If the backend already shows the employee IN, skip the
+        // duplicate IN entirely.
+        final server = await _fetchServerState();
+        if (server != null && server.isPunchedIn) {
+          debugPrint('[WIFI_BG] Server already IN (method=${server.lastMethod}) — '
+              'skipping duplicate WiFi IN');
+          await _setLastPunchType('In');
+          await _setMatchedOffice(matched.name);
+          if (server.lastMethod == 'WiFi') {
+            await _setLastInByWifi();
+          } else {
+            await _clearManualIn();
+            await _clearLastInMethod();
+          }
+          return;
+        }
+
         debugPrint('[WIFI_BG] Match found: ${matched.name} — punching IN');
         await _punchIn(matched, bssid);
       } else if (matched == null && lastPunchType == 'In') {
@@ -171,6 +191,19 @@ class WifiBackgroundWorker {
         // Manual IN (GPS/NFC) or restored state should not be undone by WiFi.
         if (!await _isLastInByWifi()) {
           debugPrint('[WIFI_BG] Last IN not via WiFi — skip auto OUT (no match)');
+          return;
+        }
+
+        // ── Mediator: server is source of truth for "already punched out" ──
+        // If the employee already punched OUT via Web/GPS/Biometric elsewhere,
+        // don't send a redundant WiFi OUT.
+        final serverOut = await _fetchServerState();
+        if (serverOut != null && serverOut.isPunchedOut) {
+          debugPrint('[WIFI_BG] Server already OUT — skipping duplicate WiFi OUT');
+          await _setLastPunchType('Out');
+          await _setMatchedOffice('');
+          await _clearManualIn();
+          await _clearLastInMethod();
           return;
         }
 
@@ -245,6 +278,17 @@ class WifiBackgroundWorker {
     await _flushPendingOut();
 
     if (lastPunchType == 'In') {
+      // ── Mediator: server is source of truth for "already punched out" ──
+      // If the employee already punched OUT via Web/GPS/Biometric elsewhere,
+      // don't send a redundant WiFi OUT on disconnect.
+      final serverOut = await _fetchServerState();
+      if (serverOut != null && serverOut.isPunchedOut) {
+        debugPrint('[WIFI_BG] Server already OUT — skipping duplicate WiFi OUT on disconnect');
+        await _setLastPunchType('Out');
+        await _setMatchedOffice('');
+        return;
+      }
+
       final ok = await _punchOut('');
       if (!ok) {
         await _savePendingOut(bssid: '');
@@ -574,6 +618,20 @@ class WifiBackgroundWorker {
     ]);
 
     return dio;
+  }
+
+  /// Mediator: ask the backend for the employee's current punch state.
+  ///
+  /// Returns `null` on error so callers fall back to local SP state. This is
+  /// what lets WiFi auto-punch see punches recorded by OTHER methods (Web /
+  /// GPS / Biometric) that local SharedPreferences state never learns about.
+  Future<ServerPunchState?> _fetchServerState() async {
+    final dio = await _buildDio();
+    if (dio == null) {
+      debugPrint('[WIFI_BG] No auth token — cannot fetch server punch state');
+      return null;
+    }
+    return PunchStateService(dio).fetch();
   }
 
   Future<String?> _refreshToken() async {

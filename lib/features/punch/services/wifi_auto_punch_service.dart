@@ -11,6 +11,7 @@ import '../../../core/utils/constants.dart';
 import '../../../core/utils/app_logger.dart';
 import '../../../models/office.dart';
 import './wifi_service.dart';
+import './punch_state_service.dart';
 
 class WifiAutoPunchService {
   static const _enabledKey = 'wifiAutoPunchEnabled';
@@ -381,6 +382,14 @@ class WifiAutoPunchService {
     return DateTime.now().difference(last) < duration;
   }
 
+  /// Mediator: ask the backend for the employee's current punch state.
+  ///
+  /// Returns `null` on error so callers fall back to local Hive state. This
+  /// is what lets WiFi auto-punch see punches recorded by OTHER methods
+  /// (Web / GPS / Biometric) that local state never learns about.
+  Future<ServerPunchState?> _fetchServerState() =>
+      PunchStateService(_dio).fetch();
+
   // ── Check Current WiFi ─────────────────────────────────────
 
   Future<void> _checkCurrentConnection() async {
@@ -483,6 +492,27 @@ class WifiAutoPunchService {
         return;
       }
 
+      // ── Mediator: server is source of truth for "already punched in" ──
+      // A Web/GPS/Biometric punch on another device is invisible to local
+      // state. If the backend already shows the employee IN, skip the
+      // duplicate IN entirely.
+      final server = await _fetchServerState();
+      if (server != null && server.isPunchedIn) {
+        AppLogger.i(
+          'WIFI_AUTO: Server already IN (method=${server.lastMethod}) — '
+          'skipping duplicate WiFi IN',
+        );
+        await setLastPunchStatus('In');
+        await setCurrentOfficeName(matchedOffice.name);
+        if (server.lastMethod == 'WiFi') {
+          await markLastInByWifi();
+        } else {
+          await clearManualIn();
+          await clearLastInMethod();
+        }
+        return;
+      }
+
       // Manual-IN guard: last punch was manual (GPS/NFC), not WiFi.
       // Prevent duplicate IN when user manually punched in then connects to
       // office WiFi.  `lastInMethod` persists in Hive so this survives
@@ -549,6 +579,17 @@ class WifiAutoPunchService {
         // was via WiFi auto-punch. Manual IN (GPS/NFC) should not be undone.
         if (lastInMethod != 'wifi') {
           AppLogger.i('WIFI_AUTO: Last IN not via WiFi — skip auto OUT (BSSID mismatch)');
+          return;
+        }
+
+        // ── Mediator: server is source of truth for "already punched out" ──
+        // If the employee already punched OUT via Web/GPS/Biometric elsewhere,
+        // don't send a redundant WiFi OUT.
+        final serverOut = await _fetchServerState();
+        if (serverOut != null && serverOut.isPunchedOut) {
+          AppLogger.i('WIFI_AUTO: Server already OUT — skipping duplicate WiFi OUT');
+          await setLastPunchStatus('Out');
+          await setCurrentOfficeName('');
           return;
         }
 
@@ -626,6 +667,19 @@ class WifiAutoPunchService {
       // by WiFi state changes.
       if (lastInMethod != 'wifi') {
         AppLogger.i('WIFI_AUTO: Last IN not via WiFi — skip auto OUT on disconnect');
+        return;
+      }
+
+      // ── Mediator: server is source of truth for "already punched out" ──
+      // If the employee already punched OUT via Web/GPS/Biometric elsewhere,
+      // don't send a redundant WiFi OUT on disconnect.
+      final serverOut = await _fetchServerState();
+      if (serverOut != null && serverOut.isPunchedOut) {
+        AppLogger.i('WIFI_AUTO: Server already OUT — skipping duplicate WiFi OUT on disconnect');
+        await setLastPunchStatus('Out');
+        await setCurrentOfficeName('');
+        await clearManualIn();
+        await clearLastInMethod();
         return;
       }
 
