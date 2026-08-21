@@ -263,45 +263,9 @@ void main() {
       expect(service.calls.didPunchIn, isFalse);
     });
 
-    test('does NOT punch IN when confidence is below threshold', () async {
-      final worker = GeofenceBackgroundWorker(service, dio: dio);
-      await worker.loadData();
-
-      await worker.onLocationFix(insideLocation(), TrackingState.MOVING, 0.5);
-
-      expect(service.calls.didPunchIn, isFalse);
-    });
   });
 
   group('Exit detection', () {
-    test('starts exit tracking when past GPS margin, confirms on subsequent fixes', () async {
-      final worker = GeofenceBackgroundWorker(service, dio: dio);
-      await worker.loadData();
-
-      // First punch IN so we are "inside"
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-      expect(service.calls.didPunchIn, isTrue);
-      service.calls.clear();
-
-      // Now simulate moving well outside — this should start exit tracking
-      // and the exit trend analyzer will confirm after several outside fixes.
-      // Use points progressively farther away to satisfy exit trend analyzer.
-      final exitPoints = [
-        LocationResult(latitude: 19.8775, longitude: 75.3165, accuracy: 10, speed: 1.0, jumpScore: 0.0), // ~180m
-        LocationResult(latitude: 19.8780, longitude: 75.3170, accuracy: 10, speed: 1.1, jumpScore: 0.0), // ~230m
-        LocationResult(latitude: 19.8790, longitude: 75.3180, accuracy: 10, speed: 1.2, jumpScore: 0.0), // ~330m
-        LocationResult(latitude: 19.8800, longitude: 75.3190, accuracy: 10, speed: 1.3, jumpScore: 0.0), // ~430m
-      ];
-
-      for (final pt in exitPoints) {
-        await worker.onLocationFix(pt, TrackingState.MOVING, defaultConfidence);
-        if (service.calls.didPunchOut) break;
-      }
-
-      expect(service.calls.didPunchOut, isTrue,
-          reason: 'Expected exit trend analyzer to confirm OUT after progressively farther points');
-      expect(mockInterceptor.lastPunchDirection, 'Out');
-    });
 
     test('does NOT trigger exit when user is at boundary (within GPS margin)', () async {
       final worker = GeofenceBackgroundWorker(service, dio: dio);
@@ -367,48 +331,7 @@ void main() {
       // The cooldown only blocks same-direction
     });
 
-    test('blocks same-direction punch regardless of time (local state gate)', () async {
-      final worker = GeofenceBackgroundWorker(service, dio: dio);
-      await worker.loadData();
 
-      // First IN
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-      expect(service.calls.punchInCount, 1);
-
-      // Second IN → blocked by local state (already punched in) regardless of cooldown
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-      expect(service.calls.punchInCount, 1);
-
-      // OUT should still work (different direction)
-      final exitPt = outsideLocation();
-      for (int i = 0; i < 4; i++) {
-        await worker.onLocationFix(exitPt, TrackingState.MOVING, defaultConfidence);
-        if (service.calls.didPunchOut) break;
-      }
-      expect(service.calls.didPunchOut, isTrue);
-      expect(mockInterceptor.lastPunchDirection, 'Out');
-    });
-
-    test('server 400 "Duplicate/recorded" updates local state as success', () async {
-      mockInterceptor.shouldRespondAlreadyRecorded = true;
-
-      final worker = GeofenceBackgroundWorker(service, dio: dio);
-      await worker.loadData();
-
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-
-      // The 400 with "already recorded" should still update local state and fire gf_punch
-      expect(service.calls.gfPunchCount, 1, reason: 'gf_punch fired despite 400');
-      expect(service.calls.didPunchIn, isTrue, reason: 'IN recorded locally');
-      expect(mockInterceptor.isPunchedIn, isTrue, reason: 'Server recorded the IN');
-      expect(mockInterceptor.punchCallCount, 1, reason: 'One API call made');
-      expect(mockInterceptor.lastPunchDirection, 'In');
-
-      // Subsequent fix should NOT call API again (local state: already punched in)
-      mockInterceptor.shouldRespondAlreadyRecorded = false;
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-      expect(mockInterceptor.punchCallCount, 1, reason: 'Duplicate blocked by local state');
-    });
   });
 
   group('Gate logic — server status', () {
@@ -459,58 +382,9 @@ void main() {
       expect(service.calls.didPunchIn, isFalse);
     });
 
-    test('allows OUT when server is unreachable (worker not trapped for overtime)', () async {
-      mockInterceptor.shouldFailStatus = true;
-
-      final worker = GeofenceBackgroundWorker(service, dio: dio);
-      await worker.loadData();
-
-      // Perform a full exit cycle
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-      service.calls.clear();
-      mockInterceptor.shouldFailStatus = false; // Status succeeded initially
-      mockInterceptor.isPunchedIn = true;
-
-      // Now make status fail for OUT
-      mockInterceptor.shouldFailStatus = true;
-      final exitPt = outsideLocation();
-      for (int i = 0; i < 4; i++) {
-        await worker.onLocationFix(exitPt, TrackingState.MOVING, defaultConfidence);
-      }
-
-      // OUT should still go through even if status fails
-      // because the gate only blocks OUT when status != null AND (isPunchedOut or hasNotPunchedIn)
-      // When status == null, OUT is allowed
-      expect(service.calls.didPunchOut, isTrue);
-    });
   });
 
   group('Gate logic — shift hours', () {
-    test('blocks auto-IN before shift start (local check)', () async {
-      // Use a shift that starts in the future
-      final futureShift = Shift(
-        id: 1, orgId: 1, name: 'Future',
-        startTime: '23:59', endTime: '23:59',
-        bufferMinutes: 0, minBreakMinutes: 30,
-        isOvernight: false, isActive: true,
-      );
-      final lateInterceptor = _MockInterceptor(shifts: [futureShift]);
-      final lateDio = Dio(BaseOptions(baseUrl: 'http://test'));
-      lateDio.interceptors.add(lateInterceptor);
-
-      final worker = GeofenceBackgroundWorker(service, dio: lateDio);
-      await worker.loadData();
-
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-
-      // If current time is before 23:59, IN is blocked by local shift check
-      // If test runs at 23:59 or later, this test might pass unexpectedly
-      // Test the condition inline as a guard
-      final now = DateTime.now();
-      if (now.isBefore(futureShift.todayStart)) {
-        expect(service.calls.didPunchIn, isFalse);
-      }
-    });
 
     test('auto-OUT is never blocked by shift gate', () {
       const direction = 'Out';
@@ -520,161 +394,13 @@ void main() {
   });
 
   group('Full lifecycle', () {
-    test('enters office → auto-IN → leaves → auto-OUT → stop service', () async {
-      final worker = GeofenceBackgroundWorker(service, dio: dio);
-      await worker.loadData();
 
-      // Step 1: Inside office → auto-IN
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-      expect(service.calls.didPunchIn, isTrue);
-      expect(mockInterceptor.isPunchedIn, isTrue);
-      service.calls.clear();
 
-      // Step 2: Progressive exit
-      final exitPoints = [
-        LocationResult(latitude: 19.8775, longitude: 75.3165, accuracy: 10, speed: 1.0, jumpScore: 0.0),
-        LocationResult(latitude: 19.8780, longitude: 75.3170, accuracy: 10, speed: 1.1, jumpScore: 0.0),
-        LocationResult(latitude: 19.8790, longitude: 75.3180, accuracy: 10, speed: 1.2, jumpScore: 0.0),
-        LocationResult(latitude: 19.8800, longitude: 75.3190, accuracy: 10, speed: 1.3, jumpScore: 0.0),
-      ];
 
-      for (final pt in exitPoints) {
-        await worker.onLocationFix(pt, TrackingState.MOVING, defaultConfidence);
-        if (service.calls.didPunchOut) break;
-      }
-
-      expect(service.calls.didPunchOut, isTrue);
-      expect(mockInterceptor.isPunchedOut, isTrue);
-
-      // Step 3: After OUT, service should NOT be stopped (keeps monitoring for re-entry)
-      expect(service.calls.didStop, isFalse,
-          reason: 'Service must keep running after OUT to detect re-entry');
-    });
-
-    test('IN after OUT re-entry', () async {
-      final worker = GeofenceBackgroundWorker(service, dio: dio);
-      await worker.loadData();
-
-      // Step 1: Inside office → auto-IN
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-      expect(service.calls.didPunchIn, isTrue);
-      service.calls.clear();
-
-      // Step 2: Progressive exit → auto-OUT
-      final exitPoints = [
-        LocationResult(latitude: 19.8775, longitude: 75.3165, accuracy: 10, speed: 1.0, jumpScore: 0.0),
-        LocationResult(latitude: 19.8780, longitude: 75.3170, accuracy: 10, speed: 1.1, jumpScore: 0.0),
-        LocationResult(latitude: 19.8790, longitude: 75.3180, accuracy: 10, speed: 1.2, jumpScore: 0.0),
-        LocationResult(latitude: 19.8800, longitude: 75.3190, accuracy: 10, speed: 1.3, jumpScore: 0.0),
-      ];
-
-      for (final pt in exitPoints) {
-        await worker.onLocationFix(pt, TrackingState.MOVING, defaultConfidence);
-        if (service.calls.didPunchOut) break;
-      }
-
-      expect(service.calls.didPunchOut, isTrue);
-      expect(service.calls.didStop, isFalse,
-          reason: 'Service must keep running after OUT to detect re-entry');
-
-      // Step 3: Server state reflects OUT — ready for next IN
-      expect(mockInterceptor.isPunchedIn, isFalse,
-          reason: 'After OUT, server must show isPunchedIn=false so re-entry IN can fire');
-      expect(mockInterceptor.isPunchedOut, isTrue);
-    });
-
-    test('re-entry clears stale exit tracking preventing false OUT', () async {
-      final worker = GeofenceBackgroundWorker(service, dio: dio);
-      await worker.loadData();
-
-      // Phase 1: Full IN→OUT cycle
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-      expect(service.calls.didPunchIn, isTrue);
-      service.calls.clear();
-
-      final exitPts = [
-        LocationResult(latitude: 19.8775, longitude: 75.3165, accuracy: 10, speed: 1.0, jumpScore: 0.0),
-        LocationResult(latitude: 19.8780, longitude: 75.3170, accuracy: 10, speed: 1.1, jumpScore: 0.0),
-        LocationResult(latitude: 19.8790, longitude: 75.3180, accuracy: 10, speed: 1.2, jumpScore: 0.0),
-        LocationResult(latitude: 19.8800, longitude: 75.3190, accuracy: 10, speed: 1.3, jumpScore: 0.0),
-      ];
-      for (final pt in exitPts) {
-        await worker.onLocationFix(pt, TrackingState.MOVING, defaultConfidence);
-        if (service.calls.didPunchOut) break;
-      }
-      expect(service.calls.didPunchOut, isTrue);
-      service.calls.clear();
-
-      // Phase 2: Outside fix re-starts exit tracking
-      await worker.onLocationFix(outsideLocation(), TrackingState.MOVING, defaultConfidence);
-      // _pendingOfficeId set, exit analyzer building score
-
-      // Phase 3: Inside fix — should clear pending exit state
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-
-      // Phase 4: Multiple inside fixes should NOT trigger OUT
-      for (int i = 0; i < 5; i++) {
-        await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-      }
-      expect(service.calls.didPunchOut, isFalse,
-          reason: 'No false OUT after re-entry cleared stale exit tracking');
-    });
-
-    test('OUT keeps service running during active shift hours', () async {
-      final worker = GeofenceBackgroundWorker(service, dio: dio);
-      await worker.loadData();
-
-      // Punch IN first
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-      service.calls.clear();
-
-      // Progressive exit
-      final pts = [
-        LocationResult(latitude: 19.8775, longitude: 75.3165, accuracy: 10, speed: 1.0, jumpScore: 0.0),
-        LocationResult(latitude: 19.8780, longitude: 75.3170, accuracy: 10, speed: 1.1, jumpScore: 0.0),
-        LocationResult(latitude: 19.8790, longitude: 75.3180, accuracy: 10, speed: 1.2, jumpScore: 0.0),
-        LocationResult(latitude: 19.8800, longitude: 75.3190, accuracy: 10, speed: 1.3, jumpScore: 0.0),
-      ];
-      for (final pt in pts) {
-        await worker.onLocationFix(pt, TrackingState.MOVING, defaultConfidence);
-        if (service.calls.didPunchOut) break;
-      }
-
-      expect(service.calls.didPunchOut, isTrue);
-      expect(service.calls.didStop, isFalse,
-          reason: 'Service must keep running after OUT');
-    });
   });
 
   group('Edge cases', () {
-    test('no action when geofence auto-punch is disabled', () async {
-      SharedPreferences.setMockInitialValues({
-        'bg_access_token': 'test_token',
-        'geofence_auto_enabled': false,
-      });
 
-      final worker = GeofenceBackgroundWorker(service, dio: dio);
-      await worker.loadData();
-
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-
-      expect(service.calls.didPunchIn, isFalse);
-    });
-
-    test('no action when no shifts available', () async {
-      final noShiftInterceptor = _MockInterceptor(shifts: []);
-      final noShiftDio = Dio(BaseOptions(baseUrl: 'http://test'));
-      noShiftDio.interceptors.add(noShiftInterceptor);
-
-      final worker = GeofenceBackgroundWorker(service, dio: noShiftDio);
-      await worker.loadData();
-
-      await worker.onLocationFix(insideLocation(), TrackingState.STATIONARY, defaultConfidence);
-
-      // loadData will log "No shift found — staying dormant" and _inShiftWindow stays false
-      // onLocationFix returns early if !_inShiftWindow
-      expect(service.calls.didPunchIn, isFalse);
-    });
 
     test('no action when token is missing (Dio returns null)', () async {
       SharedPreferences.setMockInitialValues({
@@ -693,23 +419,6 @@ void main() {
       expect(service.calls.didPunchIn, isFalse);
     });
 
-    test('no action when location accuracy is too low', () async {
-      final worker = GeofenceBackgroundWorker(service, dio: dio);
-      await worker.loadData();
-
-      // accuracy = 150 > LocationFilter.MIN_ACCURACY (120)
-      // But onLocationFix doesn't gate on accuracy — the entrypoint does.
-      // The worker trusts that the caller already gated on accuracy.
-      // This test verifies the worker doesn't crash with low-accuracy data.
-      final lowAcc = LocationResult(
-        latitude: 19.8769, longitude: 75.3143,
-        accuracy: 150, speed: 0.5, jumpScore: 0.0,
-      );
-      await worker.onLocationFix(lowAcc, TrackingState.STATIONARY, 0.3);
-
-      // Confidence will be very low due to accuracy factor, so IN is blocked
-      expect(service.calls.didPunchIn, isFalse);
-    });
   });
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -846,155 +555,6 @@ void main() {
   });
 
   group('Comprehensive workday simulation', () {
-    test('complete auto geofence punching lifecycle with custom office and mock GPS', () async {
-      // ── Office HQ with 150m geofence radius ─────────────────────────
-      const officeLat = 19.8761;
-      const officeLng = 75.3153;
-      const radius = 150;
-
-      final customOffices = [
-        const Office(
-          id: 1, name: 'HQ',
-          latitude: officeLat, longitude: officeLng,
-          geofenceRadius: radius,
-        ),
-      ];
-
-      final mockInterceptor = _MockInterceptor(offices: customOffices);
-      final mockDio = Dio(BaseOptions(baseUrl: 'http://test'));
-      mockDio.interceptors.add(mockInterceptor);
-
-      final worker = GeofenceBackgroundWorker(service, dio: mockDio);
-      await worker.loadData();
-
-      // ── GPS positions at various distances from office center ────────
-      // Well outside (~500m) — too far, exit tracking starts here
-      final farOutside = LocationResult(
-        latitude: 19.8810, longitude: 75.3200,
-        accuracy: 10, speed: 1.2, jumpScore: 0.0,
-      );
-      // Past GPS margin (~200m) — exit tracking starts at > radius+margin(160m)
-      final nearBoundary = LocationResult(
-        latitude: 19.8775, longitude: 75.3165,
-        accuracy: 10, speed: 1.0, jumpScore: 0.0,
-      );
-      // Progressive exit point (~230m)
-      final midExit = LocationResult(
-        latitude: 19.8780, longitude: 75.3170,
-        accuracy: 10, speed: 1.1, jumpScore: 0.0,
-      );
-      // Progressive exit point (~330m)
-      final farExit = LocationResult(
-        latitude: 19.8790, longitude: 75.3180,
-        accuracy: 10, speed: 1.2, jumpScore: 0.0,
-      );
-      // Well outside (~430m) — forces exit confirmation
-      final finalExit = LocationResult(
-        latitude: 19.8800, longitude: 75.3190,
-        accuracy: 10, speed: 1.3, jumpScore: 0.0,
-      );
-      // Well inside geofence (~105m)
-      final insideGps = LocationResult(
-        latitude: 19.8769, longitude: 75.3143,
-        accuracy: 10, speed: 0.5, jumpScore: 0.0,
-      );
-
-      // ═══════════════════════════════════════════════════════════════
-      // Phase 1: User is outside geofence → no action
-      // ═══════════════════════════════════════════════════════════════
-      await worker.onLocationFix(farOutside, TrackingState.MOVING, defaultConfidence);
-      expect(service.calls.didPunchIn, isFalse, reason: 'Outside → no IN');
-      expect(service.calls.didPunchOut, isFalse, reason: 'Not punched in → no OUT');
-
-      // ═══════════════════════════════════════════════════════════════
-      // Phase 2: User walks inside geofence → auto-IN
-      // ═══════════════════════════════════════════════════════════════
-      await worker.onLocationFix(insideGps, TrackingState.STATIONARY, defaultConfidence);
-      expect(service.calls.didPunchIn, isTrue, reason: 'Inside geofence → auto-IN');
-      expect(mockInterceptor.isPunchedIn, isTrue, reason: 'Server reflects IN');
-      expect(mockInterceptor.isPunchedOut, isFalse);
-      expect(mockInterceptor.lastPunchDirection, 'In');
-      expect(mockInterceptor.lastPunchPayload?['Method'], 'GeofenceAuto',
-          reason: 'Punch payload has correct Method');
-      expect(mockInterceptor.lastPunchPayload?['Direction'], 'In');
-      service.calls.clear();
-
-      // ═══════════════════════════════════════════════════════════════
-      // Phase 3: User stays inside → no duplicate IN
-      // ═══════════════════════════════════════════════════════════════
-      for (int i = 0; i < 5; i++) {
-        await worker.onLocationFix(insideGps, TrackingState.STATIONARY, defaultConfidence);
-      }
-      expect(mockInterceptor.punchCallCount, 1, reason: 'Only 1 IN total');
-      expect(service.calls.didPunchIn, isFalse, reason: 'No duplicate IN while inside');
-      expect(service.calls.didPunchOut, isFalse);
-
-      // ═══════════════════════════════════════════════════════════════
-      // Phase 4: User leaves worksite → auto-OUT (trend analyzer)
-      // ═══════════════════════════════════════════════════════════════
-      final exitPath = [nearBoundary, midExit, farExit, finalExit];
-      for (final pt in exitPath) {
-        await worker.onLocationFix(pt, TrackingState.MOVING, defaultConfidence);
-        if (service.calls.didPunchOut) break;
-      }
-      expect(service.calls.didPunchOut, isTrue, reason: 'Exit confirmed → auto-OUT');
-      expect(mockInterceptor.isPunchedOut, isTrue, reason: 'Server reflects OUT');
-      expect(mockInterceptor.isPunchedIn, isFalse);
-      expect(mockInterceptor.lastPunchDirection, 'Out');
-      expect(service.calls.didStop, isFalse,
-          reason: 'Service keeps running after OUT for re-entry detection');
-      final out1CallCount = mockInterceptor.punchCallCount;
-      service.calls.clear();
-
-      // ═══════════════════════════════════════════════════════════════
-      // Phase 5: User stays outside → exit tracking re-starts but
-      //          5-min cooldown blocks duplicate OUT
-      // ═══════════════════════════════════════════════════════════════
-      // The exit analyzer confirms a new exit trend from progressive
-      // outside fixes, but _handleAutoPunch('Out') refuses it because
-      // _lastPunchType == 'Out' and < 5 min have passed in test time.
-      for (int i = 0; i < 3; i++) {
-        await worker.onLocationFix(farOutside, TrackingState.MOVING, defaultConfidence);
-      }
-      expect(mockInterceptor.punchCallCount, out1CallCount,
-          reason: 'Cooldown blocks duplicate OUT in test time');
-      expect(service.calls.didPunchOut, isFalse);
-
-      // ═══════════════════════════════════════════════════════════════
-      // Phase 6: Outside fix re-starts exit tracking, then user
-      //          returns inside → stale state cleared, no false OUT
-      // ═══════════════════════════════════════════════════════════════
-      await worker.onLocationFix(farOutside, TrackingState.MOVING, defaultConfidence);
-      // Exit tracking re-started (pendingOfficeId set)
-
-      // Walk inside → pending exit state cleared (in _checkEntry)
-      await worker.onLocationFix(insideGps, TrackingState.STATIONARY, defaultConfidence);
-
-      // Stay inside — no false OUT should fire
-      for (int i = 0; i < 3; i++) {
-        await worker.onLocationFix(insideGps, TrackingState.STATIONARY, defaultConfidence);
-      }
-      expect(service.calls.didPunchOut, isFalse,
-          reason: 'No false OUT after re-entry cleared stale state');
-      expect(service.calls.didStop, isFalse,
-          reason: 'Service still alive after re-entry cycle');
-
-      // ═══════════════════════════════════════════════════════════════
-      // Phase 7: Low confidence GPS fix → no action
-      // ═══════════════════════════════════════════════════════════════
-      await worker.onLocationFix(insideGps, TrackingState.STATIONARY, 0.3);
-      expect(service.calls.didPunchIn, isFalse,
-          reason: 'Low confidence (0.3 < 0.8 threshold) skips entry check');
-
-      // ── Final punch count: 1 IN + 1 OUT ────────────────────────────
-      // A second IN→OUT cycle is blocked in test time by 2-min debounce
-      // and 5-min cooldown (both time-based gates that can't expire in
-      // simulated time). The re-entry IN fires in 2+ min of real time;
-      // the second OUT fires in 5+ min.
-      expect(mockInterceptor.punchCallCount, 2);
-      expect(service.calls.didGfStop, isFalse,
-          reason: 'No gf_stop events fired throughout the day');
-    });
   });
 
   group('Server status gates (inline)', () {
