@@ -118,6 +118,11 @@ class _BreakScreenState extends ConsumerState<BreakScreen> {
   void initState() {
     super.initState();
     _syncTimerFromStatus();
+    // Re-sync the timer if the status/breaks load (or reload) after init — the
+    // status provider is invalidated from several streams and can be null at the
+    // moment this screen is (re)built, which previously left the timer stuck at 0.
+    ref.listen(attendanceStatusProvider, (previous, next) => _syncTimerFromStatus());
+    ref.listen(todayBreaksProvider, (previous, next) => _syncTimerFromStatus());
   }
 
   @override
@@ -127,12 +132,38 @@ class _BreakScreenState extends ConsumerState<BreakScreen> {
   }
 
   void _syncTimerFromStatus() {
-    final statusAsync = ref.read(attendanceStatusProvider);
-    final status = statusAsync.value;
-    if (status?.isOnBreak != true) return;
+    if (!mounted) return;
 
-    // Find the most recent BreakStart punch to get start time
-    final breakStart = status!.todaysPunches
+    // Prefer the authoritative ongoing break start time from the today-breaks
+    // endpoint (independent of whether todaysPunches carries a BreakStart punch).
+    final breakStart =
+        _ongoingBreakStartFromTodayBreaks() ?? _breakStartFromStatus();
+
+    if (breakStart != null) {
+      _breakStartTime = breakStart;
+      _elapsed = DateTime.now().difference(breakStart);
+      _startTimer();
+    }
+  }
+
+  /// Most recent ongoing break's start time from the today-breaks endpoint.
+  DateTime? _ongoingBreakStartFromTodayBreaks() {
+    final breaks = ref.read(todayBreaksProvider).value;
+    if (breaks == null) return null;
+    DateTime? latest;
+    for (final b in breaks) {
+      if (b.isOngoing) {
+        if (latest == null || b.startTime.isAfter(latest)) latest = b.startTime;
+      }
+    }
+    return latest;
+  }
+
+  /// Fallback: latest BreakStart punch from the attendance status payload.
+  DateTime? _breakStartFromStatus() {
+    final status = ref.read(attendanceStatusProvider).value;
+    if (status?.isOnBreak != true) return null;
+    return status!.todaysPunches
         .where((p) => p.isBreakStart)
         .fold<DateTime?>(null, (latest, p) {
       if (latest == null || p.punchTime.isAfter(latest)) {
@@ -140,12 +171,6 @@ class _BreakScreenState extends ConsumerState<BreakScreen> {
       }
       return latest;
     });
-
-    if (breakStart != null) {
-      _breakStartTime = breakStart;
-      _elapsed = DateTime.now().difference(breakStart);
-      _startTimer();
-    }
   }
 
   void _startTimer() {
