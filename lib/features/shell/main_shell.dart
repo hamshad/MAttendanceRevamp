@@ -234,10 +234,19 @@ class _MainShellState extends ConsumerState<MainShell>
     bool isEnabled = GeofenceMonitor.isEnabled;
 
     if (!GeofenceMonitor.hasUserToggled) {
-      debugPrint('SHELL: First launch — auto-enabling geofence');
-      await GeofenceMonitor.setEnabled(true);
-      ref.read(geofenceEnabledProvider.notifier).state = true;
-      isEnabled = true;
+      // Aggressive-OEM (MI family) devices MUST go through the mandatory
+      // battery-restrictions gate before enabling — never auto-enable
+      // headlessly there (would enable without the Auto-start / battery
+      // saver exemption → missed punches).  Let the user enable via the
+      // gated flow instead.
+      if (await AggressiveOem.isAggressive()) {
+        debugPrint('SHELL: First launch on aggressive OEM — skip auto-enable (gate required)');
+      } else {
+        debugPrint('SHELL: First launch — auto-enabling geofence');
+        await GeofenceMonitor.setEnabled(true);
+        ref.read(geofenceEnabledProvider.notifier).state = true;
+        isEnabled = true;
+      }
     }
 
     // Sync enabled state to SharedPreferences for background isolate
@@ -275,6 +284,27 @@ class _MainShellState extends ConsumerState<MainShell>
   void _onGeofenceToggle(bool? prev, bool next) async {
     debugPrint('SHELL_Toggle: geofence $prev -> $next');
     if (next) {
+      // Mandatory MIUI battery-restrictions gate (user decision 2026-08-17):
+      // MI-family devices kill background work (WorkManager, alarms, FGS)
+      // unless Auto-start + battery saver + battery optimization are off.
+      // Auto-punch cannot enable until the user confirms — same gate as the
+      // settings toggle.  MIUI battery state is unreadable, so the user
+      // verifies by hand.  Scoped to the MI family for now (OnePlus not yet).
+      if (await AggressiveOem.isAggressive() &&
+          !(await AggressiveOem.restrictionsConfirmed())) {
+        final confirmed = await ensureMiRestrictionsOff(context);
+        if (!confirmed) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Xiaomi battery restrictions must be off for auto-punch.'),
+              duration: Duration(seconds: 3),
+            ),
+          );
+          return;
+        }
+      }
+
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('geofence_auto_enabled', true);
 
