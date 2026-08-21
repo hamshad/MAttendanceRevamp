@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/api/punch_state_interceptor.dart';
 import '../../../core/utils/constants.dart';
+import '../../../models/attendance.dart';
 import '../../../models/office.dart';
 import '../../tracking/models/location_result.dart';
 
@@ -42,7 +43,11 @@ class GeofenceBackgroundWorker {
   static const _kLastPunchTime = 'gf_last_punch_time';
   static const _kMatchedOfficeName = 'gf_last_punch_office';
 
-  GeofenceBackgroundWorker(this._service);
+  GeofenceBackgroundWorker(this._service, {Dio? dio}) : _dio = dio;
+
+  /// Optional injected Dio (used by tests). When present, [_buildDio] returns
+  /// it directly instead of constructing one from the stored background token.
+  final Dio? _dio;
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -99,39 +104,63 @@ class GeofenceBackgroundWorker {
       debugPrint('[GF_BG] ENTER geofence: ${enterOffice!.name}');
       _currentOfficeName = enterOffice!.name;
       await _saveCurrentOffice(enterOffice!.name);
-      await _onEnter(enterOffice!);
+      await _onEnter(enterOffice!, loc);
     } else if (!stillIn && wasIn) {
       debugPrint('[GF_BG] EXIT geofence: $_currentOfficeName');
       final exitedName = _currentOfficeName;
       _currentOfficeName = null;
       await _saveCurrentOffice('');
-      await _onExit(exitedName!);
+      await _onExit(exitedName!, loc);
     }
   }
 
   // ── Enter / Exit ───────────────────────────────────────────────────────────
 
-  Future<void> _onEnter(Office office) async {
+  Future<void> _onEnter(Office office, LocationResult loc) async {
     final prefs = await SharedPreferences.getInstance();
     final lastType = prefs.getString(_kLastPunchType);
     if (lastType == 'In') {
-      debugPrint('[GF_BG] Already IN — skip');
+      debugPrint('[GF_BG] Already IN (local) — skip');
       return;
     }
 
-    // Check if connected to office WiFi — WifiBgWorker should handle that
-    // but we punch as GPS method anyway (more reliable for geofence)
-    await _punchIn(office);
+    // ── Mediator: consult backend for today's last punch ──
+    // Never punch IN if the server already shows IN (e.g. punched via Web/GPS/
+    // Biometric on another device). If the server is unreachable, block the
+    // auto IN rather than risk a duplicate (safe default).
+    final server = await _fetchServerState();
+    if (server == null) {
+      debugPrint('[GF_BG] Server status unavailable — blocking auto IN (safe)');
+      return;
+    }
+    if (server.isPunchedIn) {
+      debugPrint('[GF_BG] Server already IN — skip duplicate auto IN');
+      await _setLastPunchType('In', office.name);
+      return;
+    }
+
+    await _punchIn(office, loc);
   }
 
-  Future<void> _onExit(String officeName) async {
+  Future<void> _onExit(String officeName, LocationResult loc) async {
     final prefs = await SharedPreferences.getInstance();
     final lastType = prefs.getString(_kLastPunchType);
     if (lastType != 'In') {
-      debugPrint('[GF_BG] Not IN — skip exit');
+      debugPrint('[GF_BG] Not IN (local) — skip exit');
       return;
     }
-    await _punchOut(officeName);
+
+    // ── Mediator: don't punch OUT if the server already shows OUT ──
+    // Unlike IN, an unreachable server must NOT trap an overtime worker, so
+    // OUT is still allowed when status can't be fetched.
+    final server = await _fetchServerState();
+    if (server != null && server.isPunchedOut) {
+      debugPrint('[GF_BG] Server already OUT — skip duplicate auto OUT');
+      await _setLastPunchType('Out', '');
+      return;
+    }
+
+    await _punchOut(officeName, loc);
   }
 
   // ── Office Data ────────────────────────────────────────────────────────────
@@ -161,7 +190,7 @@ class GeofenceBackgroundWorker {
 
   // ── Punch ──────────────────────────────────────────────────────────────────
 
-  Future<void> _punchIn(Office office) async {
+  Future<void> _punchIn(Office office, LocationResult loc) async {
     try {
       final dio = await _buildDio();
       if (dio == null) {
@@ -169,11 +198,17 @@ class GeofenceBackgroundWorker {
         return;
       }
 
+      String ip = '0.0.0.0';
+      try {
+        ip = await NetworkInfo().getWifiIP() ?? '0.0.0.0';
+      } catch (_) {}
+
       final resp = await dio.post(ApiEndpoints.punch, data: {
-        'Method': 'GPS',
+        'Method': 'GeofenceAuto',
         'Direction': 'In',
-        'Latitude': office.latitude,
-        'Longitude': office.longitude,
+        'Latitude': loc.latitude,
+        'Longitude': loc.longitude,
+        'IPAddress': ip,
         'remarks': 'Auto-Punch In (Geofence)',
       });
 
@@ -197,7 +232,7 @@ class GeofenceBackgroundWorker {
     }
   }
 
-  Future<void> _punchOut(String officeName) async {
+  Future<void> _punchOut(String officeName, LocationResult loc) async {
     try {
       final dio = await _buildDio();
       if (dio == null) {
@@ -205,9 +240,17 @@ class GeofenceBackgroundWorker {
         return;
       }
 
+      String ip = '0.0.0.0';
+      try {
+        ip = await NetworkInfo().getWifiIP() ?? '0.0.0.0';
+      } catch (_) {}
+
       final resp = await dio.post(ApiEndpoints.punch, data: {
-        'Method': 'GPS',
+        'Method': 'GeofenceAuto',
         'Direction': 'Out',
+        'Latitude': loc.latitude,
+        'Longitude': loc.longitude,
+        'IPAddress': ip,
         'remarks': 'Auto-Punch Out (Geofence exit)',
       });
 
@@ -266,6 +309,8 @@ class GeofenceBackgroundWorker {
   // ── HTTP Helpers ───────────────────────────────────────────────────────────
 
   Future<Dio?> _buildDio() async {
+    if (_dio != null) return _dio;
+
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString('bg_access_token');
     if (token == null) return null;
@@ -303,6 +348,51 @@ class GeofenceBackgroundWorker {
     ]);
 
     return dio;
+  }
+
+  /// Tolerant server punch-state fetch for "today".
+  ///
+  /// The status endpoint may return either direct booleans
+  /// (`isPunchedIn`/`isPunchedOut`) or a full [EmployeeStatus] with
+  /// `todaysPunches`. We read whichever shape is present. Returns `null` on
+  /// any error so callers can apply their safe default.
+  Future<_ServerState?> _fetchServerState() async {
+    final dio = await _buildDio();
+    if (dio == null) return null;
+    try {
+      final resp = await dio.get(
+        ApiEndpoints.todayStatus,
+        options: Options(
+          sendTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 15),
+        ),
+      );
+      final body = resp.data;
+      final data = body is Map ? body['data'] as Map<String, dynamic>? : null;
+      if (data == null) return null;
+
+      final inDirect = data['isPunchedIn'] as bool?;
+      final outDirect = data['isPunchedOut'] as bool?;
+      if (inDirect != null || outDirect != null) {
+        return _ServerState(
+          isPunchedIn: inDirect ?? false,
+          isPunchedOut: outDirect ?? false,
+        );
+      }
+
+      // Real API shape: EmployeeStatus with todaysPunches.
+      final status = EmployeeStatus.fromJson(data);
+      return _ServerState(
+        isPunchedIn: status.isPunchedIn,
+        isPunchedOut: status.isPunchedOut,
+      );
+    } on DioException catch (e) {
+      debugPrint('[GF_BG] Server status fetch failed: $e');
+      return null;
+    } catch (e) {
+      debugPrint('[GF_BG] Server status parse failed: $e');
+      return null;
+    }
   }
 
   Future<String?> _refreshToken() async {
@@ -377,4 +467,14 @@ class GeofenceBackgroundWorker {
       debugPrint('[GF_BG] Notification failed: $e');
     }
   }
+}
+
+/// Minimal server-derived punch state used to gate auto-punches.
+class _ServerState {
+  final bool isPunchedIn;
+  final bool isPunchedOut;
+  const _ServerState({
+    required this.isPunchedIn,
+    required this.isPunchedOut,
+  });
 }
