@@ -295,6 +295,35 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
     } catch (e) {
       debugPrint('[GF_BG_ENTRY] Keep-alive init check failed: $e');
     }
+    // ── Shift-end self-kill (wires the dead isPastShiftEnd check) ─────────
+    // Once the shift is over AND the user is outside every office, there is
+    // nothing left to monitor — stop the FGS and its "Geofence Active"
+    // notification.  Inlined (not via GeofenceScheduler) to avoid an import
+    // cycle.  The 15-min headless alarm still re-heals IN if needed.
+    try {
+      final endRaw = prefs.getString('gf_shift_end_time');
+      if (endRaw != null) {
+        final end = DateTime.tryParse(endRaw);
+        if (end != null && DateTime.now().isAfter(end)) {
+          final zones = keepAliveOfficeZones(prefs);
+          if (zones.isNotEmpty) {
+            final fix = await Geolocator.getCurrentPosition(
+              locationSettings: const LocationSettings(
+                accuracy: LocationAccuracy.low,
+                timeLimit: Duration(seconds: 5),
+              ),
+            );
+            if (isOutsideAllOffices(fix, zones)) {
+              debugPrint('[GF_BG_ENTRY] Shift over + outside — stopping FGS');
+              if (service is AndroidServiceInstance) service.stopSelf();
+              return;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[GF_BG_ENTRY] shift-end self-kill check failed: $e');
+    }
     // ── Movement-gated punch monitor ────────────────────────────────────
     // Only while punched in.  distanceFilter 30m → a stationary user at
     // the desk gets ZERO fixes (no GPS radio churn); fixes arrive only as
@@ -345,6 +374,18 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
             } catch (e) {
               debugPrint('[GF_BG_ENTRY] keep-alive reconcile failed: $e');
             }
+            // Shift over + outside: nothing left to monitor — stop the FGS
+            // and its notification now (don't wait for the OUT to land).
+            try {
+              final endRaw = p.getString('gf_shift_end_time');
+              if (endRaw != null) {
+                final end = DateTime.tryParse(endRaw);
+                if (end != null && DateTime.now().isAfter(end)) {
+                  debugPrint('[GF_BG_ENTRY] Shift over + outside — stopping FGS');
+                  if (service is AndroidServiceInstance) service.stopSelf();
+                }
+              }
+            } catch (_) {}
           } else if (!outside) {
             keepAliveWasOutside = false;
           }

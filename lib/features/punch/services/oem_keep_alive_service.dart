@@ -168,10 +168,11 @@ class OemKeepAliveService {
     await prefs.setBool(keepAliveModeKey, false);
     final svc = FlutterBackgroundService();
     try {
-      if (await svc.isRunning()) {
-        svc.invoke('stopKeepAlive');
-        debugPrint('[KEEP_ALIVE] stop requested');
-      }
+      // isRunning() is unreliable (false negatives) on several ROMs — always
+      // send the stop signal; invoke is a harmless no-op when not running.
+      svc.invoke('stopKeepAlive');
+      svc.invoke('stop');
+      debugPrint('[KEEP_ALIVE] stop requested');
     } catch (e) {
       debugPrint('[KEEP_ALIVE] stop failed: $e');
     }
