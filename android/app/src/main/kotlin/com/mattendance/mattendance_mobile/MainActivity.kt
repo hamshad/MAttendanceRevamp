@@ -97,25 +97,56 @@ class MainActivity : FlutterFragmentActivity() {
                     result.success(ContainmentAlarmReceiver.isAggressiveOem(this))
                 }
                 "openMiuiAutoStart" -> {
-                    // MIUI per-app Auto-start page.  MIUI hides the standard
-                    // "Allow background activity"-style toggles behind its
-                    // own AutoStart manager; best-effort (MIUI versions move
-                    // components) with a fallback to the app details page.
-                    runCatching {
-                        val intent = Intent("miui.intent.action.OP_AUTO_START").apply {
+                    // MIUI/HyperOS per-app Auto-start page.  MIUI hides the
+                    // background-exec toggles (Auto-start, Battery saver)
+                    // inside the Security Center app, and the component names
+                    // move across versions — a hardcoded class often fails to
+                    // resolve on HyperOS, dropping the user onto the useless
+                    // app-details page.  Try several intents; if none resolve,
+                    // land in the Security Center home so the user can find
+                    // Permissions → Autostart.  Auto-start is THE critical
+                    // toggle: without it the 15-min containment alarm, OS
+                    // geofence transitions and WorkManager cannot run in the
+                    // background, so headless auto-punch never fires.
+                    val sc = "com.miui.securitycenter"
+                    val attempts = listOf(
+                        Intent("miui.intent.action.OP_AUTO_START").apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             setClassName(
-                                "com.miui.securitycenter",
+                                sc,
                                 "com.miui.permcenter.autostart.AutoStartManagementActivity",
                             )
+                        },
+                        Intent("miui.intent.action.OP_AUTO_START").apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        },
+                        Intent().apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            setClassName(
+                                sc,
+                                "com.miui.permcenter.autostart.AutoStartManagementActivity",
+                            )
+                        },
+                        Intent().apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            setClassName(sc, "com.miui.securitycenter.MainActivity")
+                        },
+                    )
+                    var opened = false
+                    for (intent in attempts) {
+                        if (runCatching { startActivity(intent) }.isSuccess) {
+                            opened = true
+                            break
                         }
-                        startActivity(intent)
-                    }.onFailure {
+                    }
+                    if (!opened) {
                         runCatching {
-                            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                data = Uri.parse("package:$packageName")
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            })
+                            startActivity(
+                                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                    data = Uri.parse("package:$packageName")
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                },
+                            )
                         }
                     }
                     result.success(null)

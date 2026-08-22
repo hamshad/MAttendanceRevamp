@@ -33,11 +33,15 @@ Future<bool> ensureMiRestrictionsOff(BuildContext context) async {
           title: const Text('Xiaomi Battery Restrictions — Required'),
           content: const SingleChildScrollView(
             child: Text(
-              'Xiaomi (MIUI) kills background work like auto-punch unless '
-              'the app is exempted. Without this, punches will be missed '
-              'or delayed.\n\n'
+              'Xiaomi (MIUI/HyperOS) kills background work like auto-punch '
+              'unless the app is exempted. Without this, punches will be '
+              'missed or delayed — you\u2019d have to open the app manually.\n\n'
+              'AUTO-START IS THE CRITICAL ONE: it lets the app run in the '
+              'background, so the 24/7 auto-IN fires when you enter the '
+              'office without opening the app. Battery "No restrictions" '
+              'alone is NOT enough.\n\n'
               'Please do all three, then come back:\n\n'
-              '1. Tap "Open Auto-start" → enable MAttendance.\n'
+              '1. Tap "Open Auto-start" → enable MAttendance (most important).\n'
               '2. Tap "Battery Saver" → choose "No restrictions".\n'
               '3. Tap "Battery Optimization" → allow.\n\n'
               'We can\u2019t read MIUI\u2019s per-app settings — this gate '
