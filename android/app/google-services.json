@@ -1,49 +1,50 @@
 {
   "project_info": {
-    "project_number": "615219020722",
-    "project_id": "mattendance-4e83d",
-    "storage_bucket": "mattendance-4e83d.firebasestorage.app"
+    "project_number": "949826765788",
+    "project_id": "mattendance3",
+    "storage_bucket": "mattendance3.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:615219020722:android:0f624d47f741e0f4de9aab",
+        "mobilesdk_app_id": "1:949826765788:android:a460d5960f85fa19510519",
         "android_client_info": {
           "package_name": "com.mattendance.mattendance_mobile"
         }
       },
       "oauth_client": [
         {
-          "client_id": "615219020722-afhsdq11ucihco4kpbc7ou4kghlg8vai.apps.googleusercontent.com",
+          "client_id": "949826765788-jden2kquqimtdul8vkjdp4juo4ilbjcu.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
             "package_name": "com.mattendance.mattendance_mobile",
-            "certificate_hash": "98372958b12fa762264f2fa4ce9179423a44ef13"
+            "certificate_hash": "d0340a87a1f7b89c448c68c4154ba52aefcdb031"
           }
         },
         {
-          "client_id": "615219020722-328p6rose15gud0s594nao396rhioh9a.apps.googleusercontent.com",
+          "client_id": "949826765788-umcvicfi1i085anunbbp2g5vflbisbjh.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.mattendance.mattendance_mobile",
+            "certificate_hash": "259324d0d298c34cf3ae0d22acd5e624fe0cb4b3"
+          }
+        },
+        {
+          "client_id": "949826765788-7trmkj3jniv9q2kcdlrd7bc8sibhpudd.apps.googleusercontent.com",
           "client_type": 3
         }
       ],
       "api_key": [
         {
-          "current_key": "AIzaSyAwvWtgEGvHih_tDI3Q_x13lLZ_jFi_xQA"
+          "current_key": "AIzaSyCrkknUMiAnBludZStXoCHU8ENaq5yVQ-c"
         }
       ],
       "services": {
         "appinvite_service": {
           "other_platform_oauth_client": [
             {
-              "client_id": "615219020722-328p6rose15gud0s594nao396rhioh9a.apps.googleusercontent.com",
+              "client_id": "949826765788-7trmkj3jniv9q2kcdlrd7bc8sibhpudd.apps.googleusercontent.com",
               "client_type": 3
-            },
-            {
-              "client_id": "615219020722-rc8t4pmr0gvlkkfrq49qoigskrcgbqhh.apps.googleusercontent.com",
-              "client_type": 2,
-              "ios_info": {
-                "bundle_id": "com.mattendance.mattendanceMobile"
-              }
             }
           ]
         }
