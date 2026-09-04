@@ -2,6 +2,7 @@ import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import '../../../core/utils/app_logger.dart';
 import '../../../core/utils/location_precision.dart';
+import '../../../core/utils/mock_location.dart';
 
 class LocationResult {
   final double latitude;
@@ -86,6 +87,14 @@ class LocationService {
         ),
       );
 
+      // Mock location detection — reject spoofed fixes
+      if (MockLocationDetector.isMocked(position)) {
+        AppLogger.w('LOCATION: Mock location detected — rejecting');
+        throw const LocationPermissionDeniedException(
+          'Mock location detected. Disable mock location apps and developer options.',
+        );
+      }
+
       AppLogger.i('LOCATION: Position acquired: ${position.latitude}, ${position.longitude} (Acc: ${position.accuracy})');
 
       return LocationResult(
@@ -139,12 +148,21 @@ class LocationService {
 
   Stream<Position> getPositionStream() {
     AppLogger.i('LOCATION: Starting position track stream');
+    Position? lastPosition;
     return Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.high,
         distanceFilter: 10, // update every 10m movement
       ),
-    ).handleError((error) {
+    ).where((position) {
+      // Filter out mocked positions from the stream
+      if (MockLocationDetector.isMockedStream(position, lastPosition)) {
+        AppLogger.w('LOCATION: Mock location in stream — filtering out');
+        return false;
+      }
+      lastPosition = position;
+      return true;
+    }).handleError((error) {
       AppLogger.e('LOCATION: Stream error', error);
     });
   }

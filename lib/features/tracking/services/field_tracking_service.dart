@@ -22,6 +22,7 @@ import 'package:intl/intl.dart';
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/utils/constants.dart';
 import '../../../core/utils/location_precision.dart';
+import '../../../core/utils/mock_location.dart';
 import '../../../models/offline_punch.dart';
 import '../../punch/services/geofence_monitor.dart';
 import '../../punch/services/geofence_scheduler.dart';
@@ -350,6 +351,12 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
               );
         keepAliveSub = Geolocator.getPositionStream(locationSettings: settings)
             .listen((fix) async {
+          // Mock location detection — warn user and skip this fix
+          if (MockLocationDetector.isMocked(fix)) {
+            debugPrint('[GF_BG_ENTRY] keep-alive: Mock location detected — warning user');
+            await MockLocationDetector.showMockLocationWarning();
+            return;
+          }
           final p = await SharedPreferences.getInstance();
           // Punched OUT → nothing to monitor; OS EXIT / containment alarm /
           // next ENTER take over.  Stop the GPS churn.
@@ -531,12 +538,14 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
       await keepAliveSub?.cancel();
       await alignGpsSub?.cancel();
       await alignConnSub?.cancel();
+      await MockLocationDetector.cancelMockLocationWarning();
       if (service is AndroidServiceInstance) service.stopSelf();
     });
     service.on('stop').listen((_) async {
       await keepAliveSub?.cancel();
       await alignGpsSub?.cancel();
       await alignConnSub?.cancel();
+      await MockLocationDetector.cancelMockLocationWarning();
       if (service is AndroidServiceInstance) service.stopSelf();
     });
     return;
@@ -953,9 +962,27 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
         );
 
   debugPrint('[GF_BG_ENTRY] Setting up GPS stream...');
+  Position? lastStreamPosition;
   positionSub = Geolocator.getPositionStream(locationSettings: locationSettings)
+      .where((pos) {
+        // Mock location detection — filter out spoofed fixes
+        if (MockLocationDetector.isMockedStream(pos, lastStreamPosition)) {
+          debugPrint('[GF_BG_ENTRY] Mock location in stream — filtering out');
+          return false;
+        }
+        lastStreamPosition = pos;
+        return true;
+      })
       .listen(
     (pos) async {
+      // Mock location detection — warn user and skip this fix
+      if (MockLocationDetector.isMockedStream(pos, lastStreamPosition)) {
+        debugPrint('[GF_BG_ENTRY] Mock location in stream — warning user');
+        await MockLocationDetector.showMockLocationWarning();
+        return;
+      }
+      lastStreamPosition = pos;
+      
       debugPrint('[GF_BG_ENTRY] RAW GPS fix: lat=${pos.latitude.toStringAsFixed(5)}, lng=${pos.longitude.toStringAsFixed(5)}, acc=${pos.accuracy.toStringAsFixed(1)}m');
       final raw = LocationResult(
         latitude: pos.latitude,

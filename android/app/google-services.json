@@ -22,6 +22,14 @@
           }
         },
         {
+          "client_id": "949826765788-sm8k3vtt4td6rnr2f7oork2vviqvqqt6.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.mattendance.mattendance_mobile",
+            "certificate_hash": "35c772c887f140dc63e71c8e132651c74a868c81"
+          }
+        },
+        {
           "client_id": "949826765788-umcvicfi1i085anunbbp2g5vflbisbjh.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {

@@ -30,10 +30,16 @@ android {
     }
 
     signingConfigs {
-        create("release") {
-            keyAlias = "androiddebugkey"
+        getByName("debug") {
+            keyAlias = "mattendance"
             keyPassword = "android"
-            storeFile = file("${System.getProperty("user.home")}/.android/debug.keystore")
+            storeFile = file("${System.getProperty("user.home")}/.android/mattendance_debug.keystore")
+            storePassword = "android"
+        }
+        create("release") {
+            keyAlias = "mattendance"
+            keyPassword = "android"
+            storeFile = file("${System.getProperty("user.home")}/.android/mattendance_debug.keystore")
             storePassword = "android"
         }
     }
@@ -47,6 +53,9 @@ android {
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true

@@ -51,6 +51,10 @@ class _FakeGeolocatorPlatform extends GeolocatorPlatform {
   /// reuse cached positions and respect its fix-budget window).
   int currentPositionCalls = 0;
 
+  /// When true, returned positions have isMocked = true (simulates
+  /// fake GPS / mock location apps).
+  bool returnMockedPositions = false;
+
   @override
   Future<geo.Position> getCurrentPosition({
     LocationSettings? locationSettings,
@@ -59,6 +63,9 @@ class _FakeGeolocatorPlatform extends GeolocatorPlatform {
     if (positionQueue.isNotEmpty) return positionQueue.removeAt(0);
     final p = position;
     if (p == null) throw Exception('no fix in test');
+    if (returnMockedPositions) {
+      return _withMocked(p, true);
+    }
     return p;
   }
 
@@ -66,11 +73,31 @@ class _FakeGeolocatorPlatform extends GeolocatorPlatform {
   Future<geo.Position?> getLastKnownPosition({
     LocationSettings? locationSettings,
     bool forceLocationManager = false,
-  }) async =>
-      lastKnownPosition;
+  }) async {
+    final p = lastKnownPosition;
+    if (p == null) return null;
+    if (returnMockedPositions) {
+      return _withMocked(p, true);
+    }
+    return p;
+  }
 
   @override
   Future<bool> isLocationServiceEnabled() async => locationServicesEnabled;
+
+  static geo.Position _withMocked(geo.Position p, bool mocked) => geo.Position(
+        latitude: p.latitude,
+        longitude: p.longitude,
+        timestamp: p.timestamp,
+        accuracy: p.accuracy,
+        altitude: p.altitude,
+        altitudeAccuracy: p.altitudeAccuracy,
+        heading: p.heading,
+        headingAccuracy: p.headingAccuracy,
+        speed: p.speed,
+        speedAccuracy: p.speedAccuracy,
+        isMocked: mocked,
+      );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1518,6 +1545,82 @@ void main() {
 
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('gf_prompt_site_5'), isNotNull);
+    });
+  });
+
+  group('Mock location detection', () {
+    test('enter with mocked OS flag → rejected, no punch', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs());
+      fakeGeo.position = _fixAt(0.0002, 0.0002);
+      fakeGeo.returnMockedPositions = true;
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.enter));
+
+      expect(mock.punchCalls, 0);
+      fakeGeo.returnMockedPositions = false; // reset for other tests
+    });
+
+    test('exit with mocked OS flag → rejected, no punch', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'In'));
+      mock.isPunchedIn = true;
+      fakeGeo.position = _fixAt(0.0027, 0.0027);
+      fakeGeo.returnMockedPositions = true;
+
+      await GeofencePunchHandler.forTest(_dioWith(mock))
+          .handleEvent(_params(_officeId, GeofenceEvent.exit));
+
+      expect(mock.punchCalls, 0);
+      fakeGeo.returnMockedPositions = false;
+    });
+
+    test('reconcile with mocked cached position → skips mock, uses fresh fix', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'Out'));
+      // Cached position is mocked
+      fakeGeo.lastKnownPosition = _fixAt(0.0002, 0.0002);
+      fakeGeo.returnMockedPositions = true;
+      // Fresh fix is honest and inside office
+      fakeGeo.positionQueue = [_fixAt(0.0002, 0.0002)];
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment();
+
+      // Should reject mocked cached position, take fresh fix, and punch IN
+      expect(punched, isTrue);
+      expect(mock.punchCalls, 1);
+      expect(mock.lastDirection, 'In');
+      fakeGeo.returnMockedPositions = false;
+    });
+
+    test('reconcile with mocked fresh fix → no punch', () async {
+      SharedPreferences.setMockInitialValues(_basePrefs(lastType: 'Out'));
+      fakeGeo.lastKnownPosition = null;
+      fakeGeo.returnMockedPositions = true;
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment();
+
+      expect(punched, isFalse);
+      expect(mock.punchCalls, 0);
+      fakeGeo.returnMockedPositions = false;
+    });
+
+    test('confirmOut with mocked confirm fix → no OUT', () async {
+      SharedPreferences.setMockInitialValues({
+        ..._basePrefs(lastType: 'In'),
+        'gf_last_punch_zone_id': _officeId,
+      });
+      mock.isPunchedIn = true;
+      fakeGeo.lastKnownPosition = _fixAt(0.005, 0.005); // outside
+      fakeGeo.position = _fixAt(0.005, 0.005); // first fix outside
+      fakeGeo.returnMockedPositions = true; // confirm fix is mocked
+
+      final punched = await GeofencePunchHandler.forTest(_dioWith(mock))
+          .reconcileContainment(confirmOut: true);
+
+      expect(punched, isFalse);
+      expect(mock.punchCalls, 0);
+      fakeGeo.returnMockedPositions = false;
     });
   });
 }
