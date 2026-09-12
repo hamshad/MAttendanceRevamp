@@ -90,7 +90,19 @@ class OfflineSyncManager {
         // ── Server-truth gate + freshness (PunchCoordinator) ─────────────
         // Queued punches can be stale or already-covered by a punch we can't
         // see (biometric machine / website).  Re-check before POSTing.
+        final tsBefore = prefs.getInt('bg_token_ts') ?? 0;
         if (await _shouldDropPunch(punch, dio, box)) continue;
+
+        // The gate may have refreshed bg tokens (authFailed path) — rebuild
+        // Dio from the mirror ONLY when the mirror actually changed, so the
+        // POST below uses the fresh access token.
+        await prefs.reload();
+        if ((prefs.getInt('bg_token_ts') ?? 0) != tsBefore) {
+          final mirrorAccess = prefs.getString('bg_access_token');
+          if (mirrorAccess != null && mirrorAccess.isNotEmpty) {
+            dio = _buildDio(mirrorAccess);
+          }
+        }
 
         try {
           final resp = await dio.post(ApiEndpoints.punch, data: _buildBody(punch));
@@ -172,6 +184,28 @@ class OfflineSyncManager {
       await box.delete(punch.key);
       return true;
     }
+    if (verdict == PunchCheck.authFailed) {
+      // Expired access token — refresh ONCE then re-run the gate. Without
+      // this the queue freezes at every token expiry (bug 2026-09-12:
+      // 401 folded into undecided, retries burned, punches lost). The
+      // refreshed token is persisted to the bg mirror; the caller rebuilds
+      // its Dio from prefs before POSTing (see executeSyncTask).
+      final fresh = await _refreshBgTokens();
+      if (fresh != null) {
+        final retry = await PunchCoordinator.check(
+            dio: _buildDio(fresh), direction: direction);
+        if (retry == PunchCheck.duplicate || retry == PunchCheck.blocked) {
+          await box.delete(punch.key);
+          return true;
+        }
+        if (retry == PunchCheck.valid) return false;
+      }
+      // Refresh failed or still undecided → keep queued for next run.
+      punch.retryCount++;
+      punch.errorMessage = 'Token refresh needed — will retry';
+      await punch.save();
+      return true;
+    }
     if (verdict == PunchCheck.undecided) {
       // Status unreachable → keep queued; the periodic task (network
       // constrained) retries it later.
@@ -197,6 +231,44 @@ class OfflineSyncManager {
       // a synced IN starts the walk-out monitor.  No-op on no transition.
       await OemKeepAliveService.syncToPunchState();
     } catch (_) {}
+  }
+
+  /// Background-isolate token refresh against the SharedPreferences mirror.
+  /// Returns the new access token, or null when refresh is impossible/failed.
+  /// Never clears tokens — a failed refresh just means "retry next run".
+  static Future<String?> _refreshBgTokens() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      final sessionId = prefs.getString('auth_session_id');
+      final refreshToken = prefs.getString('bg_refresh_token');
+      final accessToken = prefs.getString('bg_access_token') ?? '';
+      if (sessionId == null || refreshToken == null || refreshToken.isEmpty) {
+        return null;
+      }
+      final refreshDio = Dio(BaseOptions(
+        baseUrl: AppConstants.apiBaseUrl,
+        connectTimeout: AppConstants.connectTimeout,
+        receiveTimeout: AppConstants.receiveTimeout,
+      ));
+      final resp = await refreshDio.post(
+        ApiEndpoints.refreshToken,
+        data: {'accessToken': accessToken, 'refreshToken': refreshToken},
+      );
+      final newAccess = resp.data['accessToken'] as String;
+      final newRefresh = resp.data['refreshToken'] as String;
+      // Session guard: discard results if logout/relogin happened mid-call.
+      await prefs.reload();
+      if (prefs.getString('auth_session_id') != sessionId) return null;
+      await Future.wait([
+        prefs.setString('bg_access_token', newAccess),
+        prefs.setString('bg_refresh_token', newRefresh),
+        prefs.setInt('bg_token_ts', DateTime.now().millisecondsSinceEpoch),
+      ]);
+      return newAccess;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Handles 401 (token refresh + retry) and duplicates.  Returns true when

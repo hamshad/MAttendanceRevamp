@@ -5,7 +5,7 @@ import '../../models/attendance.dart';
 import '../api/api_endpoints.dart';
 
 /// Outcome of a server-truth punch check.
-enum PunchCheck { valid, duplicate, blocked, undecided }
+enum PunchCheck { valid, duplicate, blocked, undecided, authFailed }
 
 /// Server-truth gate for every punch path.
 ///
@@ -48,6 +48,8 @@ class PunchCoordinator {
   /// Ask the server for the last punch type and decide whether [direction]
   /// is still needed. Never throws — returns [PunchCheck.undecided] when the
   /// server is unreachable and the caller must apply its own offline policy.
+  /// Returns [PunchCheck.authFailed] on 401 so callers can refresh tokens
+  /// instead of burning retries (a 401 is NOT "server unreachable").
   static Future<PunchCheck> check({
     required Dio dio,
     required String direction,
@@ -82,6 +84,11 @@ class PunchCoordinator {
         prefs.setInt(_cacheTsKey, DateTime.now().millisecondsSinceEpoch),
       ]);
       return _decide(last, isOnBreak: status.isOnBreak, direction: direction);
+    } on DioException catch (e) {
+      // 401 = expired/invalid access token, NOT an unreachable server.
+      // Surface distinctly so the caller refreshes instead of retry-burning.
+      if (e.response?.statusCode == 401) return PunchCheck.authFailed;
+      return PunchCheck.undecided;
     } catch (_) {
       return PunchCheck.undecided;
     }

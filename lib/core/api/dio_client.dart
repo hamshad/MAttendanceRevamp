@@ -272,12 +272,14 @@ class DioClient {
           e.response!.statusCode != null &&
           e.response!.statusCode! >= 500;
 
-      // Only 400 Bad Request from the refresh endpoint means the token was
-      // definitively rejected (revoked / invalid). All other errors are
+      // Only 4xx from the refresh endpoint means the token was
+      // definitively rejected (revoked / invalid / expired). The backend
+      // answers rejection with 401 {"message":"Invalid or expired refresh
+      // token."} (proven live 2026-09-12) — NOT 400. All other errors are
       // transient and MUST NOT force-logout the user.
-      final isTokenRejected = e is DioException &&
-          e.response != null &&
-          e.response!.statusCode == 400;
+      final statusCode = e is DioException ? e.response?.statusCode : null;
+      final isTokenRejected =
+          statusCode != null && statusCode >= 400 && statusCode < 500;
 
       if (isNetworkError || isServerError) {
         AppLogger.w('[AUTH] Refresh failed due to network/server error. Session retained.');
@@ -286,13 +288,14 @@ class DioClient {
       }
 
       if (isTokenRejected) {
-        // A 400 from /auth/refresh means the refresh token we sent was
+        // A 4xx from /auth/refresh means the refresh token we sent was
         // definitively rejected.  BUT this can also be the loser's outcome
         // in a concurrent-refresh race: another isolate refreshed with the
         // SAME refresh token a moment earlier, the server rotated it, and our
         // attempt failed.  Before force-logging-out, check whether the token
         // pair actually changed while we were refreshing — if so, adopt the
         // newer pair and retry instead of destroying the session.
+        AppLogger.w('[AUTH] Refresh token rejected by server ($statusCode) — checking for concurrent-refresh race before logout');
         final adopted = await _adoptNewerTokensIfRefreshed(
           refreshStartTs: refreshStartTs,
           attemptedRefresh: sentRefreshToken ?? '',
