@@ -130,10 +130,11 @@ class _OfflineScreenState extends ConsumerState<OfflineScreen> {
 
     final queue = ref.read(offlineQueueServiceProvider);
 
-    // Hard guard: never queue the same direction twice in a row — the
-    // backend alternates In/Out, a duplicate would be rejected on sync.
+    // Hard guard: never queue the same direction twice in a row on the same
+    // day — the backend alternates In/Out, a duplicate would be rejected on
+    // sync. Idempotent: the punch is already saved, so inform (not blockade).
     if (queue.lastPendingDirection == direction) {
-      _showSnackBar('$direction punch already queued — waiting to sync');
+      _showSnackBar('$direction punch already saved — waiting to sync');
       setState(() => _isPunching = false);
       return;
     }
