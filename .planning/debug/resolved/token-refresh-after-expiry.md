@@ -83,10 +83,10 @@ fix:
 verification: LIVE backend proof 2026-09-12 — POST /api/v1/auth/refresh valid-access+GARBAGE-refresh → HTTP 401 {"message":"Invalid or expired refresh token."} (not 400 → client never logs out). Garbage-access+valid-refresh → HTTP 400 IDX12729 (backend parses accessToken field). Valid+valid → HTTP 200 rotated pair (endpoint healthy otherwise). GET /api/v1/auth/me → HTTP 404 empty (endpoint missing — startup profile fetch always falls to skeleton user).
 files_changed: [lib/core/api/dio_client.dart, lib/core/punch/punch_coordinator.dart, lib/core/offline/offline_sync_manager.dart]
 
-## Fix Applied 2026-09-12
+## Fix Applied 2026-09-12 (commit 0004c56 + 62dbcf8)
 
 1. dio_client.dart: any 4xx from /auth/refresh = rejection → forceLogout (was 400-only). + log line with status code.
 2. punch_coordinator.dart: new PunchCheck.authFailed on 401 (was folded into undecided).
 3. offline_sync_manager.dart: authFailed → _refreshBgTokens() once → re-run gate → rebuild POST Dio from mirror on ts change. Queue survives expiry.
-4. Deferred: ApiEndpoints.me 404 — needs live response-shape check, skeleton fallback works.
+4. dio_client.dart: proactive refresh 5min before expiry in _onRequest; skip refresh on /auth/revoke + /auth/logout (no refresh loop on logout); JWT decode helper for exp claim; cross-isolate lock shared proactive+reactive.
 5. Verified: flutter analyze 0 errors, flutter test 197/197 pass. Doc: TOKEN_REFRESH_ISSUE.md.
