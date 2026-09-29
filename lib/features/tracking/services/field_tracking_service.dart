@@ -22,6 +22,7 @@ import 'package:intl/intl.dart';
 import '../../../core/api/api_endpoints.dart';
 import '../../../core/utils/constants.dart';
 import '../../../core/utils/location_precision.dart';
+import '../../../core/utils/mock_location.dart';
 import '../../../models/offline_punch.dart';
 import '../../punch/services/geofence_monitor.dart';
 import '../../punch/services/geofence_scheduler.dart';
@@ -295,6 +296,35 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
     } catch (e) {
       debugPrint('[GF_BG_ENTRY] Keep-alive init check failed: $e');
     }
+    // ── Shift-end self-kill (wires the dead isPastShiftEnd check) ─────────
+    // Once the shift is over AND the user is outside every office, there is
+    // nothing left to monitor — stop the FGS and its "Geofence Active"
+    // notification.  Inlined (not via GeofenceScheduler) to avoid an import
+    // cycle.  The 15-min headless alarm still re-heals IN if needed.
+    try {
+      final endRaw = prefs.getString('gf_shift_end_time');
+      if (endRaw != null) {
+        final end = DateTime.tryParse(endRaw);
+        if (end != null && DateTime.now().isAfter(end)) {
+          final zones = keepAliveOfficeZones(prefs);
+          if (zones.isNotEmpty) {
+            final fix = await Geolocator.getCurrentPosition(
+              locationSettings: const LocationSettings(
+                accuracy: LocationAccuracy.low,
+                timeLimit: Duration(seconds: 5),
+              ),
+            );
+            if (isOutsideAllOffices(fix, zones)) {
+              debugPrint('[GF_BG_ENTRY] Shift over + outside — stopping FGS');
+              if (service is AndroidServiceInstance) service.stopSelf();
+              return;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[GF_BG_ENTRY] shift-end self-kill check failed: $e');
+    }
     // ── Movement-gated punch monitor ────────────────────────────────────
     // Only while punched in.  distanceFilter 30m → a stationary user at
     // the desk gets ZERO fixes (no GPS radio churn); fixes arrive only as
@@ -321,6 +351,12 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
               );
         keepAliveSub = Geolocator.getPositionStream(locationSettings: settings)
             .listen((fix) async {
+          // Mock location detection — warn user and skip this fix
+          if (MockLocationDetector.isMocked(fix)) {
+            debugPrint('[GF_BG_ENTRY] keep-alive: Mock location detected — warning user');
+            await MockLocationDetector.showMockLocationWarning();
+            return;
+          }
           final p = await SharedPreferences.getInstance();
           // Punched OUT → nothing to monitor; OS EXIT / containment alarm /
           // next ENTER take over.  Stop the GPS churn.
@@ -345,6 +381,18 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
             } catch (e) {
               debugPrint('[GF_BG_ENTRY] keep-alive reconcile failed: $e');
             }
+            // Shift over + outside: nothing left to monitor — stop the FGS
+            // and its notification now (don't wait for the OUT to land).
+            try {
+              final endRaw = p.getString('gf_shift_end_time');
+              if (endRaw != null) {
+                final end = DateTime.tryParse(endRaw);
+                if (end != null && DateTime.now().isAfter(end)) {
+                  debugPrint('[GF_BG_ENTRY] Shift over + outside — stopping FGS');
+                  if (service is AndroidServiceInstance) service.stopSelf();
+                }
+              }
+            } catch (_) {}
           } else if (!outside) {
             keepAliveWasOutside = false;
           }
@@ -490,12 +538,14 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
       await keepAliveSub?.cancel();
       await alignGpsSub?.cancel();
       await alignConnSub?.cancel();
+      await MockLocationDetector.cancelMockLocationWarning();
       if (service is AndroidServiceInstance) service.stopSelf();
     });
     service.on('stop').listen((_) async {
       await keepAliveSub?.cancel();
       await alignGpsSub?.cancel();
       await alignConnSub?.cancel();
+      await MockLocationDetector.cancelMockLocationWarning();
       if (service is AndroidServiceInstance) service.stopSelf();
     });
     return;
@@ -912,9 +962,27 @@ void geofenceAndTrackingEntrypoint(ServiceInstance service) async {
         );
 
   debugPrint('[GF_BG_ENTRY] Setting up GPS stream...');
+  Position? lastStreamPosition;
   positionSub = Geolocator.getPositionStream(locationSettings: locationSettings)
+      .where((pos) {
+        // Mock location detection — filter out spoofed fixes
+        if (MockLocationDetector.isMockedStream(pos, lastStreamPosition)) {
+          debugPrint('[GF_BG_ENTRY] Mock location in stream — filtering out');
+          return false;
+        }
+        lastStreamPosition = pos;
+        return true;
+      })
       .listen(
     (pos) async {
+      // Mock location detection — warn user and skip this fix
+      if (MockLocationDetector.isMockedStream(pos, lastStreamPosition)) {
+        debugPrint('[GF_BG_ENTRY] Mock location in stream — warning user');
+        await MockLocationDetector.showMockLocationWarning();
+        return;
+      }
+      lastStreamPosition = pos;
+      
       debugPrint('[GF_BG_ENTRY] RAW GPS fix: lat=${pos.latitude.toStringAsFixed(5)}, lng=${pos.longitude.toStringAsFixed(5)}, acc=${pos.accuracy.toStringAsFixed(1)}m');
       final raw = LocationResult(
         latitude: pos.latitude,

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
@@ -10,6 +11,41 @@ import '../utils/app_logger.dart';
 import '../utils/constants.dart';
 import 'api_exceptions.dart';
 import 'punch_state_interceptor.dart';
+
+/// Paths that should never trigger token refresh (logout, revoke, etc.)
+const _kNoRefreshPaths = {
+  '/api/v1/auth/revoke',
+  '/api/v1/auth/logout',
+};
+
+/// Decode JWT payload (without verification) to check exp claim.
+/// Returns expiry DateTime or null if invalid.
+DateTime? _decodeJwtExpiry(String token) {
+  try {
+    final parts = token.split('.');
+    if (parts.length != 3) return null;
+    final payload = parts[1];
+    // Add padding if needed
+    final normalized = base64Url.normalize(payload);
+    final decoded = utf8.decode(base64Url.decode(normalized));
+    final map = jsonDecode(decoded) as Map<String, dynamic>;
+    final exp = map['exp'];
+    if (exp is int) {
+      return DateTime.fromMillisecondsSinceEpoch(exp * 1000, isUtc: true);
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Check if access token is expired or near expiry (within buffer).
+bool _isTokenNearExpiry(String? token, {Duration buffer = const Duration(minutes: 5)}) {
+  if (token == null || token.isEmpty) return true;
+  final expiry = _decodeJwtExpiry(token);
+  if (expiry == null) return true; // Can't decode → treat as expired
+  return DateTime.now().toUtc().add(buffer).isAfter(expiry);
+}
 
 class DioClient {
   late final Dio _dio;
@@ -93,6 +129,14 @@ class DioClient {
       // that would cascade into forceLogout if we synthesised a 401 here.
       token = await _tokenStorage.getAccessToken();
     }
+
+    // Proactive refresh: if token is near expiry (5min buffer), refresh now
+    // to avoid the 401→refresh dance. Uses same cross-isolate lock as 401 path.
+    if (token != null && _isTokenNearExpiry(token) && !options.path.contains('/auth/')) {
+      AppLogger.i('[AUTH] Token near expiry — proactive refresh before ${options.path}');
+      token = await _refreshTokenProactively();
+    }
+
     if (token != null) {
       options.headers['Authorization'] = 'Bearer $token';
     }
@@ -115,6 +159,75 @@ class DioClient {
     );
 
     handler.next(options);
+  }
+
+  /// Proactive token refresh using same cross-isolate lock as reactive path.
+  /// Returns new access token or null (continues with old token on failure).
+  Future<String?> _refreshTokenProactively() async {
+    // If another refresh is already in progress, wait for it
+    if (_isRefreshing) {
+      AppLogger.i('[AUTH] Proactive refresh: another refresh in progress, waiting...');
+      await _waitForProactiveRefresh();
+      return await _tokenStorage.getAccessToken();
+    }
+
+    // Try to acquire cross-isolate lock
+    if (!await _tokenStorage.acquireRefreshLock()) {
+      AppLogger.i('[AUTH] Proactive refresh: another isolate has lock, waiting...');
+      await _waitForProactiveRefresh();
+      return await _tokenStorage.getAccessToken();
+    }
+
+    _isRefreshing = true;
+    try {
+      final refreshToken = await _tokenStorage.getRefreshToken();
+      final expiredAccessToken = await _tokenStorage.getAccessToken();
+      if (refreshToken == null || expiredAccessToken == null) {
+        _isRefreshing = false;
+        await _tokenStorage.releaseRefreshLock();
+        return null;
+      }
+
+      AppLogger.i('[AUTH] Starting proactive token refresh...');
+      final refreshDio = Dio(BaseOptions(
+        baseUrl: AppConstants.apiBaseUrl,
+        connectTimeout: const Duration(seconds: 15),
+      ));
+      final response = await refreshDio.post(
+        '/api/v1/auth/refresh',
+        data: {
+          'accessToken': expiredAccessToken,
+          'refreshToken': refreshToken,
+        },
+      );
+
+      final newAccess = response.data['accessToken'] as String;
+      final newRefresh = response.data['refreshToken'] as String;
+      await _tokenStorage.saveTokens(newAccess, newRefresh);
+      await _tokenStorage.releaseRefreshLock();
+
+      AppLogger.i('[AUTH] Proactive refresh succeeded');
+      _isRefreshing = false;
+      return newAccess;
+    } catch (e) {
+      await _tokenStorage.releaseRefreshLock();
+      _isRefreshing = false;
+      AppLogger.w('[AUTH] Proactive refresh failed, continuing with old token: $e');
+      return null;
+    }
+  }
+
+  /// Wait for another isolate/refresh to complete and return new token.
+  Future<void> _waitForProactiveRefresh() async {
+    final deadline = DateTime.now().add(const Duration(seconds: 30));
+    while (DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (!_isRefreshing) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.reload();
+        if (!prefs.containsKey(TokenStorage.bgRefreshLockKey)) break;
+      }
+    }
   }
 
   void _onResponse(
@@ -140,7 +253,13 @@ class DioClient {
       return handler.next(_mapError(error));
     }
 
-    AppLogger.i('[AUTH] 401 on ${error.requestOptions.path} — isRefreshing=$_isRefreshing');
+    // Never refresh on auth-management endpoints (logout, revoke) — they
+    // either use the refresh token directly or shouldn't loop.
+    final reqPath = error.requestOptions.path;
+    if (_kNoRefreshPaths.any(reqPath.contains)) {
+      AppLogger.i('[AUTH] 401 on $reqPath — skipping refresh (no-refresh path)');
+      return handler.next(_mapError(error));
+    }
 
     // If a refresh is already in progress in THIS isolate, queue this request for retry
     if (_isRefreshing) {
@@ -272,12 +391,14 @@ class DioClient {
           e.response!.statusCode != null &&
           e.response!.statusCode! >= 500;
 
-      // Only 400 Bad Request from the refresh endpoint means the token was
-      // definitively rejected (revoked / invalid). All other errors are
+      // Only 4xx from the refresh endpoint means the token was
+      // definitively rejected (revoked / invalid / expired). The backend
+      // answers rejection with 401 {"message":"Invalid or expired refresh
+      // token."} (proven live 2026-09-12) — NOT 400. All other errors are
       // transient and MUST NOT force-logout the user.
-      final isTokenRejected = e is DioException &&
-          e.response != null &&
-          e.response!.statusCode == 400;
+      final statusCode = e is DioException ? e.response?.statusCode : null;
+      final isTokenRejected =
+          statusCode != null && statusCode >= 400 && statusCode < 500;
 
       if (isNetworkError || isServerError) {
         AppLogger.w('[AUTH] Refresh failed due to network/server error. Session retained.');
@@ -286,13 +407,14 @@ class DioClient {
       }
 
       if (isTokenRejected) {
-        // A 400 from /auth/refresh means the refresh token we sent was
+        // A 4xx from /auth/refresh means the refresh token we sent was
         // definitively rejected.  BUT this can also be the loser's outcome
         // in a concurrent-refresh race: another isolate refreshed with the
         // SAME refresh token a moment earlier, the server rotated it, and our
         // attempt failed.  Before force-logging-out, check whether the token
         // pair actually changed while we were refreshing — if so, adopt the
         // newer pair and retry instead of destroying the session.
+        AppLogger.w('[AUTH] Refresh token rejected by server ($statusCode) — checking for concurrent-refresh race before logout');
         final adopted = await _adoptNewerTokensIfRefreshed(
           refreshStartTs: refreshStartTs,
           attemptedRefresh: sentRefreshToken ?? '',

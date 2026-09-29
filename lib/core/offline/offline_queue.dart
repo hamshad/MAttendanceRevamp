@@ -52,12 +52,20 @@ class OfflineQueueService {
     ).toList()..sort((a, b) => b.createdAt.compareTo(a.createdAt));
   }
 
-  /// Direction of the most recent NON-FAILED queued punch, or null.
+  /// Direction of the most recent NON-FAILED queued punch **from today**, or null.
   /// Failed punches (retryCount >= max) were never accepted by the server,
-  /// so they must NOT influence timeline alternation.
+  /// so they must NOT influence timeline alternation. Scoped to today because
+  /// attendance alternation (In/Out) resets each day — a stale pending punch
+  /// from a previous day (e.g. queued during a network outage) must never
+  /// block the next day's punch-in.
   String? get lastPendingDirection {
+    final now = DateTime.now();
     final all = _box.values
-        .where((p) => p.retryCount < AppConstants.maxRetryCount)
+        .where((p) =>
+            p.retryCount < AppConstants.maxRetryCount &&
+            p.createdAt.year == now.year &&
+            p.createdAt.month == now.month &&
+            p.createdAt.day == now.day)
         .toList()
       ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return all.isEmpty ? null : all.first.direction;

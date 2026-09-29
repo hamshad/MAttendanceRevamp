@@ -17,6 +17,7 @@ import '../../../core/offline/offline_sync_manager.dart';
 import '../../../core/punch/punch_coordinator.dart';
 import '../../../core/utils/constants.dart';
 import '../../../core/utils/geo_bands.dart';
+import '../../../core/utils/mock_location.dart';
 import '../../../models/client_site.dart';
 import '../../../models/office.dart';
 import '../../../models/offline_punch.dart';
@@ -1103,14 +1104,23 @@ class GeofencePunchHandler {
   }
 
   /// Fresh high-accuracy fix with a short timeout.
+  /// Returns null if the fix is mocked/spoofed.
   Future<geo.Position?> _freshFix() async {
     try {
-      return await geo.Geolocator.getCurrentPosition(
+      final position = await geo.Geolocator.getCurrentPosition(
         locationSettings: const geo.LocationSettings(
           accuracy: geo.LocationAccuracy.high,
           timeLimit: Duration(seconds: 10),
         ),
       );
+
+      // Mock location detection — reject spoofed fixes
+      if (MockLocationDetector.isMocked(position)) {
+        debugPrint('[GF_MON] Mock location detected in fresh fix — rejecting');
+        return null;
+      }
+
+      return position;
     } catch (e) {
       debugPrint('[GF_MON] Fresh fix unavailable: $e');
       return null;
@@ -1122,13 +1132,18 @@ class GeofencePunchHandler {
   /// triggers a fresh fix).  Falls back to a fresh high-accuracy fix when
   /// the cache is missing or older than [_lastKnownMaxAge]: a stale cached
   /// fix can fabricate an office visit (yesterday's fix at the office must
-  /// not punch today's IN).
+  /// not punch today's IN).  Rejects mocked fixes.
   Future<geo.Position?> _lastKnownOrFreshFix() async {
     try {
       final last = await geo.Geolocator.getLastKnownPosition();
       if (last != null) {
         final age = DateTime.now().toUtc().difference(last.timestamp.toUtc());
         if (age <= _lastKnownMaxAge) {
+          // Check cached position for mock
+          if (MockLocationDetector.isMocked(last)) {
+            debugPrint('[GF_MON] Mock location in cached position — rejecting');
+            return _freshFix();
+          }
           debugPrint('[GF_MON] Cached position reused (age ${age.inSeconds}s)');
           return last;
         }

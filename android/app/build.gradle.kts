@@ -30,11 +30,32 @@ android {
     }
 
     signingConfigs {
-        create("release") {
-            keyAlias = "androiddebugkey"
+        getByName("debug") {
+            keyAlias = "mattendance"
             keyPassword = "android"
-            storeFile = file("${System.getProperty("user.home")}/.android/debug.keystore")
+            storeFile = file("${System.getProperty("user.home")}/.android/mattendance_debug.keystore")
             storePassword = "android"
+        }
+        create("release") {
+            if (keystoreProperties.containsKey("storeFile")) {
+                // Passwords NEVER live in this repo. Env vars win; key.properties
+                // holds placeholders only (safe to push). CI/local builds export:
+                // MATTENDANCE_STORE_PASSWORD / MATTENDANCE_KEY_PASSWORD
+                val storePass = System.getenv("MATTENDANCE_STORE_PASSWORD")
+                    ?: keystoreProperties["storePassword"] as String
+                val keyPass = System.getenv("MATTENDANCE_KEY_PASSWORD")
+                    ?: keystoreProperties["keyPassword"] as String
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keyPass
+                storeFile = rootProject.file(keystoreProperties["storeFile"] as String)
+                storePassword = storePass
+            } else {
+                // Fallback to debug keystore when key.properties is absent (local dev only).
+                keyAlias = "mattendance"
+                keyPassword = "android"
+                storeFile = file("${System.getProperty("user.home")}/.android/mattendance_debug.keystore")
+                storePassword = "android"
+            }
         }
     }
 
@@ -47,6 +68,9 @@ android {
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:flutter/services.dart';
 import '../../models/auth_response.dart';
 import '../../models/user.dart';
 import '../api/api_endpoints.dart';
@@ -184,16 +185,41 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
     AppLogger.i('AUTH: Google login attempt');
     state = await AsyncValue.guard(() async {
       final googleSignIn = GoogleSignIn(
-        serverClientId: AppConstants.googleClientId,
         scopes: ['email', 'profile'],
       );
-      final googleUser = await googleSignIn.signIn();
+
+      AppLogger.d('AUTH: googleClientId = ${AppConstants.googleClientId}');
+      GoogleSignInAccount? googleUser;
+      try {
+        googleUser = await googleSignIn.signIn();
+        AppLogger.d('AUTH: signIn() returned — user is ${googleUser?.email ?? "NULL (cancelled)"}');
+      } on PlatformException catch (e, st) {
+        AppLogger.e(
+          'AUTH: signIn() PlatformException — code: ${e.code}, message: ${e.message}, details: ${e.details}',
+          e,
+          st,
+        );
+        rethrow;
+      }
+
       if (googleUser == null) {
         AppLogger.w('AUTH: Google login cancelled by user');
         throw Exception('Google sign-in was cancelled');
       }
 
-      final googleAuth = await googleUser.authentication;
+      GoogleSignInAuthentication googleAuth;
+      try {
+        googleAuth = await googleUser.authentication;
+        AppLogger.d('AUTH: authentication() ok — idToken present: ${googleAuth.idToken != null}');
+      } on PlatformException catch (e, st) {
+        AppLogger.e(
+          'AUTH: authentication() PlatformException — code: ${e.code}, message: ${e.message}, details: ${e.details}',
+          e,
+          st,
+        );
+        rethrow;
+      }
+
       if (googleAuth.idToken == null) throw Exception('Failed to get Google ID token');
 
       AppLogger.d('AUTH: Exchanging Google ID Token for session');

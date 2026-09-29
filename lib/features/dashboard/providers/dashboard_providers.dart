@@ -292,15 +292,17 @@ class PunchNotifier extends AsyncNotifier<void> {
       lng = loc.longitude;
     }
 
-    // ── Alternation guard ───────────────────────────────────────────────
-    // If the most recent queued (non-failed) punch is the same direction,
-    // don't enqueue a duplicate — the server alternates In/Out.
+    // ── Alternation guard (today-scoped) ─────────────────────────────────
+    // If today's most recent queued (non-failed) punch is the same direction,
+    // don't enqueue a duplicate — the server alternates In/Out. This is
+    // idempotent success, NOT a failure: the punch is already saved and will
+    // sync, so the user must never be blockaded by this message.
     final direction = extras?['direction'] as String? ?? 'In';
     if (queue.lastPendingDirection == direction) {
       state = const AsyncData(null);
       return PunchResult(
-        success: false,
-        message: 'A $direction punch is already queued — waiting to sync',
+        success: true,
+        message: 'A $direction punch is already saved — waiting to sync',
       );
     }
 
